@@ -1,0 +1,25 @@
+[package]
+name = "harmony-core"
+version = "0.1.0"
+edition = "2021"
+description = "harmony Phase 1 core: store, repo registry, worktree manager, hook server, PTY session manager (headless)."
+
+[lib]
+name = "harmony_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "harmony"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = "0.7"
+portable-pty = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.28"
+reqwest = { version = "0.12", features = ["json"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "macros"] }

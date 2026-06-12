@@ -77,31 +77,74 @@ north star. Decide this before Phase 3.
 
 ---
 
-## Phase 1 — Core engine (headless, no UI)
-Build and unit/integration-test the Rust core behind a thin CLI or tests.
-- [ ] **Store**: SQLite schema — `tickets`, `repos`, `worktrees`, `sessions`, `settings`.
-      Cardinality: ticket 1→N worktrees (default 1), worktree 1→1 branch, worktree 1→N
-      sessions (resumes).
-- [ ] **Repo registry**: register/list local repos; remember default repo per Jira project key.
-- [ ] **Worktree manager**: create off fresh default branch at
+## Phase 1 — Core engine (headless, no UI)  — SCAFFOLDED ✅ (crate `core/`, builds + CRUD smoke-tested)
+The Rust core behind a `harmony` CLI. Lives in `core/` (workspace member).
+- [x] **Store** (`core/src/store.rs`): SQLite schema — `repos`, `tickets`, `worktrees`,
+      `sessions`, `settings`; runtime sqlx queries (no DATABASE_URL needed at build).
+      Cardinality: ticket 1→N worktrees (default 1, `is_alternate` for attempts),
+      worktree 1→N sessions (resumes).
+- [x] **Repo registry** (in store): register/list; `default_project_key` → default repo per
+      Jira project key.
+- [x] **Worktree manager** (`core/src/worktree.rs`): create off fresh default branch at
       `~/.harmony/worktrees/<repo>/<branch>`, branch `harmony/<KEY|local-id>-<slug>`;
-      list; remove. "Alternate attempt" = second worktree for same ticket.
-- [ ] **Hook server** (`axum`): localhost, per-session shared-secret token; routes
-      hook events → session state machine (Working/Waiting/Error/Done).
-- [ ] **Settings injector**: write per-worktree `.claude/settings.json` with hook URLs+token.
-- [ ] **Session manager**: spawn `claude` in PTY (cwd=worktree); first prompt = rendered
-      spec template; resume via `--resume`; autonomy = elevated `--permission-mode`.
-- [ ] **Transcript tailer**: tail JSONL → progress/state corroboration.
+      `create`/`remove`; reuse-or-create logic in the session manager.
+- [x] **Hook server** (`core/src/hooks.rs`, `axum`): localhost; routes hook events,
+      **correlates by `cwd`→worktree→session**, updates session + ticket state
+      (Working/Waiting). Uses `tool_name` (Phase 0 finding). Supervised: returns no
+      decision yet (autonomy = return `permissionDecision:allow`).
+- [x] **Settings injector** (`core/src/settings.rs`): **merges** hooks into per-worktree
+      `.claude/settings.local.json` (NOT `settings.json` — that's tracked; see finding).
+      Idempotent; preserves repo + Claude-local entries.
+- [x] **Session manager** (`core/src/session.rs`): spawn `claude` in PTY (cwd=worktree);
+      first prompt = rendered spec; resume via `--resume`; returns a handle exposing the
+      PTY master. Session-end = child process exit.
+- [x] **CLI** (`core/src/main.rs`): `repo add/list`, `ticket add/list`, `start`, `serve`.
 
-## Phase 2 — Integrations
-- [ ] **Jira client**: Cloud REST v3; auth via keychain (email+token). Read
-      assignee=currentUser() open issues → tickets. Writeback (opt-in, toggle each):
-      transition (start→In Progress, PR→In Review) + PR-link comment. **Discover valid
-      transition IDs per issue** (don't hardcode names).
-- [ ] **PR/gh**: push branch; `gh pr create --draft` with body from spec + optional
-      Claude-generated summary; capture PR URL → feed Jira writeback + board.
-- [ ] **Spec "Draft from Jira"**: one-shot `claude -p` over Jira description (+ bounded,
-      optional repo scan) → editable first-pass spec.
+Deferred within Phase 1 (do alongside the UI / as needed):
+- [ ] **Transcript tailer**: tail session JSONL → richer in-session progress.
+- [ ] **Hook auth token** (shared secret in the injected settings; localhost-bind is the
+      boundary for now) — Phase 4 hardening.
+- [ ] **Structured spec fields** (acceptance criteria / paths / constraints as columns) —
+      add when the UI editor lands; currently one `spec` markdown blob.
+- [ ] Unit/integration tests around store + worktree + cwd-correlation.
+
+**Try it:**
+```bash
+cargo build -p harmony-core
+target/debug/harmony repo add <name> <path-to-a-git-repo> --project PROJ
+target/debug/harmony ticket add --title "…" --key PROJ-1 --spec "…" --repo <name>
+target/debug/harmony ticket list
+target/debug/harmony start <ticket_id>   # creates worktree, injects hooks, spawns claude
+```
+
+## Phase 2 — Integrations  — SCAFFOLDED ✅ (builds + CLI/error paths smoke-tested; live calls untested)
+- [x] **Jira client** (`core/src/jira.rs`): Cloud REST v3, Basic auth (email + token).
+      `POST /rest/api/3/search/jql` (the post-2025 endpoint) for `assignee=currentUser()
+      AND statusCategory != Done`. ADF→text on read, minimal ADF on write. Writeback:
+      `transition()` **discovers valid transitions per issue** (matches dest/transition
+      name) + `add_comment()`. Wired: start→In Progress (best-effort, `--no-jira` to skip),
+      PR→In Review + PR-link comment (`pr`, `--no-writeback` to skip).
+- [x] **PR/gh** (`core/src/github.rs`): `push_branch` + `gh pr create --draft`
+      (body from spec), capture PR URL → ticket → In Review + Jira writeback.
+- [x] **Draft from Jira** (`core/src/draft.rs`): one-shot `claude -p` over the Jira
+      summary+description → editable spec; saved to `ticket.spec` (promotes → ready).
+- [x] **CLI**: `jira config`, `jira sync`, `draft <id>`, `pr <id>`.
+
+Deferred within Phase 2:
+- [ ] **Token in keychain** (currently `JIRA_API_TOKEN` env; base URL + email in `settings`) — Phase 4.
+- [ ] **Pagination** beyond the first 50 issues (`nextPageToken`).
+- [ ] **Claude-generated PR summary** in the body (currently the spec); **repo-aware** Draft.
+- [ ] Tests / live-call validation against real Jira + `gh`.
+
+**Try the full vertical (real Jira + GitHub):**
+```bash
+export JIRA_API_TOKEN=…                       # from id.atlassian.com → API tokens
+harmony jira config --base-url https://<you>.atlassian.net --email <you>
+harmony jira sync                             # assigned-to-me issues → board
+harmony draft <ticket_id>                     # spec drafted from the Jira issue
+harmony start <ticket_id>                     # → In Progress; worktree + live claude
+harmony pr <ticket_id>                        # push + draft PR; → In Review + PR comment
+```
 
 ## Phase 3 — Desktop UI (Tauri + frontend)
 - [ ] **Board**: native lifecycle columns Available → Ready → Working → Waiting →

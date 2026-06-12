@@ -86,8 +86,19 @@ Tauri desktop app (single process)
    allow/deny control. Implication: the v2 **triage UI is feasible now**, not just the v1
    notify path. Note: `PermissionRequest` does not fire separately once `PreToolUse` decides
    — key off `PreToolUse`.
-3. **Hook injection**: harmony must reliably write hook config into each worktree's
-   `.claude/settings.json` (or pass `--settings`) with a stable local port + shared secret.
+3. **Hook injection** — **resolved (Phase 1, 2026-06-11)**: write to
+   `.claude/settings.local.json`, NOT `settings.json`. The repo's `settings.json` is
+   usually tracked and holds the team's safety hooks; overwriting it clobbers them and
+   creates a spurious diff the agent flags (observed). `settings.local.json` is gitignored
+   and its hooks merge additively, so the repo's hooks stay active and ours fire too.
+   harmony merges idempotently (replacing only its own entries). `--settings <path>` is a
+   viable alternative (cmd-line tier, merges) if we later want zero worktree files.
+4. **MCP / folder-trust startup prompts** (autonomy blocker): launching in a repo with a
+   `.mcp.json` or a never-trusted worktree shows interactive prompts that would hang an
+   *unattended* session. No documented setting pre-approves these for interactive mode.
+   Supervised mode: user answers once per worktree (trust + MCP choices persist on disk).
+   For autonomy: bypass MCP via `--strict-mcp-config` and bootstrap folder-trust once.
+   Deferred with the autonomy work.
 4. **Resume fidelity**: terminal scrollback rebuilt from JSONL is an approximation of the
    live TUI; acceptable, not pixel-identical.
 5. **Jira transitions**: status names/IDs vary per project workflow — writeback must
