@@ -87,7 +87,9 @@ The Rust core behind a `harmony` CLI. Lives in `core/` (workspace member).
       Jira project key.
 - [x] **Worktree manager** (`core/src/worktree.rs`): create off fresh default branch at
       `~/.harmony/worktrees/<repo>/<branch>`, branch `harmony/<KEY|local-id>-<slug>`;
-      `create`/`remove`; reuse-or-create logic in the session manager.
+      `create`/`remove`; reuse-or-create logic in the session manager. `create` prunes
+      stale registrations and **reuses an existing branch** (so re-entering In Progress
+      after a Done cleanup works — the branch/PR was kept).
 - [x] **Hook server** (`core/src/hooks.rs`, `axum`): localhost; routes hook events,
       **correlates by `cwd`→worktree→session**, updates session + ticket state
       (Working/Waiting). Uses `tool_name` (Phase 0 finding). Supervised: returns no
@@ -118,12 +120,20 @@ target/debug/harmony start <ticket_id>   # creates worktree, injects hooks, spaw
 ```
 
 ## Phase 2 — Integrations  — SCAFFOLDED ✅ (builds + CLI/error paths smoke-tested; live calls untested)
-- [x] **Jira client** (`core/src/jira.rs`): Cloud REST v3, Basic auth (email + token).
-      `POST /rest/api/3/search/jql` (the post-2025 endpoint) for `assignee=currentUser()
-      AND statusCategory != Done`. ADF→text on read, minimal ADF on write. Writeback:
-      `transition()` **discovers valid transitions per issue** (matches dest/transition
-      name) + `add_comment()`. Wired: start→In Progress (best-effort, `--no-jira` to skip),
-      PR→In Review + PR-link comment (`pr`, `--no-writeback` to skip).
+- [x] **Jira via `acli`** (`core/src/jira.rs`): shell-outs to the official Atlassian CLI
+      (like `gh`). `search_assigned` (JQL), `get_issue`, `transition`, `add_comment`;
+      defensive JSON parsing (acli's `--json` schema isn't documented — verify mapping on
+      first real run). Auth is acli's own (`acli jira auth login`); harmony stores no Jira
+      creds. **Board columns drive Jira**: moving a Jira-linked ticket to Todo/In Progress/
+      In PR Review/Done transitions the issue if that status exists in its workflow
+      (`jira_apply_column` → `transition_to_any`, best-effort); PR open posts the PR-link
+      comment. CLI: `jira login`/`logout`/`status`/`sync`. App: status/logout +
+      a Connect panel that points to `acli jira auth login` and re-checks.
+      _(Replaced the earlier OAuth-REST + keychain approach — see DESIGN.)_
+- [x] **acli install affordance**: `cli_installed()` detection (PATH-augmented for macOS
+      GUI apps that omit `/opt/homebrew/bin`) + `install_via_brew()`. CLI: `harmony jira
+      install`. App: Connect panel detects "not installed" → shows brew commands + an
+      "Install with Homebrew" button + manual-install link.
 - [x] **PR/gh** (`core/src/github.rs`): `push_branch` + `gh pr create --draft`
       (body from spec), capture PR URL → ticket → In Review + Jira writeback.
 - [x] **Draft from Jira** (`core/src/draft.rs`): one-shot `claude -p` over the Jira
@@ -131,32 +141,82 @@ target/debug/harmony start <ticket_id>   # creates worktree, injects hooks, spaw
 - [x] **CLI**: `jira config`, `jira sync`, `draft <id>`, `pr <id>`.
 
 Deferred within Phase 2:
-- [ ] **Token in keychain** (currently `JIRA_API_TOKEN` env; base URL + email in `settings`) — Phase 4.
-- [ ] **Pagination** beyond the first 50 issues (`nextPageToken`).
+- [x] ~~Auth / token storage~~ — handled entirely by `acli` (no creds in harmony).
+- [ ] **Verify acli `--json` field mapping** on a real run; tighten `parse_issues`.
+- [ ] **Pagination** beyond the first 50 issues (acli `--paginate`).
 - [ ] **Claude-generated PR summary** in the body (currently the spec); **repo-aware** Draft.
 - [ ] Tests / live-call validation against real Jira + `gh`.
 
 **Try the full vertical (real Jira + GitHub):**
 ```bash
-export JIRA_API_TOKEN=…                       # from id.atlassian.com → API tokens
-harmony jira config --base-url https://<you>.atlassian.net --email <you>
+harmony jira install                          # brew tap+install acli (or do it manually)
+acli jira auth login                          # browser login (no API key / app reg)
+# (or: harmony jira login  — passthrough to the same)
 harmony jira sync                             # assigned-to-me issues → board
 harmony draft <ticket_id>                     # spec drafted from the Jira issue
 harmony start <ticket_id>                     # → In Progress; worktree + live claude
 harmony pr <ticket_id>                        # push + draft PR; → In Review + PR comment
 ```
 
-## Phase 3 — Desktop UI (Tauri + frontend)
-- [ ] **Board**: native lifecycle columns Available → Ready → Working → Waiting →
-      In Review → Done; Working/Waiting live from hook state.
-- [ ] **Ticket detail + spec editor**: markdown body + fields (acceptance criteria,
-      relevant paths, constraints); "Draft from Jira" button; repo picker (defaulted).
-- [ ] **Embedded terminal**: xterm.js bound to the session PTY; resize/ANSI handling.
-- [ ] **Attention**: card badges from hooks + OS notification when a backgrounded session
-      starts Waiting; click → focus its terminal.
-- [ ] **Diff / PR pane**: show worktree diff; PR status + link.
-- [ ] **Resume-on-relaunch**: on startup, re-resume each active ticket's session and
-      rebuild its terminal view from transcript.
+## Phase 3 — Desktop UI (Tauri + React/TS)  — SCAFFOLDED ✅ (frontend + backend both build)
+App lives in `app/` (frontend) + `app/src-tauri/` (Tauri 2 backend, workspace member).
+- [x] **Backend bridge** (`app/src-tauri/src/lib.rs`): Tauri commands wrapping the core
+      (list/get tickets+repos, add local ticket, set spec, jira sync/configured, draft,
+      open PR, start session, send_input, resize). **PTY↔event bridge**: PTY output →
+      `term-output` events; keystrokes → `send_input`; `session-exit` event on exit. Hook
+      server started in `setup`.
+- [x] **Board** (`app/src/components/Board.tsx`): columns Todo → In Progress → For Your
+      Review → In PR Review → Done (new tickets land in Todo). **Drag-and-drop** between
+      columns (`set_ticket_status`, optimistic); dropping into **In Progress auto-opens a
+      live Claude session**, dropping **out of In Progress stops** any live session, and
+      dropping into **Done removes the ticket's worktree(s)** (branch/PR untouched). Polls
+      every 1.5s for live state.
+- [x] **Ticket detail + spec editor** (`App.tsx`): spec textarea, "Draft from Jira",
+      Save spec, Start session, Open PR; top-bar Sync.
+- [x] **New (local) ticket** (`App.tsx`): top-bar "+ New ticket" → title + optional spec +
+      optional repo → `add_local_ticket`. (CLI: `harmony ticket add --title … [--spec …]
+      [--repo …]`, no `--key` = local.)
+- [x] **Sessions view** (`app/src/components/Sessions.tsx`): Board/Sessions nav toggle;
+      table of all sessions (ticket, state, last tool, branch, started/ended, claude id),
+      live badge, click-a-row → opens its ticket. **"Clear ended (N)"** bulk button + per-row
+      delete (ended only). Backend `list_sessions`, `clear_ended_sessions`, `delete_session`.
+      CLI: `harmony sessions`, `harmony sessions --clear-ended`.
+- [x] **Worktrees view** (`app/src/components/Worktrees.tsx`): Board/Sessions/Worktrees
+      nav; table (ticket, repo, branch, path, created); per-row **delete** (disabled while
+      a session is live for that ticket) → `git worktree remove` + drop row/sessions.
+      Backend `list_worktrees`, `delete_worktree`. CLI: `harmony worktrees [--delete <id>]`.
+- [x] **Embedded terminal** (`Terminal.tsx`): xterm.js + fit addon bound to the session
+      PTY over Tauri events; resize + auto-focus. **Live, steerable, per ticket** — live
+      sessions tracked in a `ticketId → sessionId` map so several can run at once and each
+      ticket shows its own terminal; "Open terminal" starts/resumes; clicking a live row
+      on the Sessions page attaches; **"Stop session"** kills the process (`clone_killer`).
+      Live state is the **backend session map** (`live_sessions` cmd), so it survives
+      webview reloads and never spawns duplicates; open sessions are reconciled to ended
+      on startup (`end_all_open_sessions`) so dead-process zombies don't linger as "live".
+      (Requires `dragDropEnabled:false` — also needed for DnD.)
+- [x] Builds: `npm run build` (frontend) ✅ and `cargo build -p harmony-app` ✅.
+
+Deferred within Phase 3 (next iterations):
+- [x] **Attention**: OS notification (`tauri-plugin-notification`) fires when a live session
+      enters "waiting" (Claude wants input); clicking it focuses the app and opens that
+      ticket. Edge-triggered (only on entry into waiting), seeded on first poll to avoid
+      launch spam.
+- [ ] **Diff / PR pane**: render the worktree diff + PR check status in-app.
+- [x] **Settings page** (`app/src/components/Settings.tsx`): list/add/**rename**/remove repos.
+      Add uses the dialog plugin's **folder picker**; optional default Jira project key.
+      Rename is click-to-edit inline. Remove is guarded (refuses if the repo still has
+      worktrees) and clears the binding on its tickets. Backend `add_repo`/`rename_repo`/
+      `delete_repo`; CLI: `harmony repo add/list/rename`.
+- [ ] **Resume-on-relaunch UI**: core already `--resume`s; rebuild terminal scrollback from transcript.
+- [ ] Move terminal output to base64 (currently UTF-8 lossy) for binary-safe streams.
+
+**Run it:**
+```bash
+cd app && npm install            # once
+export JIRA_API_TOKEN=…          # optional, for Sync/Draft
+npm run tauri dev                # launches the desktop window (vite + Tauri)
+```
+Uses the same `~/.harmony/harmony.db` and hook server (:8787) as the CLI.
 
 ## Phase 4 — Polish / hardening
 - [ ] Soft "N running" concurrency indicator (no hard cap).

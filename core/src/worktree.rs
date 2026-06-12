@@ -62,20 +62,40 @@ pub fn worktree_path(repo_name: &str, branch: &str) -> PathBuf {
     worktree_root().join(repo_name).join(branch.replace('/', "__"))
 }
 
-/// Create a fresh worktree + branch off `base`, fetching first (best-effort).
+/// Create a worktree for `branch`, fetching first (best-effort). Creates the branch off
+/// `base` if it doesn't exist yet, or reuses it if it does (e.g. the worktree was deleted
+/// on Done but the branch — possibly with an open PR — was kept).
 pub fn create(repo: &str, base: &str, branch: &str, dest: &Path) -> Result<()> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let _ = git(repo, &["fetch", "--quiet"]);
-    git(
-        repo,
-        &["worktree", "add", "-b", branch, &dest.to_string_lossy(), base],
-    )?;
+    // Clean up any stale worktree registration pointing at a since-removed dir.
+    let _ = git(repo, &["worktree", "prune"]);
+
+    let branch_exists = git(repo, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_ok();
+    let dest = dest.to_string_lossy();
+    if branch_exists {
+        git(repo, &["worktree", "add", &dest, branch])?;
+    } else {
+        git(repo, &["worktree", "add", "-b", branch, &dest, base])?;
+    }
     Ok(())
 }
 
 pub fn remove(repo: &str, dest: &Path) -> Result<()> {
     git(repo, &["worktree", "remove", &dest.to_string_lossy(), "--force"])?;
     Ok(())
+}
+
+/// Best-effort removal of all git worktrees for a ticket (used before deleting it).
+/// Errors (e.g. a dirty or in-use worktree) are ignored.
+pub async fn cleanup_for_ticket(store: &crate::store::Store, ticket_id: i64) {
+    if let Ok(worktrees) = store.worktrees_for_ticket(ticket_id).await {
+        for wt in worktrees {
+            if let Ok(Some(repo)) = store.get_repo(wt.repo_id).await {
+                let _ = remove(&repo.path, Path::new(&wt.path));
+            }
+        }
+    }
 }

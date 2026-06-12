@@ -27,10 +27,23 @@ pub fn now_unix() -> i64 {
 
 /// Ticket lifecycle states — the harmony-native board columns (DESIGN Q14).
 pub mod status {
-    pub const AVAILABLE: &str = "available";
-    pub const READY: &str = "ready";
-    pub const WORKING: &str = "working";
-    pub const WAITING: &str = "waiting";
-    pub const IN_REVIEW: &str = "in_review";
+    /// Default landing column for new tickets (displayed as "Todo").
+    pub const TODO: &str = "todo";
+    pub const WORKING: &str = "working"; // "In Progress"
+    pub const WAITING: &str = "waiting"; // "For Your Review"
+    pub const IN_REVIEW: &str = "in_review"; // "In PR Review"
     pub const DONE: &str = "done";
+
+    /// The board columns, in order, with display labels.
+    pub const COLUMNS: [(&str, &str); 5] = [
+        (TODO, "Todo"),
+        (WORKING, "In Progress"),
+        (WAITING, "For Your Review"),
+        (IN_REVIEW, "In PR Review"),
+        (DONE, "Done"),
+    ];
+
+    pub fn is_valid(s: &str) -> bool {
+        COLUMNS.iter().any(|(k, _)| *k == s)
+    }
 }

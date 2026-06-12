@@ -1,3 +1,3 @@
 [workspace]
 resolver = "2"
-members = ["spike", "core"]
+members = ["spike", "core", "app/src-tauri"]

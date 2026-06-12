@@ -1,14 +1,14 @@
-//! Jira Cloud REST v3 client (DESIGN Q6/Q7).
+//! Jira via the official Atlassian CLI (`acli`) — shell-outs, the same pattern as `gh`
+//! for GitHub. acli owns auth (`acli jira auth login`: browser, no app registration, no
+//! API key), so harmony stores no Jira credentials of its own.
 //!
-//! Read: assigned-to-me issues via the current `POST /rest/api/3/search/jql` endpoint
-//! (the old `/search` was removed in 2025). Write (opt-in, minimal): transition status
-//! and post a comment. Auth is Basic (email + API token).
-//!
-//! Descriptions and comments use Atlassian Document Format (ADF); we extract plain text
-//! from ADF on read and build a minimal ADF doc on write.
+//! NOTE: acli's `--json` schema is not documented. `parse_issues` is intentionally
+//! defensive (array or wrapped object; flat or nested fields). Verify the field mapping
+//! once against real `acli jira workitem search --json` output and tighten if needed.
 
 use anyhow::{anyhow, Result};
-use serde_json::{json, Value};
+use serde_json::Value;
+use tokio::process::Command;
 
 pub struct JiraIssue {
     pub key: String,
@@ -17,151 +17,254 @@ pub struct JiraIssue {
     pub status: String,
 }
 
-pub struct JiraClient {
-    base_url: String,
-    email: String,
-    token: String,
-    http: reqwest::Client,
+/// PATH augmented with common Homebrew bin dirs. macOS GUI apps (a bundled Tauri app
+/// launched from Finder) inherit a minimal PATH that omits `/opt/homebrew/bin` and
+/// `/usr/local/bin`, so `acli`/`brew` wouldn't be found even when installed. Prepending
+/// them fixes detection in both `tauri dev` and a packaged app.
+fn bin_path() -> String {
+    let mut path = std::env::var("PATH").unwrap_or_default();
+    for extra in ["/opt/homebrew/bin", "/usr/local/bin"] {
+        if !path.split(':').any(|d| d == extra) {
+            if !path.is_empty() {
+                path.push(':');
+            }
+            path.push_str(extra);
+        }
+    }
+    path
 }
 
-impl JiraClient {
-    pub fn new(base_url: &str, email: &str, token: &str) -> Self {
-        Self {
-            base_url: base_url.trim_end_matches('/').to_string(),
-            email: email.to_string(),
-            token: token.to_string(),
-            http: reqwest::Client::new(),
-        }
+async fn acli(args: &[&str]) -> Result<String> {
+    let out = Command::new("acli")
+        .args(args)
+        .env("PATH", bin_path())
+        .output()
+        .await
+        .map_err(|e| anyhow!(
+            "the Atlassian CLI (acli) isn't installed ({e}). Install it: \
+             `brew tap atlassian/homebrew-acli && brew install acli` \
+             (or run `harmony jira install`, or see https://developer.atlassian.com/cloud/acli/guides/install-macos/)"
+        ))?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "acli {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
 
-    fn url(&self, path: &str) -> String {
-        format!("{}/rest/api/3/{}", self.base_url, path.trim_start_matches('/'))
+/// Whether `acli` is installed and runnable.
+pub fn cli_installed() -> bool {
+    std::process::Command::new("acli")
+        .arg("--version")
+        .env("PATH", bin_path())
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Best-effort install via Homebrew (macOS). Returns the installed version string.
+/// Errors with manual-install guidance if Homebrew isn't present.
+pub fn install_via_brew() -> Result<String> {
+    let brew_ok = std::process::Command::new("brew")
+        .arg("--version")
+        .env("PATH", bin_path())
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !brew_ok {
+        return Err(anyhow!(
+            "Homebrew not found. Install acli manually: https://developer.atlassian.com/cloud/acli/guides/install-macos/"
+        ));
     }
-
-    /// Issues assigned to the current user, not done. First page (≤50); pagination via
-    /// `nextPageToken` is a follow-up.
-    pub async fn search_assigned(&self) -> Result<Vec<JiraIssue>> {
-        let body = json!({
-            "jql": "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC",
-            "fields": ["summary", "description", "status"],
-            "maxResults": 50,
-            "nextPageToken": Value::Null
-        });
-        let resp = self
-            .http
-            .post(self.url("search/jql"))
-            .basic_auth(&self.email, Some(&self.token))
-            .json(&body)
-            .send()
-            .await?;
-        let status = resp.status();
-        let v: Value = resp.json().await?;
-        if !status.is_success() {
-            return Err(anyhow!("jira search failed ({status}): {v}"));
-        }
-        let mut out = Vec::new();
-        if let Some(issues) = v.get("issues").and_then(|x| x.as_array()) {
-            for it in issues {
-                out.push(issue_from_json(
-                    it.get("key").and_then(|x| x.as_str()).unwrap_or(""),
-                    it.get("fields").unwrap_or(&Value::Null),
-                ));
-            }
-        }
-        Ok(out)
-    }
-
-    pub async fn get_issue(&self, key: &str) -> Result<JiraIssue> {
-        let resp = self
-            .http
-            .get(self.url(&format!("issue/{key}?fields=summary,description,status")))
-            .basic_auth(&self.email, Some(&self.token))
-            .send()
-            .await?;
-        let status = resp.status();
-        let v: Value = resp.json().await?;
-        if !status.is_success() {
-            return Err(anyhow!("get issue {key} failed ({status}): {v}"));
-        }
-        Ok(issue_from_json(key, v.get("fields").unwrap_or(&Value::Null)))
-    }
-
-    /// Post a plain-text comment (wrapped in minimal ADF).
-    pub async fn add_comment(&self, key: &str, text: &str) -> Result<()> {
-        let resp = self
-            .http
-            .post(self.url(&format!("issue/{key}/comment")))
-            .basic_auth(&self.email, Some(&self.token))
-            .json(&json!({ "body": adf_doc(text) }))
-            .send()
-            .await?;
-        if !resp.status().is_success() {
-            let s = resp.status();
-            let t = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("comment on {key} failed ({s}): {t}"));
+    let brew = |args: &[&str]| -> Result<()> {
+        let out = std::process::Command::new("brew")
+            .args(args)
+            .env("PATH", bin_path())
+            .output()?;
+        if !out.status.success() {
+            return Err(anyhow!("brew {:?} failed: {}", args, String::from_utf8_lossy(&out.stderr).trim()));
         }
         Ok(())
-    }
+    };
+    brew(&["tap", "atlassian/homebrew-acli"])?;
+    brew(&["install", "acli"])?;
+    let v = std::process::Command::new("acli")
+        .arg("--version")
+        .env("PATH", bin_path())
+        .output()?;
+    Ok(String::from_utf8_lossy(&v.stdout).trim().to_string())
+}
 
-    /// Transition an issue to a target status by discovering valid transitions per issue
-    /// (workflows vary), matching on the destination status name or the transition name.
-    pub async fn transition(&self, key: &str, target_status: &str) -> Result<()> {
-        let resp = self
-            .http
-            .get(self.url(&format!("issue/{key}/transitions")))
-            .basic_auth(&self.email, Some(&self.token))
-            .send()
-            .await?;
-        let v: Value = resp.json().await?;
-        let target = target_status.to_lowercase();
-        let mut id = None;
-        if let Some(ts) = v.get("transitions").and_then(|x| x.as_array()) {
-            for t in ts {
-                let to_name = t
-                    .get("to")
-                    .and_then(|x| x.get("name"))
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("")
-                    .to_lowercase();
-                let t_name = t.get("name").and_then(|x| x.as_str()).unwrap_or("").to_lowercase();
-                if to_name == target || t_name == target {
-                    id = t.get("id").and_then(|x| x.as_str()).map(String::from);
+// ---- auth ----------------------------------------------------------------
+
+/// Interactive login (browser + terminal site picker). CLI-only — needs a real terminal,
+/// so the desktop app instructs the user to run this instead of driving it.
+pub fn login_passthrough() -> Result<()> {
+    let status = std::process::Command::new("acli")
+        .args(["jira", "auth", "login"])
+        .env("PATH", bin_path())
+        .status()
+        .map_err(|e| anyhow!("failed to run `acli` ({e}); is it installed?"))?;
+    if !status.success() {
+        return Err(anyhow!("acli jira auth login did not complete"));
+    }
+    Ok(())
+}
+
+pub async fn logout() -> Result<()> {
+    let _ = acli(&["jira", "auth", "logout"]).await;
+    Ok(())
+}
+
+/// The connected site (Some = logged in). Best-effort: acli exits 0 when authenticated.
+pub async fn connected_site() -> Option<String> {
+    let out = std::process::Command::new("acli")
+        .args(["jira", "auth", "status"])
+        .env("PATH", bin_path())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    Some(extract_site(&text).unwrap_or_else(|| "connected".to_string()))
+}
+
+fn extract_site(text: &str) -> Option<String> {
+    text.split_whitespace()
+        .map(|t| t.trim_matches(|c: char| !c.is_ascii_graphic() || c == ',' || c == '"'))
+        .find(|t| t.contains(".atlassian.net"))
+        .map(|t| t.trim_start_matches("https://").trim_start_matches("http://").to_string())
+}
+
+// ---- read ----------------------------------------------------------------
+
+pub async fn search_assigned() -> Result<Vec<JiraIssue>> {
+    let json = acli(&[
+        "jira",
+        "workitem",
+        "search",
+        "--jql",
+        "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC",
+        "--fields",
+        "key,summary,status",
+        "--limit",
+        "50",
+        "--json",
+    ])
+    .await?;
+    parse_issues(&json)
+}
+
+pub async fn get_issue(key: &str) -> Result<JiraIssue> {
+    let json = acli(&[
+        "jira",
+        "workitem",
+        "search",
+        "--jql",
+        &format!("key = {key}"),
+        "--fields",
+        "key,summary,status,description",
+        "--json",
+    ])
+    .await?;
+    parse_issues(&json)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("issue {key} not found"))
+}
+
+// ---- write (opt-in) ------------------------------------------------------
+
+pub async fn transition(key: &str, status: &str) -> Result<()> {
+    acli(&["jira", "workitem", "transition", "--key", key, "--status", status]).await?;
+    Ok(())
+}
+
+/// Move the issue to the first status among `candidates` that's a valid transition (acli
+/// rejects invalid ones). Returns whether any applied — i.e. only transitions "if that
+/// status exists in the issue's workflow". Best-effort, used for board-column sync.
+pub async fn transition_to_any(key: &str, candidates: &[&str]) -> Result<bool> {
+    for status in candidates {
+        if acli(&["jira", "workitem", "transition", "--key", key, "--status", status])
+            .await
+            .is_ok()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+pub async fn add_comment(key: &str, body: &str) -> Result<()> {
+    acli(&["jira", "workitem", "comment", "create", "--key", key, "--body", body]).await?;
+    Ok(())
+}
+
+// ---- JSON parsing (defensive) --------------------------------------------
+
+fn parse_issues(json: &str) -> Result<Vec<JiraIssue>> {
+    let v: Value = serde_json::from_str(json.trim())
+        .map_err(|e| anyhow!("could not parse acli JSON ({e}); first 200 chars: {}", &json.chars().take(200).collect::<String>()))?;
+    let arr: Vec<Value> = if let Some(a) = v.as_array() {
+        a.clone()
+    } else {
+        ["workItems", "issues", "results", "values", "data"]
+            .iter()
+            .find_map(|k| v.get(*k).and_then(|x| x.as_array()).cloned())
+            .unwrap_or_default()
+    };
+    Ok(arr.iter().map(item_to_issue).collect())
+}
+
+fn item_to_issue(it: &Value) -> JiraIssue {
+    let key = str_at(it, &[&["key"]]).unwrap_or_default();
+    let summary = str_at(it, &[&["summary"], &["fields", "summary"]]).unwrap_or_default();
+    let status = str_at(it, &[&["status"], &["status", "name"], &["fields", "status", "name"]]).unwrap_or_default();
+    let description = description_text(it);
+    JiraIssue { key, summary, description, status }
+}
+
+/// First non-empty string found at any of the given key paths.
+fn str_at(v: &Value, paths: &[&[&str]]) -> Option<String> {
+    for path in paths {
+        let mut cur = v;
+        let mut ok = true;
+        for k in *path {
+            match cur.get(*k) {
+                Some(next) => cur = next,
+                None => {
+                    ok = false;
                     break;
                 }
             }
         }
-        let id = id.ok_or_else(|| anyhow!("no transition to '{target_status}' available for {key}"))?;
-        let resp = self
-            .http
-            .post(self.url(&format!("issue/{key}/transitions")))
-            .basic_auth(&self.email, Some(&self.token))
-            .json(&json!({ "transition": { "id": id } }))
-            .send()
-            .await?;
-        if !resp.status().is_success() {
-            let s = resp.status();
-            let t = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("transition {key} failed ({s}): {t}"));
+        if ok {
+            if let Some(s) = cur.as_str() {
+                if !s.is_empty() {
+                    return Some(s.to_string());
+                }
+            }
         }
-        Ok(())
+    }
+    None
+}
+
+/// Description may be a plain string or an ADF object; handle both.
+fn description_text(it: &Value) -> String {
+    let node = it
+        .get("description")
+        .or_else(|| it.get("fields").and_then(|f| f.get("description")));
+    match node {
+        Some(Value::String(s)) => s.clone(),
+        Some(v @ Value::Object(_)) | Some(v @ Value::Array(_)) => adf_to_text(v),
+        _ => String::new(),
     }
 }
 
-fn issue_from_json(key: &str, fields: &Value) -> JiraIssue {
-    JiraIssue {
-        key: key.to_string(),
-        summary: fields.get("summary").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-        description: adf_to_text(fields.get("description").unwrap_or(&Value::Null)),
-        status: fields
-            .get("status")
-            .and_then(|s| s.get("name"))
-            .and_then(|x| x.as_str())
-            .unwrap_or("")
-            .to_string(),
-    }
-}
-
-/// Best-effort plain text from an ADF node tree.
 fn adf_to_text(v: &Value) -> String {
     fn walk(v: &Value, out: &mut String) {
         match v {
@@ -194,19 +297,4 @@ fn adf_to_text(v: &Value) -> String {
     let mut s = String::new();
     walk(v, &mut s);
     s.trim().to_string()
-}
-
-/// Wrap plain text (newline-separated paragraphs) into a minimal ADF doc.
-fn adf_doc(text: &str) -> Value {
-    let content: Vec<Value> = text
-        .split('\n')
-        .map(|line| {
-            if line.is_empty() {
-                json!({ "type": "paragraph" })
-            } else {
-                json!({ "type": "paragraph", "content": [{ "type": "text", "text": line }] })
-            }
-        })
-        .collect();
-    json!({ "type": "doc", "version": 1, "content": content })
 }

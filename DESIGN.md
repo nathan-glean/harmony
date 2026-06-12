@@ -20,14 +20,14 @@ sessions), with a richer GUI and a Jira enrichment layer neither has.
 | 4 | Claude driver | **PTY-hosted interactive `claude`** per session (xterm.js), native UX. Status from **HTTP hooks** + tailing the session JSONL. No headless/SDK in the loop |
 | 5 | Ticket model | **Enriched local tickets**, each optionally **linked to a Jira issue**. Local-only work = unlinked ticket. One unified board |
 | 6 | Jira read scope | **Assigned to me** only (no JQL box) |
-| 7 | Jira writeback | **Opt-in minimal**: status transition (start → In Progress, PR → In Review) + post PR link as comment. Each toggleable |
+| 7 | Jira writeback | **Column-driven**: moving a Jira-linked ticket between board columns transitions the issue (Todo / In Progress / In PR Review / Done) **iff that status exists in its workflow** (best-effort, no-op otherwise; "For Your Review" has no Jira equivalent). Plus PR link posted as a comment on PR open |
 | 8 | Repo model | **Multi-repo**; pick target repo at start, default remembered per Jira project key |
 | 9 | Worktree scope | **Per-ticket, reused** across sessions (1 ticket → 1 worktree → 1 branch → 1 PR). "New alternate attempt" forks a second worktree on demand |
 | 10 | Spec authoring | **Light structure + AI draft**: markdown body + optional fields (acceptance criteria, relevant paths, constraints). "Draft from Jira" expands the terse issue into an editable first pass |
 | 11 | Output flow | **Open a draft PR via `gh`** (body from spec + optional Claude summary), link to Jira, show diff in-app. **harmony never merges** — hand off to normal review/CI |
 | 12 | Session persistence | **Resume-on-relaunch**: PTYs are children of harmony; on relaunch resume each via `claude --resume <id>`, rebuild view from transcript. No tmux |
 | 13 | Attention model | **Notify + jump-to-terminal** (v1): card badge + OS notification from hooks; answer in embedded terminal. Native approve/deny **triage UI** is the north-star evolution |
-| 14 | Board model | **harmony-native lifecycle columns**: Available → Ready → Working → Waiting → In Review → Done. Working/Waiting from hooks; In Review/Done from PR+Jira |
+| 14 | Board model | **harmony-native lifecycle columns**: Todo → In Progress (`working`) → For Your Review (`waiting`) → In PR Review (`in_review`) → Done. New tickets land in **Todo**. **Drag-and-drop** moves a ticket (manual override); In Progress/For-Your-Review are also driven live by session hooks, In PR Review/Done by PR+Jira |
 
 ## Architecture
 
@@ -60,8 +60,11 @@ Tauri desktop app (single process)
 5. On finish: push branch, `gh pr create` (draft), transition Jira + comment PR link.
 6. Hand off to normal review. Close harmony anytime → resume later via `--resume`.
 
-## Confirmed environment
-- **Jira Cloud** + email/API-token auth (keychain-stored). _(confirmed)_
+- **Jira Cloud** via the official **Atlassian CLI (`acli`)** — harmony shells out to it
+  (the same pattern as `gh` for GitHub). acli owns auth: `acli jira auth login` is a
+  browser login with **no app registration, no API key, no stored secret in harmony**.
+  _(confirmed; chosen over OAuth-REST and MCP — simpler setup, less code to own. MCP is
+  reserved for the future "agent talks to Jira mid-session" feature.)_
 - **GitHub** + `gh` CLI installed/authed. _(confirmed)_
 - **SQLite** (`sqlx`) for harmony's store. _(confirmed)_
 - **Frontend: React + TypeScript** (Vite) with `xterm.js` for embedded terminals. _(confirmed)_

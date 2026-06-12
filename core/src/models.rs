@@ -53,3 +53,33 @@ pub struct Session {
     pub started_at: i64,
     pub ended_at: Option<i64>,
 }
+
+/// A worktree enriched with its ticket + repo info, for the Worktrees view.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct WorktreeView {
+    pub id: i64,
+    pub ticket_id: i64,
+    pub ticket_title: String,
+    pub jira_key: Option<String>,
+    pub repo_name: String,
+    pub repo_path: String,
+    pub branch: String,
+    pub path: String,
+    pub is_alternate: i64,
+    pub created_at: i64,
+}
+
+/// A session enriched with its ticket + worktree info, for the Sessions view.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct SessionView {
+    pub id: i64,
+    pub ticket_id: i64,
+    pub ticket_title: String,
+    pub jira_key: Option<String>,
+    pub branch: String,
+    pub state: String,
+    pub last_tool: Option<String>,
+    pub claude_session_id: Option<String>,
+    pub started_at: i64,
+    pub ended_at: Option<i64>,
+}

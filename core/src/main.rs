@@ -56,6 +56,17 @@ enum Cmd {
         #[arg(long, default_value_t = 8787)]
         port: u16,
     },
+    /// List all Claude Code sessions harmony has run
+    Sessions {
+        /// Delete all ended sessions instead of listing
+        #[arg(long)]
+        clear_ended: bool,
+    },
+    /// List worktrees, or delete one with --delete <id>
+    Worktrees {
+        #[arg(long)]
+        delete: Option<i64>,
+    },
     /// Jira Cloud integration
     Jira {
         #[command(subcommand)]
@@ -76,13 +87,14 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum JiraCmd {
-    /// Save Jira connection (base URL + email; token via JIRA_API_TOKEN env)
-    Config {
-        #[arg(long)]
-        base_url: String,
-        #[arg(long)]
-        email: String,
-    },
+    /// Install the Atlassian CLI via Homebrew (macOS)
+    Install,
+    /// Log in via the Atlassian CLI (opens a browser; no app registration / API key)
+    Login,
+    /// Log out of the Atlassian CLI
+    Logout,
+    /// Show whether Jira (acli) is connected and to which site
+    Status,
     /// Sync assigned-to-me issues into the board
     Sync,
 }
@@ -99,6 +111,8 @@ enum RepoCmd {
     },
     /// List registered repos
     List,
+    /// Rename a repo
+    Rename { id: i64, name: String },
 }
 
 #[derive(Subcommand)]
@@ -116,6 +130,10 @@ enum TicketCmd {
     },
     /// List tickets
     List,
+    /// Delete a ticket (removes its worktrees + record; not the Jira issue)
+    Delete { id: i64 },
+    /// Move a ticket to a column: todo | working | waiting | in_review | done
+    Move { id: i64, status: String },
 }
 
 fn default_db() -> String {
@@ -145,6 +163,10 @@ async fn main() -> Result<()> {
                         r.default_project_key.unwrap_or_default()
                     );
                 }
+            }
+            RepoCmd::Rename { id, name } => {
+                store.rename_repo(id, &name).await?;
+                println!("renamed repo #{id} → {name}");
             }
         },
         Cmd::Ticket { cmd } => match cmd {
@@ -176,23 +198,76 @@ async fn main() -> Result<()> {
                     );
                 }
             }
+            TicketCmd::Delete { id } => {
+                harmony_core::worktree::cleanup_for_ticket(&store, id).await;
+                store.delete_ticket(id).await?;
+                println!("deleted ticket #{id}");
+            }
+            TicketCmd::Move { id, status } => {
+                if !harmony_core::status::is_valid(&status) {
+                    anyhow::bail!("invalid status '{status}' (todo|working|waiting|in_review|done)");
+                }
+                store.set_ticket_status(id, &status).await?;
+                println!("moved #{id} → {status}");
+            }
         },
         Cmd::Serve { port } => {
             hooks::serve_forever(store, port).await?;
+        }
+        Cmd::Sessions { clear_ended } => {
+            if clear_ended {
+                let n = store.delete_ended_sessions().await?;
+                println!("cleared {n} ended session(s)");
+                return Ok(());
+            }
+            for s in store.list_sessions().await? {
+                let state = if s.ended_at.is_some() { "ended" } else { s.state.as_str() };
+                let key = s.jira_key.clone().unwrap_or_else(|| format!("local#{}", s.ticket_id));
+                let sid = s.claude_session_id.as_deref().map(|c| &c[..8.min(c.len())]).unwrap_or("-");
+                println!("#{:<3} {:<8} {:<12} {}  [{}]", s.id, state, key, s.ticket_title, sid);
+            }
+        }
+        Cmd::Worktrees { delete } => {
+            if let Some(id) = delete {
+                if let Some(wt) = store.get_worktree(id).await? {
+                    if let Some(repo) = store.get_repo(wt.repo_id).await? {
+                        let _ = harmony_core::worktree::remove(&repo.path, std::path::Path::new(&wt.path));
+                    }
+                }
+                store.delete_worktree(id).await?;
+                println!("deleted worktree #{id}");
+                return Ok(());
+            }
+            for w in store.list_worktrees().await? {
+                let key = w.jira_key.clone().unwrap_or_else(|| format!("local#{}", w.ticket_id));
+                println!("#{:<3} {:<12} {:<10} {:<28} {}", w.id, key, w.repo_name, w.branch, w.path);
+            }
         }
         Cmd::Start { ticket_id, repo, port, no_jira } => {
             start_flow(store, ticket_id, repo, port, no_jira).await?;
         }
         Cmd::Jira { cmd } => match cmd {
-            JiraCmd::Config { base_url, email } => {
-                store.set_setting("jira_base_url", &base_url).await?;
-                store.set_setting("jira_email", &email).await?;
-                println!("saved Jira config: {email} @ {base_url}");
-                println!("(token read from the JIRA_API_TOKEN env var at run time)");
+            JiraCmd::Install => {
+                let v = harmony_core::jira::install_via_brew()?;
+                println!("installed {v}");
             }
+            JiraCmd::Login => {
+                harmony_core::jira::login_passthrough()?;
+                match harmony_core::jira::connected_site().await {
+                    Some(site) => println!("connected: {site}"),
+                    None => println!("login finished, but acli reports not connected"),
+                }
+            }
+            JiraCmd::Logout => {
+                harmony_core::jira::logout().await?;
+                println!("disconnected from Jira");
+            }
+            JiraCmd::Status => match harmony_core::jira::connected_site().await {
+                Some(site) => println!("connected: {site}"),
+                None => println!("not connected — run `harmony jira login`"),
+            },
             JiraCmd::Sync => {
-                let jira = jira_client(&store).await?;
-                let issues = jira.search_assigned().await?;
+                let issues = harmony_core::jira::search_assigned().await?;
                 let (mut new, mut upd) = (0, 0);
                 for issue in &issues {
                     let (_, inserted) = store.upsert_jira_ticket(&issue.key, &issue.summary).await?;
@@ -214,8 +289,7 @@ async fn main() -> Result<()> {
             let key = ticket
                 .jira_key
                 .ok_or_else(|| anyhow!("ticket #{ticket_id} is not linked to a Jira issue"))?;
-            let jira = jira_client(&store).await?;
-            let issue = jira.get_issue(&key).await?;
+            let issue = harmony_core::jira::get_issue(&key).await?;
             println!("[draft] generating spec from {key} via `claude -p` …");
             let spec = harmony_core::draft::draft_spec(&issue.summary, &issue.description)?;
             store.set_ticket_spec(ticket_id, &spec).await?;
@@ -226,21 +300,6 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
-}
-
-/// Build a Jira client from saved config + the JIRA_API_TOKEN env var.
-async fn jira_client(store: &Store) -> Result<harmony_core::jira::JiraClient> {
-    let base = store
-        .get_setting("jira_base_url")
-        .await?
-        .ok_or_else(|| anyhow!("run `harmony jira config` first"))?;
-    let email = store
-        .get_setting("jira_email")
-        .await?
-        .ok_or_else(|| anyhow!("run `harmony jira config` first"))?;
-    let token = std::env::var("JIRA_API_TOKEN")
-        .map_err(|_| anyhow!("set the JIRA_API_TOKEN env var (your Jira API token)"))?;
-    Ok(harmony_core::jira::JiraClient::new(&base, &email, &token))
 }
 
 /// Push the branch, open a draft PR, set ticket → In Review, and (opt-in) write back to
@@ -271,18 +330,13 @@ async fn pr_flow(store: &Store, ticket_id: i64, title: Option<String>, writeback
 
     if writeback {
         if let Some(key) = ticket.jira_key.as_deref() {
-            match jira_client(store).await {
-                Ok(jira) => {
-                    match jira.transition(key, "In Review").await {
-                        Ok(()) => println!("[jira] {key} → In Review"),
-                        Err(e) => eprintln!("[jira] transition skipped: {e}"),
-                    }
-                    match jira.add_comment(key, &format!("PR opened by harmony: {url}")).await {
-                        Ok(()) => println!("[jira] PR link commented on {key}"),
-                        Err(e) => eprintln!("[jira] comment skipped: {e}"),
-                    }
-                }
-                Err(e) => eprintln!("[jira] writeback skipped: {e}"),
+            match harmony_core::jira::transition(key, "In Review").await {
+                Ok(()) => println!("[jira] {key} → In Review"),
+                Err(e) => eprintln!("[jira] transition skipped: {e}"),
+            }
+            match harmony_core::jira::add_comment(key, &format!("PR opened by harmony: {url}")).await {
+                Ok(()) => println!("[jira] PR link commented on {key}"),
+                Err(e) => eprintln!("[jira] comment skipped: {e}"),
             }
         }
     }
@@ -304,11 +358,9 @@ async fn start_flow(
     // Opt-in Jira writeback: → In Progress when work starts (DESIGN Q7). Best-effort.
     if !no_jira {
         if let Some(key) = ticket.jira_key.as_deref() {
-            if let Ok(jira) = jira_client(&store).await {
-                match jira.transition(key, "In Progress").await {
-                    Ok(()) => println!("[jira] {key} → In Progress"),
-                    Err(e) => eprintln!("[jira] transition skipped: {e}"),
-                }
+            match harmony_core::jira::transition(key, "In Progress").await {
+                Ok(()) => println!("[jira] {key} → In Progress"),
+                Err(e) => eprintln!("[jira] transition skipped: {e}"),
             }
         }
     }

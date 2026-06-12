@@ -1,0 +1,505 @@
+//! harmony desktop backend (Tauri 2).
+//!
+//! Wires `harmony-core` to the React UI: commands for board/ticket/Jira/PR actions, and
+//! a PTY↔event bridge for live terminals — the GUI counterpart of the CLI's stdio bridge.
+//! Each session's PTY output is streamed to the frontend via `term-output` events;
+//! keystrokes come back via the `send_input` command. State is detected out-of-band by
+//! the same hook server the core runs (started in `setup`).
+
+use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::sync::{Arc, Mutex};
+
+use harmony_core::models::{Repo, SessionView, Ticket, WorktreeView};
+use harmony_core::session::SessionManager;
+use harmony_core::store::Store;
+use portable_pty::{ChildKiller, MasterPty, PtySize};
+use serde::Serialize;
+use tauri::{AppHandle, Emitter, Manager, State};
+
+const HOOK_PORT: u16 = 8787;
+
+/// Live PTY handles for an active session.
+struct SessionIo {
+    master: Box<dyn MasterPty + Send>,
+    writer: Box<dyn Write + Send>,
+    killer: Box<dyn ChildKiller + Send + Sync>,
+    ticket_id: i64,
+}
+
+struct AppState {
+    store: Store,
+    sessions: Arc<Mutex<HashMap<i64, SessionIo>>>,
+}
+
+#[derive(Clone, Serialize)]
+struct TermOutput {
+    session_id: i64,
+    data: String,
+}
+
+// ---- board / ticket commands --------------------------------------------
+
+#[tauri::command]
+async fn list_tickets(state: State<'_, AppState>) -> Result<Vec<Ticket>, String> {
+    state.store.list_tickets().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn list_repos(state: State<'_, AppState>) -> Result<Vec<Repo>, String> {
+    state.store.list_repos().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn add_repo(
+    state: State<'_, AppState>,
+    name: String,
+    path: String,
+    project: Option<String>,
+) -> Result<i64, String> {
+    if !std::path::Path::new(&path).is_dir() {
+        return Err(format!("not a directory: {path}"));
+    }
+    let project = project.filter(|p| !p.trim().is_empty());
+    state
+        .store
+        .add_repo(&name, &path, project.as_deref())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn rename_repo(state: State<'_, AppState>, id: i64, name: String) -> Result<(), String> {
+    if name.trim().is_empty() {
+        return Err("name cannot be empty".into());
+    }
+    state.store.rename_repo(id, name.trim()).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn delete_repo(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+    state.store.delete_repo(id).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_ticket(state: State<'_, AppState>, id: i64) -> Result<Option<Ticket>, String> {
+    state.store.get_ticket(id).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn list_sessions(state: State<'_, AppState>) -> Result<Vec<SessionView>, String> {
+    state.store.list_sessions().await.map_err(|e| e.to_string())
+}
+
+/// (ticket_id, session_id) for sessions actually live in THIS process — the source of
+/// truth for "live" (survives webview reloads; excludes zombies from a prior process).
+#[tauri::command]
+fn live_sessions(state: State<'_, AppState>) -> Vec<(i64, i64)> {
+    let map = state.sessions.lock().unwrap();
+    map.iter().map(|(sid, io)| (io.ticket_id, *sid)).collect()
+}
+
+#[tauri::command]
+async fn clear_ended_sessions(state: State<'_, AppState>) -> Result<u64, String> {
+    state.store.delete_ended_sessions().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn list_worktrees(state: State<'_, AppState>) -> Result<Vec<WorktreeView>, String> {
+    state.store.list_worktrees().await.map_err(|e| e.to_string())
+}
+
+/// Remove ALL of a ticket's worktrees from disk + DB (keeps the ticket). Used when a
+/// ticket is moved to Done. The pushed branch/PR is unaffected.
+#[tauri::command]
+async fn cleanup_ticket_worktrees(state: State<'_, AppState>, ticket_id: i64) -> Result<(), String> {
+    harmony_core::worktree::cleanup_for_ticket(&state.store, ticket_id).await;
+    let worktrees = state
+        .store
+        .worktrees_for_ticket(ticket_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    for wt in worktrees {
+        state.store.delete_worktree(wt.id).await.map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Remove a worktree from disk (best-effort) then delete its DB row + sessions.
+#[tauri::command]
+async fn delete_worktree(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+    if let Ok(Some(wt)) = state.store.get_worktree(id).await {
+        if let Ok(Some(repo)) = state.store.get_repo(wt.repo_id).await {
+            let _ = harmony_core::worktree::remove(&repo.path, std::path::Path::new(&wt.path));
+        }
+    }
+    state.store.delete_worktree(id).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn delete_session(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+    state.store.delete_session(id).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn add_local_ticket(
+    state: State<'_, AppState>,
+    title: String,
+    spec: String,
+    repo: Option<String>,
+) -> Result<i64, String> {
+    let repo_id = match repo {
+        Some(n) => Some(
+            state
+                .store
+                .get_repo_by_name(&n)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("no repo named {n}"))?
+                .id,
+        ),
+        None => None,
+    };
+    state
+        .store
+        .add_ticket(None, "local", &title, &spec, repo_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn set_spec(state: State<'_, AppState>, id: i64, spec: String) -> Result<(), String> {
+    state.store.set_ticket_spec(id, &spec).await.map_err(|e| e.to_string())
+}
+
+/// Move a ticket to a column (drag-and-drop / manual override).
+#[tauri::command]
+async fn set_ticket_status(state: State<'_, AppState>, id: i64, status: String) -> Result<(), String> {
+    if !harmony_core::status::is_valid(&status) {
+        return Err(format!("invalid status: {status}"));
+    }
+    state.store.set_ticket_status(id, &status).await.map_err(|e| e.to_string())
+}
+
+/// Reflect a board-column move onto the linked Jira issue (best-effort; only if a matching
+/// status exists in the issue's workflow). No-op for non-Jira tickets and the
+/// "For Your Review" (waiting) state, which has no Jira equivalent.
+#[tauri::command]
+async fn jira_apply_column(state: State<'_, AppState>, ticket_id: i64, status: String) -> Result<(), String> {
+    let ticket = match state.store.get_ticket(ticket_id).await.map_err(|e| e.to_string())? {
+        Some(t) => t,
+        None => return Ok(()),
+    };
+    let key = match ticket.jira_key {
+        Some(k) => k,
+        None => return Ok(()),
+    };
+    let candidates: &[&str] = match status.as_str() {
+        "todo" => &["To Do", "Backlog", "Open"],
+        "working" => &["In Progress"],
+        "in_review" => &["In Review", "Code Review", "Review"],
+        "done" => &["Done", "Closed", "Resolved"],
+        _ => return Ok(()),
+    };
+    let _ = harmony_core::jira::transition_to_any(&key, candidates).await;
+    Ok(())
+}
+
+/// Delete a ticket: remove its git worktrees (best-effort) then its DB records.
+#[tauri::command]
+async fn delete_ticket(state: State<'_, AppState>, ticket_id: i64) -> Result<(), String> {
+    harmony_core::worktree::cleanup_for_ticket(&state.store, ticket_id).await;
+    state.store.delete_ticket(ticket_id).await.map_err(|e| e.to_string())
+}
+
+// ---- jira ----------------------------------------------------------------
+
+#[derive(Clone, Serialize)]
+struct JiraEnv {
+    acli_installed: bool,
+    site: Option<String>,
+}
+
+/// Whether the Atlassian CLI is installed, and the connected site (if logged in).
+#[tauri::command]
+async fn jira_env() -> JiraEnv {
+    let acli_installed = harmony_core::jira::cli_installed();
+    let site = if acli_installed {
+        harmony_core::jira::connected_site().await
+    } else {
+        None
+    };
+    JiraEnv { acli_installed, site }
+}
+
+/// Install acli via Homebrew (best-effort). Returns the installed version.
+#[tauri::command]
+async fn install_acli() -> Result<String, String> {
+    tokio::task::spawn_blocking(harmony_core::jira::install_via_brew)
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn jira_logout() -> Result<(), String> {
+    harmony_core::jira::logout().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn jira_sync(state: State<'_, AppState>) -> Result<usize, String> {
+    let issues = harmony_core::jira::search_assigned().await.map_err(|e| e.to_string())?;
+    for issue in &issues {
+        state
+            .store
+            .upsert_jira_ticket(&issue.key, &issue.summary)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(issues.len())
+}
+
+#[tauri::command]
+async fn draft_ticket(state: State<'_, AppState>, id: i64) -> Result<String, String> {
+    let ticket = state
+        .store
+        .get_ticket(id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("no such ticket")?;
+    let key = ticket.jira_key.ok_or("ticket is not linked to Jira")?;
+    let issue = harmony_core::jira::get_issue(&key).await.map_err(|e| e.to_string())?;
+    let spec = tokio::task::spawn_blocking(move || {
+        harmony_core::draft::draft_spec(&issue.summary, &issue.description)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    state.store.set_ticket_spec(id, &spec).await.map_err(|e| e.to_string())?;
+    Ok(spec)
+}
+
+// ---- pull request --------------------------------------------------------
+
+#[tauri::command]
+async fn open_pr(state: State<'_, AppState>, ticket_id: i64) -> Result<String, String> {
+    let ticket = state
+        .store
+        .get_ticket(ticket_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("no such ticket")?;
+    let wt = state
+        .store
+        .primary_worktree_for_ticket(ticket_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("no worktree — start a session first")?;
+
+    let body = if ticket.spec.trim().is_empty() {
+        format!("Ticket: {}", ticket.title)
+    } else {
+        ticket.spec.clone()
+    };
+    let (title, path, branch) = (ticket.title.clone(), wt.path.clone(), wt.branch.clone());
+
+    let url = tokio::task::spawn_blocking(move || -> Result<String, String> {
+        harmony_core::github::push_branch(&path, &branch).map_err(|e| e.to_string())?;
+        harmony_core::github::create_draft_pr(&path, &title, &body, &branch).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    state
+        .store
+        .set_ticket_status(ticket_id, harmony_core::status::IN_REVIEW)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if let Some(key) = ticket.jira_key.as_deref() {
+        let _ = harmony_core::jira::transition(key, "In Review").await;
+        let _ = harmony_core::jira::add_comment(key, &format!("PR opened by harmony: {url}")).await;
+    }
+    Ok(url)
+}
+
+// ---- sessions (PTY ↔ events) ---------------------------------------------
+
+#[tauri::command]
+async fn start_session(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ticket_id: i64,
+    repo: Option<String>,
+) -> Result<i64, String> {
+    let ticket = state
+        .store
+        .get_ticket(ticket_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("no such ticket")?;
+
+    if ticket.repo_id.is_none() {
+        let repo_id = if let Some(n) = repo {
+            state
+                .store
+                .get_repo_by_name(&n)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or(format!("no repo named {n}"))?
+                .id
+        } else if let Some(k) = ticket.jira_key.as_deref().and_then(|k| k.split('-').next()) {
+            state
+                .store
+                .default_repo_for_key(k)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or("ticket has no repo; choose one")?
+                .id
+        } else {
+            return Err("ticket has no repo; choose one".into());
+        };
+        state.store.set_ticket_repo(ticket_id, repo_id).await.map_err(|e| e.to_string())?;
+    }
+
+    let mgr = SessionManager::new(Arc::new(state.store.clone()), HOOK_PORT);
+    let handle = mgr.start(ticket_id).await.map_err(|e| e.to_string())?;
+    let session_id = handle.session_id;
+    let master = handle.master;
+    let child = handle.child;
+    let killer = child.clone_killer();
+
+    let mut reader = master.try_clone_reader().map_err(|e| e.to_string())?;
+    let writer = master.take_writer().map_err(|e| e.to_string())?;
+
+    // PTY output -> term-output events
+    {
+        let app = app.clone();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let data = String::from_utf8_lossy(&buf[..n]).to_string();
+                        let _ = app.emit("term-output", TermOutput { session_id, data });
+                    }
+                }
+            }
+        });
+    }
+
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .insert(session_id, SessionIo { master, writer, killer, ticket_id });
+
+    // Wait for exit -> mark ended, drop handles, notify UI
+    {
+        let app = app.clone();
+        let store = state.store.clone();
+        let sessions = state.sessions.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = tokio::task::spawn_blocking(move || {
+                let mut child = child;
+                child.wait()
+            })
+            .await;
+            let _ = store.end_session(session_id).await;
+            sessions.lock().unwrap().remove(&session_id);
+            let _ = app.emit("session-exit", session_id);
+        });
+    }
+
+    Ok(session_id)
+}
+
+#[tauri::command]
+fn send_input(state: State<'_, AppState>, session_id: i64, data: String) -> Result<(), String> {
+    let mut map = state.sessions.lock().unwrap();
+    if let Some(io) = map.get_mut(&session_id) {
+        io.writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
+        io.writer.flush().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Kill a running session's Claude process. Its wait-task then fires `session-exit`,
+/// which ends the DB row and removes it from the live map.
+#[tauri::command]
+fn stop_session(state: State<'_, AppState>, session_id: i64) -> Result<(), String> {
+    let mut map = state.sessions.lock().unwrap();
+    if let Some(io) = map.get_mut(&session_id) {
+        io.killer.kill().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn resize(state: State<'_, AppState>, session_id: i64, cols: u16, rows: u16) -> Result<(), String> {
+    let map = state.sessions.lock().unwrap();
+    if let Some(io) = map.get(&session_id) {
+        io.master
+            .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
+        .setup(|app| {
+            let handle = app.handle().clone();
+            tauri::async_runtime::block_on(async move {
+                let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+                let db = format!("{home}/.harmony/harmony.db");
+                let store = Store::open(&db).await.expect("open store");
+                // Sessions don't survive a process restart (PTYs are our children), so
+                // any still-open session in the DB is a zombie — mark it ended.
+                let _ = store.end_all_open_sessions().await;
+                // Run the hook server in-process (same one the CLI uses).
+                let _ = harmony_core::hooks::spawn_server(Arc::new(store.clone()), HOOK_PORT).await;
+                handle.manage(AppState {
+                    store,
+                    sessions: Arc::new(Mutex::new(HashMap::new())),
+                });
+            });
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            list_tickets,
+            list_repos,
+            add_repo,
+            rename_repo,
+            delete_repo,
+            get_ticket,
+            list_sessions,
+            live_sessions,
+            clear_ended_sessions,
+            delete_session,
+            list_worktrees,
+            delete_worktree,
+            cleanup_ticket_worktrees,
+            add_local_ticket,
+            set_spec,
+            set_ticket_status,
+            jira_apply_column,
+            delete_ticket,
+            jira_env,
+            install_acli,
+            jira_logout,
+            jira_sync,
+            draft_ticket,
+            open_pr,
+            start_session,
+            send_input,
+            stop_session,
+            resize
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
