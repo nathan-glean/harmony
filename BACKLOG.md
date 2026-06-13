@@ -4,7 +4,7 @@ Living to-do list for Harmony. Companion to:
 - **`DESIGN.md`** — the *why* and the resolved product decisions.
 - **`PLAN.md`** — the *how*, as phases (0–4) and what each phase shipped.
 
-This doc is the *what's left*: a prioritized backlog of features to implement, including currently-deferred v1 items, Phase 4 hardening, v2 ambitions, and ideas borrowed from OpenAI's [Symphony](https://github.com/openai/symphony) (issue-tracker-driven autonomous agent orchestration).
+This doc is the *what's left*: a prioritized backlog of features to implement, including currently-deferred v1 items, Phase 4 hardening, v2 ambitions, and ideas borrowed from OpenAI's [Symphony](https://github.com/openai/symphony/blob/main/SPEC.md) (a headless **Codex + Linear** orchestration daemon).
 
 ## How to read this
 
@@ -15,7 +15,7 @@ This doc is the *what's left*: a prioritized backlog of features to implement, i
 
 **Theme tags:** `[session]` `[board]` `[jira]` `[github]` `[worktree]` `[autonomy]` `[ui]` `[orchestration]` `[hardening]` `[test]`
 
-Items marked *(Symphony)* are inspired by Symphony's autonomous-orchestration model. See the [Symphony delta](#symphony-delta) at the end.
+Items marked *(Symphony)* are inspired by an actual component of the Symphony [SPEC.md](https://github.com/openai/symphony/blob/main/SPEC.md). See the [Symphony delta](#symphony-delta) at the end for what genuinely overlaps, what harmony diverges on by design, and what is *not* a Symphony concept.
 
 ---
 
@@ -110,21 +110,37 @@ Intercept `PreToolUse` over the hook channel and present an in-app approve/deny 
 Unattended runs hang on `.mcp.json` / never-trusted-folder startup prompts. Use `--strict-mcp-config` and bootstrap folder-trust once per worktree.
 - **AC:** An autonomous start in an MCP-containing or untrusted repo proceeds without blocking on an interactive prompt.
 
-### 16. Continuous board polling + auto-spawn `[orchestration]` *(Symphony)*
-A daemon/loop that watches the board and ensures every active ticket has a running session, (re)spawning crashed or stalled ones — Symphony's core behavior. Today sessions are spawned manually ("Open terminal") or on drag-into-In-Progress.
-- **AC:** With auto-mode on, a tick reconciles board state and ensures a session exists for each active ticket; crashed sessions restart.
+### 16. Orchestrator loop + state machine `[orchestration]` *(Symphony)*
+A daemon/loop that watches the board and ensures every active ticket has a running session, (re)spawning crashed or stalled ones — Symphony's core behavior. Today sessions are spawned manually ("Open terminal") or on drag-into-In-Progress. Symphony models this as a **single-authority in-memory state** (each issue is unclaimed → claimed → running → retry-queued → released) plus a periodic **poll-and-dispatch tick**:
+1. **Reconcile** running tickets (see #17), then
+2. **Fetch candidates** in active states (skip the tick if the fetch fails), then
+3. **Sort** by priority (ascending), then creation time (oldest first), then
+4. **Dispatch** eligible tickets until concurrency slots are exhausted.
 
-### 17. Retry with exponential backoff `[orchestration][hardening]` *(Symphony)*
-A retry queue for transient session/integration failures, with increasing delays.
-- **AC:** A failed session is retried up to N times with backoff, and the retry state is visible in the UI.
+A ticket is **eligible** when: it's in an active column, carries every required label (if a label filter is configured), is **not already running or claimed**, a slot is free, and — for `Todo` — it has no non-terminal blockers (`blocked_by`). Claiming a ticket before spawn prevents a double-dispatch race.
+- **Concurrency slots:** `available = max(max_concurrent - running, 0)`, with an optional **per-column** cap (e.g. limit how many In-Progress run at once) falling back to the global cap. This subsumes the soft indicator in #12 (the count it shows becomes the slot accounting).
+- **AC:** With auto-mode on, a tick reconciles board state, sorts candidates by priority/age, and dispatches eligible tickets up to the (global + per-column) slot limit; a `Todo` with an open blocker is skipped; crashed sessions are restarted; no ticket is ever double-dispatched.
 
-### 18. Proof-of-work bundle `[orchestration][github]` *(Symphony)*
-On completion, gather evidence: CI status, PR review feedback, a complexity/diff-size summary, optionally a walkthrough — Symphony's "proof of work."
+### 17. Retry/backoff + reconciliation `[orchestration][hardening]` *(Symphony)*
+A retry queue for transient session/integration failures, plus active-run reconciliation — the other half of the orchestrator (#16). Symphony distinguishes two retry kinds and reconciles every running issue each tick.
+- **Continuation retries** (after a *clean* exit, more work likely remains): re-dispatch on a short fixed delay (~1s).
+- **Failure retries** (abnormal exit): exponential backoff `min(base · 2^(attempt-1), cap)` with a configurable cap.
+- **Reconciliation each tick:** **(a) stall detection** — if no session event has arrived within a stall-timeout (event-inactivity), terminate and retry; **(b) tracker-state refresh** of running tickets — a ticket whose Jira/board state went **terminal** → stop the session + clean its worktree; went **non-active** (e.g. moved back to Todo) → stop without cleanup; still **active** → just update the snapshot.
+- **AC:** A failed session is retried up to N times with exponential backoff (continuation re-dispatch uses the short fixed delay); a stalled session is detected and retried; a ticket moved to a terminal/non-active state out-of-band is reconciled (stopped, cleaned per rule); retry state is visible in the UI.
+
+### 18. Proof-of-work bundle `[orchestration][github]`
+On completion, gather evidence: CI status, PR review feedback, a complexity/diff-size summary, optionally a walkthrough.
+- **Note:** harmony-original — **not** a Symphony concept. The Symphony SPEC has no "proof of work"; its completion story is just observability (token/rate-limit accounting, event logs). Kept here because it fits harmony's handoff-to-review model.
 - **AC:** Finishing a ticket attaches a proof-of-work summary to the ticket / PR.
 
 ### 19. `WORKFLOW.md` in-repo policy `[orchestration][autonomy]` *(Symphony)*
-A repo-versioned prompt template + runtime settings (concurrency, active/terminal states, autonomy posture) loaded per repo, à la Symphony. Keeps policy with the code.
-- **AC:** When a repo contains `WORKFLOW.md`, its prompt/settings override Harmony defaults for that repo.
+A repo-versioned prompt template + runtime settings (concurrency, active/terminal states, autonomy posture) loaded per repo, à la Symphony. Keeps policy with the code. Symphony's concrete model: a Markdown file with a **YAML front-matter** config block + a prompt-template body, where:
+- Secret/path values support **`$VAR_NAME` env indirection** (resolved at load; never logged).
+- The file is **hot-reloaded** — edits re-apply without restart; an invalid edit keeps the **last-known-good** config and surfaces an operator error.
+- The prompt template renders against an `issue` object + an `attempt` integer (null on first run), so retries/continuations can use different instructions.
+
+For harmony, a repo's `WORKFLOW.md` would override the DB/Settings defaults for that repo (prompt scaffold, autonomy/permission mode, per-column concurrency, which board columns count as active/terminal).
+- **AC:** When a repo contains `WORKFLOW.md`, its prompt/settings override Harmony defaults for that repo; `$VAR` values resolve from the environment; editing the file re-applies live, and an invalid file falls back to the last good config with a visible error.
 
 ### 20. tmux / daemon persistence `[orchestration]`
 Long unattended runs that outlive the desktop window. Today PTYs are children of the app and die with it (resume bridges the gap, but not for live unattended work).
@@ -142,18 +158,61 @@ Opt-in auto-merge once CI is green and review approves. Harmony deliberately nev
 Coordination, who's-on-what, a shared team board. The largest item; explicitly v2+ and currently out of detailed scope.
 - **AC:** Tracked as an epic; to be broken down when prioritized.
 
+### 24. Observability: token accounting + rate limits + HTTP API `[orchestration][hardening]` *(Symphony)*
+Symphony tracks, per run and in aggregate, the agent's **token usage** and **rate-limit** posture, and optionally exposes a read-only HTTP surface. harmony already runs a localhost hook server (`core/src/hooks.rs`) — this extends it.
+- **Token accounting:** prefer **absolute thread totals** when the agent reports them; **ignore delta payloads** for totals and **dedup against the last reported total** to avoid double-counting; accumulate input/output/total across sessions.
+- **Rate limits:** retain the latest rate-limit payload seen in agent updates and surface it (informs #12 throttling and the auth-quota risk below).
+- **Optional HTTP API** (loopback-bound, read-only except a refresh trigger): `GET /api/v1/state` (running rows + retry queue + token totals), `GET /api/v1/<ticket>` (per-ticket detail), `POST /api/v1/refresh` (force a poll tick — pairs with #16). A `GET /` dashboard is optional.
+- **AC:** The app shows live + cumulative token totals and the latest rate-limit state per session, sourced without double-counting; if the API is enabled, `/api/v1/state` returns running/retry/token data and `/api/v1/refresh` triggers a tick.
+
+### 25. Workspace lifecycle hooks `[worktree][orchestration]` *(Symphony)*
+Configurable shell hooks around the worktree lifecycle, run with `cwd` = the worktree, with a timeout. Distinct from harmony's existing `.claude/settings.local.json` *Claude-hook* injection (#settings) — these are **operator** hooks for workspace setup/teardown (e.g. install deps, warm caches, cleanup). Symphony's set + failure semantics:
+- `after_create` — runs once on a newly created worktree; **failure is fatal** to creation.
+- `before_run` — runs before each session attempt; **failure aborts** the attempt.
+- `after_run` — runs after each attempt; failure is **logged and ignored**.
+- `before_remove` — runs before worktree deletion; failure is **logged and ignored**.
+- **AC:** Configured hooks run at the right lifecycle point with `cwd` = the worktree and a bounded timeout; `after_create`/`before_run` failures block (creation/attempt) while `after_run`/`before_remove` failures are non-fatal and logged.
+
+### 26. Remote / SSH workers `[orchestration]` — *(Symphony, far-future / likely out-of-scope)*
+Symphony's Appendix-A optional extension runs the agent on a remote host over SSH (the orchestrator stays the single source of truth; the workspace + agent live remotely). Noted for completeness; **likely out-of-scope** for a per-developer desktop tool whose whole point is local supervision. Revisit only if a "run my agents on a beefier remote box" use case emerges.
+- **AC:** (deferred) An assigned ticket can run its session on a configured remote host with the same isolation + reconciliation guarantees as local.
+
 ---
 
 ## Cross-cutting risks
 
 Carried from `DESIGN.md` §Sharp edges — relevant to several items above:
-- **Auth quota under parallelism** — concurrent interactive sessions share one subscription login's quota. Relevant to #12, #16, #20.
+- **Auth quota under parallelism** — concurrent interactive sessions share one subscription login's quota. Relevant to #12, #16, #20, #24.
 - **Jira transition discovery** — status names/IDs vary per workflow; writeback must discover valid transitions per issue, not hardcode. Relevant to #8, #9.
 - **Resume fidelity** — scrollback rebuilt from JSONL approximates the live TUI; acceptable, not pixel-identical. Relevant to #2.
 - **Draft latency/cost** — repo-scanning Draft adds latency and token cost; keep it optional and bounded. Relevant to #8.
 
 ## Symphony delta
 
-Where Harmony **already matches** Symphony: worktree-per-task isolation, reading work from an issue tracker (Jira), a lifecycle board as the control surface, and opening a draft PR with human handoff rather than blind merge.
+Comparison against the actual [SPEC.md](https://github.com/openai/symphony/blob/main/SPEC.md). Symphony is a **headless daemon** that polls **Linear**, creates a per-issue workspace, and runs a **Codex** app-server agent in it — fully autonomous, scheduler/reader only (the *agent* does any tracker writes, e.g. via an optional `linear_graphql` tool).
 
-Where Symphony **goes further** (and why the *Later* tier looks as it does): a continuous autonomous loop that keeps an agent running per active ticket and restarts failures (#16, #17), explicit *proof of work* on completion (#18), in-repo `WORKFLOW.md` policy (#19), and a posture toward unattended runs (#20). Harmony's distinct bets remain the **supervised-first** model with a richer GUI and a **Jira enrichment** layer (Draft, structured spec) that Symphony doesn't have.
+### Where Harmony already matches
+Per-task isolation (Symphony per-issue workspace ≈ harmony per-ticket git worktree), reading work from an issue tracker, a lifecycle/state surface as the control plane, and opening a draft PR with **human handoff rather than blind merge** (Symphony likewise never auto-merges; "done" means reaching a handoff state).
+
+### Deliberate divergences (intentional product bets — not gaps)
+| Dimension | Symphony | Harmony |
+|---|---|---|
+| Agent driver | Codex app-server (JSON-line subprocess) | Claude Code in a PTY (xterm.js) |
+| Tracker | Linear (GraphQL) | Jira (via `acli`) |
+| Form factor | Headless daemon / CLI | Tauri **supervised desktop GUI** |
+| Autonomy | Autonomous poll-and-dispatch loop | **Supervised-first**; manual / drag-to-start |
+| Policy & config | In-repo `WORKFLOW.md`, hot-reloaded | SQLite settings + Settings UI (see #19) |
+| Tracker writes | Agent does them via its own tools | Harmony does **column-driven writeback** |
+| Enrichment | none | **Jira Draft + structured spec** (Harmony-only) |
+
+### Genuine gaps Harmony could adopt (mapped to backlog items)
+- **Orchestrator loop + single-authority state machine** — candidate selection (priority sort, `blocked_by` gating, required labels), claim/run/retry/release states, concurrency slots (global + per-column) → **#16**.
+- **Retry/backoff + reconciliation** — continuation (fixed) vs failure (exponential w/ cap) retries; stall detection + tracker-state refresh of running issues → **#17**.
+- **Observability** — token accounting (absolute totals, dedup deltas), rate-limit tracking, optional `/api/v1/*` JSON API + dashboard → **#24**.
+- **`WORKFLOW.md` policy + workspace lifecycle hooks** — versioned prompt/config with `$VAR` + hot-reload, and `after_create`/`before_run`/`after_run`/`before_remove` shell hooks → **#19**, **#25**.
+- **Remote/SSH workers** — Appendix-A extension; noted but likely out-of-scope for a per-developer desktop tool → **#26**.
+
+### Not a Symphony concept (Harmony-original)
+**Proof-of-work (#18)** is *not* in the Symphony spec — Symphony's completion story is purely observability (token/rate-limit accounting + structured event logs). It's kept on the roadmap because it fits Harmony's handoff-to-review model, but it's not "borrowed from Symphony."
+
+Harmony's distinct bets remain the **supervised-first** model with a richer GUI and a **Jira enrichment** layer (Draft, structured spec) that Symphony doesn't have.

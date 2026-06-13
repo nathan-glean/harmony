@@ -6,9 +6,13 @@ with an agent-friendly spec, and runs an isolated, supervised Claude Code sessio
 per ticket in its own git worktree — then opens a PR and hands off to your normal
 review process.
 
-Reference points: closest to OpenAI's **Symphony** (orchestrate agents from a
-tracker) but **supervised** like **claude-commander** (worktree-per-task, live
-sessions), with a richer GUI and a Jira enrichment layer neither has.
+Reference points: OpenAI's **Symphony** is a *headless* daemon that polls **Linear** and
+runs **Codex** agents in per-issue workspaces, fully autonomous. harmony shares its
+tracker-driven, isolated-workspace-per-task shape but deliberately diverges on every axis:
+**Claude Code (PTY)** not Codex, **Jira** not Linear, a **supervised desktop GUI** not a
+headless loop — closer to **claude-commander** (worktree-per-task, live sessions) in
+posture — with a Jira enrichment layer neither has. See `BACKLOG.md` § "Symphony delta"
+for the full capability comparison and the Symphony-inspired items on the roadmap.
 
 ## Resolved decisions
 

@@ -251,7 +251,10 @@ Uses the same `~/.harmony/harmony.db` and hook server (:8787) as the CLI.
 ## Deferred to v2 (tracked, not built)
 Native permission **triage UI** · tmux/daemon persistence for unattended runs · shared
 **team backend** · JQL/board scope + pull-by-key · live **MCP tools** for the running
-agent · cascade/auto-merge.
+agent · cascade/auto-merge. Plus the Symphony-inspired orchestration items: **orchestrator
+loop + state machine**, **retry/backoff + reconciliation**, **observability (token
+accounting + HTTP API)**, and **`WORKFLOW.md` + workspace lifecycle hooks**. `BACKLOG.md`
+(Later tier + § "Symphony delta") is the source of truth for all of these.
 
 ## Risk register
 See `DESIGN.md` → "Sharp edges / risks". The dominant one (interactive hooks) is retired
