@@ -30,6 +30,8 @@ struct SessionIo {
 struct AppState {
     store: Store,
     sessions: Arc<Mutex<HashMap<i64, SessionIo>>>,
+    /// Tickets that were live at the last shutdown — drained once by the UI to reattach.
+    reattach: Mutex<Vec<i64>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -69,6 +71,21 @@ async fn add_repo(
 }
 
 #[tauri::command]
+async fn get_permission_mode(state: State<'_, AppState>) -> Result<String, String> {
+    Ok(state
+        .store
+        .get_setting("permission_mode")
+        .await
+        .map_err(|e| e.to_string())?
+        .unwrap_or_else(|| "auto".to_string()))
+}
+
+#[tauri::command]
+async fn set_permission_mode(state: State<'_, AppState>, mode: String) -> Result<(), String> {
+    state.store.set_setting("permission_mode", &mode).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn rename_repo(state: State<'_, AppState>, id: i64, name: String) -> Result<(), String> {
     if name.trim().is_empty() {
         return Err("name cannot be empty".into());
@@ -89,6 +106,29 @@ async fn get_ticket(state: State<'_, AppState>, id: i64) -> Result<Option<Ticket
 #[tauri::command]
 async fn list_sessions(state: State<'_, AppState>) -> Result<Vec<SessionView>, String> {
     state.store.list_sessions().await.map_err(|e| e.to_string())
+}
+
+/// Tickets that were live at the last shutdown (drained — returns them once).
+#[tauri::command]
+fn pending_reattach(state: State<'_, AppState>) -> Vec<i64> {
+    std::mem::take(&mut *state.reattach.lock().unwrap())
+}
+
+/// Prior conversation (rendered from the JSONL transcript) for a ticket's latest session.
+#[tauri::command]
+async fn session_transcript(state: State<'_, AppState>, ticket_id: i64) -> Result<String, String> {
+    match state
+        .store
+        .latest_transcript_path_for_ticket(ticket_id)
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        Some(path) => tokio::task::spawn_blocking(move || harmony_core::session::render_transcript(&path))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string()),
+        None => Ok(String::new()),
+    }
 }
 
 /// (ticket_id, session_id) for sessions actually live in THIS process — the source of
@@ -139,6 +179,16 @@ async fn delete_worktree(state: State<'_, AppState>, id: i64) -> Result<(), Stri
 #[tauri::command]
 async fn delete_session(state: State<'_, AppState>, id: i64) -> Result<(), String> {
     state.store.delete_session(id).await.map_err(|e| e.to_string())
+}
+
+/// Delete the ended sessions for a worktree (clears a consolidated group).
+#[tauri::command]
+async fn delete_worktree_sessions(state: State<'_, AppState>, worktree_id: i64) -> Result<u64, String> {
+    state
+        .store
+        .delete_ended_sessions_for_worktree(worktree_id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -259,6 +309,40 @@ async fn jira_sync(state: State<'_, AppState>) -> Result<usize, String> {
     Ok(issues.len())
 }
 
+#[derive(Serialize)]
+struct JiraDetail {
+    description: String,
+    comments: Vec<harmony_core::jira::JiraComment>,
+}
+
+/// Open the ticket's linked Jira issue in the browser.
+#[tauri::command]
+async fn open_in_jira(state: State<'_, AppState>, ticket_id: i64) -> Result<(), String> {
+    let ticket = state
+        .store
+        .get_ticket(ticket_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("no such ticket")?;
+    let key = ticket.jira_key.ok_or("ticket is not linked to Jira")?;
+    harmony_core::jira::open_in_browser(&key).await.map_err(|e| e.to_string())
+}
+
+/// The linked Jira issue's description + comments (read-only) for the detail panel.
+#[tauri::command]
+async fn jira_detail(state: State<'_, AppState>, ticket_id: i64) -> Result<JiraDetail, String> {
+    let ticket = state
+        .store
+        .get_ticket(ticket_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("no such ticket")?;
+    let key = ticket.jira_key.ok_or("ticket is not linked to Jira")?;
+    let issue = harmony_core::jira::get_issue(&key).await.map_err(|e| e.to_string())?;
+    let comments = harmony_core::jira::comments(&key).await.unwrap_or_default();
+    Ok(JiraDetail { description: issue.description, comments })
+}
+
 #[tauri::command]
 async fn draft_ticket(state: State<'_, AppState>, id: i64) -> Result<String, String> {
     let ticket = state
@@ -321,6 +405,64 @@ async fn open_pr(state: State<'_, AppState>, ticket_id: i64) -> Result<String, S
         let _ = harmony_core::jira::add_comment(key, &format!("PR opened by harmony: {url}")).await;
     }
     Ok(url)
+}
+
+// ---- diff / PR pane ------------------------------------------------------
+
+#[derive(Serialize)]
+struct PrStatus {
+    pr: Option<serde_json::Value>,
+    checks: Vec<serde_json::Value>,
+}
+
+/// Worktree diff against its base branch (committed + uncommitted).
+#[tauri::command]
+async fn ticket_diff(state: State<'_, AppState>, ticket_id: i64) -> Result<String, String> {
+    let wt = state
+        .store
+        .primary_worktree_for_ticket(ticket_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("no worktree — start a session first")?;
+    let repo = state
+        .store
+        .get_repo(wt.repo_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("repo missing")?;
+    let (path, repo_path) = (wt.path, repo.path);
+    tokio::task::spawn_blocking(move || {
+        let base = harmony_core::worktree::default_branch(&repo_path).unwrap_or_else(|_| "main".into());
+        harmony_core::github::diff(&path, &base)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
+}
+
+/// PR metadata + check status for the ticket's branch (empty if no PR / gh not set up).
+#[tauri::command]
+async fn ticket_pr(state: State<'_, AppState>, ticket_id: i64) -> Result<PrStatus, String> {
+    let wt = state
+        .store
+        .primary_worktree_for_ticket(ticket_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("no worktree — start a session first")?;
+    let path = wt.path;
+    let status = tokio::task::spawn_blocking(move || {
+        let pr = harmony_core::github::pr_view_json(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+        let checks = harmony_core::github::pr_checks_json(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<Vec<serde_json::Value>>(&s).ok())
+            .unwrap_or_default();
+        PrStatus { pr, checks }
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(status)
 }
 
 // ---- sessions (PTY ↔ events) ---------------------------------------------
@@ -458,6 +600,9 @@ pub fn run() {
                 let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
                 let db = format!("{home}/.harmony/harmony.db");
                 let store = Store::open(&db).await.expect("open store");
+                // Capture which tickets were live before the (dead) sessions are reconciled
+                // — the UI reattaches these on launch.
+                let reattach = store.tickets_with_open_session().await.unwrap_or_default();
                 // Sessions don't survive a process restart (PTYs are our children), so
                 // any still-open session in the DB is a zombie — mark it ended.
                 let _ = store.end_all_open_sessions().await;
@@ -466,6 +611,7 @@ pub fn run() {
                 handle.manage(AppState {
                     store,
                     sessions: Arc::new(Mutex::new(HashMap::new())),
+                    reattach: Mutex::new(reattach),
                 });
             });
             Ok(())
@@ -476,14 +622,21 @@ pub fn run() {
             add_repo,
             rename_repo,
             delete_repo,
+            get_permission_mode,
+            set_permission_mode,
             get_ticket,
             list_sessions,
             live_sessions,
+            pending_reattach,
+            session_transcript,
             clear_ended_sessions,
             delete_session,
+            delete_worktree_sessions,
             list_worktrees,
             delete_worktree,
             cleanup_ticket_worktrees,
+            ticket_diff,
+            ticket_pr,
             add_local_ticket,
             set_spec,
             set_ticket_status,
@@ -493,6 +646,8 @@ pub fn run() {
             install_acli,
             jira_logout,
             jira_sync,
+            jira_detail,
+            open_in_jira,
             draft_ticket,
             open_pr,
             start_session,

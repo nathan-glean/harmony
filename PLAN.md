@@ -97,9 +97,11 @@ The Rust core behind a `harmony` CLI. Lives in `core/` (workspace member).
 - [x] **Settings injector** (`core/src/settings.rs`): **merges** hooks into per-worktree
       `.claude/settings.local.json` (NOT `settings.json` — that's tracked; see finding).
       Idempotent; preserves repo + Claude-local entries.
-- [x] **Session manager** (`core/src/session.rs`): spawn `claude` in PTY (cwd=worktree);
-      first prompt = rendered spec; resume via `--resume`; returns a handle exposing the
-      PTY master. Session-end = child process exit.
+- [x] **Session manager** (`core/src/session.rs`): spawn `claude` in PTY (cwd=worktree).
+      **Fresh start** sends the rendered spec; **resume** uses `claude --resume <id>` to
+      restore the real conversation and sends only a brief "Continue where you left off."
+      nudge (no spec re-paste). Returns a handle exposing the PTY master; session-end =
+      child process exit.
 - [x] **CLI** (`core/src/main.rs`): `repo add/list`, `ticket add/list`, `start`, `serve`.
 
 Deferred within Phase 1 (do alongside the UI / as needed):
@@ -127,7 +129,9 @@ target/debug/harmony start <ticket_id>   # creates worktree, injects hooks, spaw
       creds. **Board columns drive Jira**: moving a Jira-linked ticket to Todo/In Progress/
       In PR Review/Done transitions the issue if that status exists in its workflow
       (`jira_apply_column` → `transition_to_any`, best-effort); PR open posts the PR-link
-      comment. CLI: `jira login`/`logout`/`status`/`sync`. App: status/logout +
+      comment. **Auto-sync**: while connected the app polls `jira_sync` every 60s (silent,
+      non-overlapping) + once on connect/launch; manual "Sync Jira" still works. CLI:
+      `jira login`/`logout`/`status`/`sync`. App: status/logout +
       a Connect panel that points to `acli jira auth login` and re-checks.
       _(Replaced the earlier OAuth-REST + keychain approach — see DESIGN.)_
 - [x] **acli install affordance**: `cli_installed()` detection (PATH-augmented for macOS
@@ -172,19 +176,29 @@ App lives in `app/` (frontend) + `app/src-tauri/` (Tauri 2 backend, workspace me
       dropping into **Done removes the ticket's worktree(s)** (branch/PR untouched). Polls
       every 1.5s for live state.
 - [x] **Ticket detail + spec editor** (`App.tsx`): spec textarea, "Draft from Jira",
-      Save spec, Start session, Open PR; top-bar Sync.
+      Save spec, Start session, Open PR; top-bar Sync. For Jira tickets, a read-only
+      **Jira panel** (`JiraInfo.tsx`) shows the issue **description + comments**
+      (`jira_detail` → `get_issue` + `acli comment list`), loaded on select.
 - [x] **New (local) ticket** (`App.tsx`): top-bar "+ New ticket" → title + optional spec +
       optional repo → `add_local_ticket`. (CLI: `harmony ticket add --title … [--spec …]
       [--repo …]`, no `--key` = local.)
 - [x] **Sessions view** (`app/src/components/Sessions.tsx`): Board/Sessions nav toggle;
       table of all sessions (ticket, state, last tool, branch, started/ended, claude id),
-      live badge, click-a-row → opens its ticket. **"Clear ended (N)"** bulk button + per-row
-      delete (ended only). Backend `list_sessions`, `clear_ended_sessions`, `delete_session`.
-      CLI: `harmony sessions`, `harmony sessions --clear-ended`.
+      live badge, click-a-row → opens its ticket. **Rows are consolidated per worktree** —
+      all the start/resume runs of one conversation collapse into a single row with a
+      "×N runs" count (grouped in `Sessions.tsx` by `worktree_id`; live detected via the set
+      of live session ids). **"Clear ended (N)"** bulk button + per-group delete
+      (`delete_worktree_sessions`). Backend `list_sessions` (now returns `worktree_id`),
+      `clear_ended_sessions`, `delete_session`/`delete_worktree_sessions`. CLI: `harmony
+      sessions`, `harmony sessions --clear-ended`.
 - [x] **Worktrees view** (`app/src/components/Worktrees.tsx`): Board/Sessions/Worktrees
       nav; table (ticket, repo, branch, path, created); per-row **delete** (disabled while
       a session is live for that ticket) → `git worktree remove` + drop row/sessions.
       Backend `list_worktrees`, `delete_worktree`. CLI: `harmony worktrees [--delete <id>]`.
+- [x] **Claude task checklist** (`Tasks.tsx`): the session's TodoWrite list is captured by
+      the hook server (`tool_input.todos`) and stored on `ticket.todos`; the detail panel
+      renders a live checklist that ticks off (completed ✓ / in-progress ▸) as Claude works,
+      refreshed by the 1.5s poll.
 - [x] **Embedded terminal** (`Terminal.tsx`): xterm.js + fit addon bound to the session
       PTY over Tauri events; resize + auto-focus. **Live, steerable, per ticket** — live
       sessions tracked in a `ticketId → sessionId` map so several can run at once and each
@@ -201,13 +215,21 @@ Deferred within Phase 3 (next iterations):
       enters "waiting" (Claude wants input); clicking it focuses the app and opens that
       ticket. Edge-triggered (only on entry into waiting), seeded on first poll to avoid
       launch spam.
-- [ ] **Diff / PR pane**: render the worktree diff + PR check status in-app.
+- [x] **Diff / PR pane** (`app/src/components/DiffPane.tsx`): in the ticket detail panel,
+      shows `git diff --merge-base <base>` (committed + uncommitted vs base, colored) and
+      PR meta + `gh pr checks` status (green/red/amber dots). Backend `ticket_diff`/`ticket_pr`.
+- [x] **Permission mode**: sessions launch with `--permission-mode` from the
+      `permission_mode` setting (**default `auto`** = autonomous). Configurable in Settings
+      (auto / acceptEdits / default / plan / bypassPermissions); applied to new sessions.
 - [x] **Settings page** (`app/src/components/Settings.tsx`): list/add/**rename**/remove repos.
       Add uses the dialog plugin's **folder picker**; optional default Jira project key.
       Rename is click-to-edit inline. Remove is guarded (refuses if the repo still has
       worktrees) and clears the binding on its tickets. Backend `add_repo`/`rename_repo`/
       `delete_repo`; CLI: `harmony repo add/list/rename`.
-- [ ] **Resume-on-relaunch UI**: core already `--resume`s; rebuild terminal scrollback from transcript.
+- [x] **Resume-on-relaunch**: startup captures live-at-shutdown tickets; UI reattaches them
+      (`pending_reattach` → resume) on launch. Prior conversation shown via `session_transcript`
+      in a "Conversation so far" pane (`TranscriptPane.tsx`) — separate pane, not in-terminal
+      scrollback (Claude's TUI uses the alternate screen).
 - [ ] Move terminal output to base64 (currently UTF-8 lossy) for binary-safe streams.
 
 **Run it:**

@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import type { SessionView } from "../types";
 
 const fmt = (secs: number) =>
@@ -8,17 +9,74 @@ const fmt = (secs: number) =>
     minute: "2-digit",
   });
 
+type Group = {
+  worktreeId: number;
+  ticketId: number;
+  ticketTitle: string;
+  jiraKey: string | null;
+  branch: string;
+  claudeSessionId: string | null;
+  lastTool: string | null;
+  state: string;
+  startedAt: number;
+  endedAt: number | null;
+  live: boolean;
+  runs: number;
+};
+
 export function Sessions({
   sessions,
+  liveSessionIds,
   onOpen,
   onClearEnded,
-  onDelete,
+  onDeleteGroup,
 }: {
   sessions: SessionView[];
+  liveSessionIds: Set<number>;
   onOpen: (ticketId: number, live: boolean) => void;
   onClearEnded: () => void;
-  onDelete: (id: number) => void;
+  onDeleteGroup: (worktreeId: number) => void;
 }) {
+  // Collapse the many start/resume rows for one worktree into a single conversation row.
+  // `sessions` is newest-first (id DESC), so the first row seen per worktree is the most
+  // recent run and seeds the "latest" fields.
+  const groups = useMemo(() => {
+    const map = new Map<number, Group>();
+    for (const s of sessions) {
+      const live = liveSessionIds.has(s.id);
+      let g = map.get(s.worktree_id);
+      if (!g) {
+        g = {
+          worktreeId: s.worktree_id,
+          ticketId: s.ticket_id,
+          ticketTitle: s.ticket_title,
+          jiraKey: s.jira_key,
+          branch: s.branch,
+          claudeSessionId: s.claude_session_id,
+          lastTool: s.last_tool,
+          state: s.state,
+          startedAt: s.started_at,
+          endedAt: live ? null : s.ended_at ?? null,
+          live,
+          runs: 0,
+        };
+        map.set(s.worktree_id, g);
+      }
+      g.runs += 1;
+      if (live) {
+        g.live = true;
+        g.endedAt = null;
+      }
+      if (g.claudeSessionId == null && s.claude_session_id != null) g.claudeSessionId = s.claude_session_id;
+      if (g.lastTool == null && s.last_tool != null) g.lastTool = s.last_tool;
+      if (s.started_at < g.startedAt) g.startedAt = s.started_at;
+      if (!g.live && s.ended_at != null && (g.endedAt == null || s.ended_at > g.endedAt)) {
+        g.endedAt = s.ended_at;
+      }
+    }
+    return [...map.values()];
+  }, [sessions, liveSessionIds]);
+
   const endedCount = sessions.filter((s) => s.ended_at).length;
 
   return (
@@ -42,37 +100,36 @@ export function Sessions({
           </tr>
         </thead>
         <tbody>
-          {sessions.length === 0 && (
+          {groups.length === 0 && (
             <tr>
               <td className="empty" colSpan={8}>
                 No sessions yet — start one from a ticket.
               </td>
             </tr>
           )}
-          {sessions.map((s) => (
-            <tr key={s.id} className="srow" onClick={() => onOpen(s.ticket_id, !s.ended_at)}>
+          {groups.map((g) => (
+            <tr key={g.worktreeId} className="srow" onClick={() => onOpen(g.ticketId, g.live)}>
               <td>
-                <span className="card-key">{s.jira_key ?? `local #${s.ticket_id}`}</span>{" "}
-                {s.ticket_title}
+                <span className="card-key">{g.jiraKey ?? `local #${g.ticketId}`}</span>{" "}
+                {g.ticketTitle}
+                {g.runs > 1 && <span className="runs-badge"> ×{g.runs} runs</span>}
               </td>
               <td>
-                <span className="badge">{s.ended_at ? "ended" : s.state}</span>
+                <span className="badge">{g.live ? g.state : "ended"}</span>
               </td>
-              <td>{s.last_tool ?? "—"}</td>
-              <td className="mono">{s.branch}</td>
-              <td>{fmt(s.started_at)}</td>
-              <td>{s.ended_at ? fmt(s.ended_at) : <span className="live">● live</span>}</td>
-              <td className="mono">
-                {s.claude_session_id ? s.claude_session_id.slice(0, 8) : "—"}
-              </td>
+              <td>{g.lastTool ?? "—"}</td>
+              <td className="mono">{g.branch}</td>
+              <td>{fmt(g.startedAt)}</td>
+              <td>{g.endedAt ? fmt(g.endedAt) : <span className="live">● live</span>}</td>
+              <td className="mono">{g.claudeSessionId ? g.claudeSessionId.slice(0, 8) : "—"}</td>
               <td>
-                {s.ended_at && (
+                {!g.live && (
                   <button
                     className="row-del"
-                    title="Delete this session"
+                    title="Delete this session's runs"
                     onClick={(e) => {
                       e.stopPropagation();
-                      onDelete(s.id);
+                      onDeleteGroup(g.worktreeId);
                     }}
                   >
                     ×

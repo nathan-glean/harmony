@@ -1,6 +1,15 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { api } from "../api";
 import type { Repo } from "../types";
+
+const MODES = [
+  ["auto", "auto — autonomous (auto-approves most actions)"],
+  ["acceptEdits", "acceptEdits — auto-approve edits & safe commands"],
+  ["default", "default — ask for permission"],
+  ["plan", "plan — propose only, no changes"],
+  ["bypassPermissions", "bypassPermissions — no checks (isolated worktree)"],
+];
 
 export function Settings({
   repos,
@@ -18,6 +27,16 @@ export function Settings({
   const [project, setProject] = useState("");
   const [editId, setEditId] = useState<number | null>(null);
   const [editVal, setEditVal] = useState("");
+  const [mode, setMode] = useState("auto");
+
+  useEffect(() => {
+    api.getPermissionMode().then(setMode).catch(() => {});
+  }, []);
+
+  const changeMode = (m: string) => {
+    setMode(m);
+    api.setPermissionMode(m).catch(() => {});
+  };
 
   const commitRename = (r: Repo) => {
     const v = editVal.trim();
@@ -42,6 +61,18 @@ export function Settings({
 
   return (
     <div className="sessions settings">
+      <h3>Claude</h3>
+      <div className="settings-add">
+        <label className="muted">Permission mode (new sessions)</label>
+        <select value={mode} onChange={(e) => changeMode(e.target.value)}>
+          {MODES.map(([v, label]) => (
+            <option key={v} value={v}>
+              {label}
+            </option>
+          ))}
+        </select>
+      </div>
+
       <h3>Repositories</h3>
       <table>
         <thead>

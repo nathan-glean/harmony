@@ -12,6 +12,10 @@ import { Board } from "./components/Board";
 import { Sessions } from "./components/Sessions";
 import { Worktrees } from "./components/Worktrees";
 import { Settings } from "./components/Settings";
+import { DiffPane } from "./components/DiffPane";
+import { JiraInfo } from "./components/JiraInfo";
+import { Tasks } from "./components/Tasks";
+import { TranscriptPane } from "./components/TranscriptPane";
 import { TerminalView } from "./components/Terminal";
 import { api } from "./api";
 import type { Ticket, Repo, SessionView, WorktreeView } from "./types";
@@ -21,6 +25,7 @@ export function App() {
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [sessions, setSessions] = useState<SessionView[]>([]);
   const [worktrees, setWorktrees] = useState<WorktreeView[]>([]);
+  const [liveSessionIds, setLiveSessionIds] = useState<Set<number>>(new Set());
   const [selected, setSelected] = useState<Ticket | null>(null);
   const [spec, setSpec] = useState("");
   // Live terminals keyed by ticket id → session id (supports several at once).
@@ -30,6 +35,7 @@ export function App() {
   const prevStates = useRef<Map<number, string>>(new Map());
   const seeded = useRef(false);
   const lastAttention = useRef<number | null>(null);
+  const autoSyncing = useRef(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [jiraSite, setJiraSite] = useState<string | null>(null);
   const [acliInstalled, setAcliInstalled] = useState(true);
@@ -51,6 +57,7 @@ export function App() {
       // Backend is the source of truth for what's actually live.
       const live = await api.liveSessions();
       setLiveSessions(Object.fromEntries(live.map(([tid, sid]) => [tid, sid])));
+      setLiveSessionIds(new Set(live.map(([, sid]) => sid)));
 
       // Notify when a live session enters "waiting" (Claude wants input). Skip the first
       // pass so we don't fire for sessions that were already waiting on launch.
@@ -105,9 +112,9 @@ export function App() {
     }
   };
 
-  const deleteSession = async (id: number) => {
+  const deleteWorktreeSessions = async (worktreeId: number) => {
     try {
-      await api.deleteSession(id);
+      await api.deleteWorktreeSessions(worktreeId);
       await refresh();
     } catch (e) {
       flash(String(e));
@@ -197,6 +204,46 @@ export function App() {
     const t = setInterval(refresh, 1500);
     return () => clearInterval(t);
   }, [refresh, refreshJira]);
+
+  // Periodically pull assigned Jira issues while connected (silent, non-overlapping).
+  // Runs once on connect/launch, then every 60s. Manual "Sync Jira" still works.
+  useEffect(() => {
+    if (!jiraSite) return;
+    const tick = async () => {
+      if (autoSyncing.current) return;
+      autoSyncing.current = true;
+      try {
+        await api.jiraSync();
+        await refresh();
+      } catch {
+        /* not connected / acli unavailable — ignore */
+      } finally {
+        autoSyncing.current = false;
+      }
+    };
+    const id = setInterval(tick, 60000);
+    tick();
+    return () => clearInterval(id);
+  }, [jiraSite, refresh]);
+
+  // Reattach on launch: resume sessions that were live when the app last closed.
+  useEffect(() => {
+    api
+      .pendingReattach()
+      .then(async (ids) => {
+        for (const id of ids) {
+          try {
+            const sid = await api.startSession(id, null);
+            setLiveSessions((m) => ({ ...m, [id]: sid }));
+          } catch {
+            /* couldn't reattach this one */
+          }
+        }
+        if (ids.length) refresh();
+      })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Clicking an attention notification → focus the app and open that ticket. Its live
   // terminal is already attached (kept current by the poll), so it just shows.
@@ -304,6 +351,9 @@ export function App() {
     }
     await refresh();
   };
+
+  // The selected ticket, but kept fresh from the poll (so live todos/status update).
+  const liveTicket = selected ? tickets.find((t) => t.id === selected.id) ?? selected : null;
 
   return (
     <div className="app">
@@ -482,9 +532,10 @@ export function App() {
         ) : view === "sessions" ? (
           <Sessions
             sessions={sessions}
+            liveSessionIds={liveSessionIds}
             onOpen={openTicketFromSession}
             onClearEnded={clearEndedSessions}
-            onDelete={deleteSession}
+            onDeleteGroup={deleteWorktreeSessions}
           />
         ) : (
         <>
@@ -500,6 +551,15 @@ export function App() {
             <div className="detail-head">
               <span className="badge">{selected.status}</span>
               <strong>{selected.jira_key ?? `local #${selected.id}`}</strong>
+              {selected.jira_key && (
+                <button
+                  className="jira-open"
+                  title="Open in Jira"
+                  onClick={() => api.openInJira(selected.id).catch((e) => flash(String(e)))}
+                >
+                  ↗ Jira
+                </button>
+              )}
               <button className="close" title="Close" onClick={() => setSelected(null)}>
                 ×
               </button>
@@ -589,6 +649,8 @@ export function App() {
               </button>
             </div>
 
+            {selected.jira_key && <JiraInfo ticketId={selected.id} />}
+
             <textarea
               className="spec"
               value={spec}
@@ -596,11 +658,19 @@ export function App() {
               onChange={(e) => setSpec(e.target.value)}
             />
 
+            {liveTicket?.todos && <Tasks todosJson={liveTicket.todos} />}
+
+            <TranscriptPane ticketId={selected.id} />
+
             {liveSessions[selected.id] && (
               <>
                 <div className="term-head">Live terminal — type to steer Claude</div>
                 <TerminalView sessionId={liveSessions[selected.id]} />
               </>
+            )}
+
+            {worktrees.some((w) => w.ticket_id === selected.id) && (
+              <DiffPane ticketId={selected.id} />
             )}
           </aside>
         )}

@@ -25,6 +25,8 @@ pub struct Ticket {
     pub repo_id: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Claude's task list (TodoWrite), as a JSON array of {content, status}.
+    pub todos: String,
 }
 
 /// An isolated git worktree for a ticket. Per-ticket and reused; `is_alternate`
@@ -74,6 +76,7 @@ pub struct WorktreeView {
 pub struct SessionView {
     pub id: i64,
     pub ticket_id: i64,
+    pub worktree_id: i64,
     pub ticket_title: String,
     pub jira_key: Option<String>,
     pub branch: String,

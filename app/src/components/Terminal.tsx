@@ -27,6 +27,16 @@ export function TerminalView({ sessionId }: { sessionId: number }) {
     term.focus(); // ready to steer immediately
     api.resize(sessionId, term.cols, term.rows).catch(() => {});
 
+    // Reattaching to an idle Claude TUI shows blank until something changes (it only
+    // repaints on demand). Nudge the PTY size (SIGWINCH) to force a full repaint into
+    // this fresh terminal.
+    const nudge = setTimeout(() => {
+      api
+        .resize(sessionId, term.cols, term.rows + 1)
+        .then(() => api.resize(sessionId, term.cols, term.rows))
+        .catch(() => {});
+    }, 80);
+
     const onData = term.onData((d) => api.sendInput(sessionId, d).catch(() => {}));
 
     const unlisten = listen<TermOutput>("term-output", (e) => {
@@ -44,6 +54,7 @@ export function TerminalView({ sessionId }: { sessionId: number }) {
     window.addEventListener("resize", onResize);
 
     return () => {
+      clearTimeout(nudge);
       onData.dispose();
       unlisten.then((u) => u());
       window.removeEventListener("resize", onResize);

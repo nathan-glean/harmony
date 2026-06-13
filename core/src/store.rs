@@ -49,7 +49,8 @@ impl Store {
             status TEXT NOT NULL DEFAULT 'todo',
             repo_id INTEGER,
             created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL
+            updated_at INTEGER NOT NULL,
+            todos TEXT NOT NULL DEFAULT ''
         );
         UPDATE tickets SET status = 'todo' WHERE status IN ('available', 'ready');
         CREATE TABLE IF NOT EXISTS worktrees (
@@ -82,6 +83,13 @@ impl Store {
                 sqlx::query(s).execute(&self.pool).await?;
             }
         }
+        // Add columns introduced after the initial schema (ignore "duplicate column").
+        let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN todos TEXT NOT NULL DEFAULT ''")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE sessions ADD COLUMN transcript_path TEXT")
+            .execute(&self.pool)
+            .await;
         Ok(())
     }
 
@@ -195,7 +203,7 @@ impl Store {
 
     pub async fn get_ticket(&self, id: i64) -> Result<Option<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos
              FROM tickets WHERE id = ?",
         )
         .bind(id)
@@ -205,7 +213,7 @@ impl Store {
 
     pub async fn list_tickets(&self) -> Result<Vec<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos
              FROM tickets ORDER BY id",
         )
         .fetch_all(&self.pool)
@@ -336,6 +344,38 @@ impl Store {
         Ok(r.last_insert_rowid())
     }
 
+    pub async fn set_session_transcript_path(&self, id: i64, path: &str) -> Result<()> {
+        sqlx::query("UPDATE sessions SET transcript_path = ? WHERE id = ?")
+            .bind(path)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Latest known transcript path for any of a ticket's sessions (resumed sessions
+    /// share the same Claude session id → same transcript file).
+    pub async fn latest_transcript_path_for_ticket(&self, ticket_id: i64) -> Result<Option<String>> {
+        Ok(sqlx::query_scalar::<_, String>(
+            "SELECT transcript_path FROM sessions
+             WHERE ticket_id = ? AND transcript_path IS NOT NULL
+             ORDER BY id DESC LIMIT 1",
+        )
+        .bind(ticket_id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    /// Distinct tickets that had an open (not-ended) session — i.e. were live at the last
+    /// shutdown. Used to reattach on relaunch (call before `end_all_open_sessions`).
+    pub async fn tickets_with_open_session(&self) -> Result<Vec<i64>> {
+        Ok(sqlx::query_scalar::<_, i64>(
+            "SELECT DISTINCT ticket_id FROM sessions WHERE ended_at IS NULL",
+        )
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
     pub async fn set_session_claude_id(&self, id: i64, claude_session_id: &str) -> Result<()> {
         sqlx::query("UPDATE sessions SET claude_session_id = ? WHERE id = ?")
             .bind(claude_session_id)
@@ -383,6 +423,16 @@ impl Store {
         Ok(r.rows_affected())
     }
 
+    /// Delete a worktree's ended sessions (used to clear a consolidated group). Live
+    /// sessions are kept. Returns how many were removed.
+    pub async fn delete_ended_sessions_for_worktree(&self, worktree_id: i64) -> Result<u64> {
+        let r = sqlx::query("DELETE FROM sessions WHERE worktree_id = ? AND ended_at IS NOT NULL")
+            .bind(worktree_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(r.rows_affected())
+    }
+
     /// Delete a single session, but only if it has ended (won't drop a live one).
     pub async fn delete_session(&self, id: i64) -> Result<()> {
         sqlx::query("DELETE FROM sessions WHERE id = ? AND ended_at IS NOT NULL")
@@ -409,8 +459,8 @@ impl Store {
     /// All sessions, newest first, joined with ticket + worktree info.
     pub async fn list_sessions(&self) -> Result<Vec<SessionView>> {
         Ok(sqlx::query_as::<_, SessionView>(
-            "SELECT s.id, s.ticket_id, t.title AS ticket_title, t.jira_key, w.branch,
-                    s.state, s.last_tool, s.claude_session_id, s.started_at, s.ended_at
+            "SELECT s.id, s.ticket_id, w.id AS worktree_id, t.title AS ticket_title, t.jira_key,
+                    w.branch, s.state, s.last_tool, s.claude_session_id, s.started_at, s.ended_at
              FROM sessions s
              JOIN tickets t ON t.id = s.ticket_id
              JOIN worktrees w ON w.id = s.worktree_id
@@ -436,7 +486,7 @@ impl Store {
 
     pub async fn get_ticket_by_key(&self, key: &str) -> Result<Option<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos
              FROM tickets WHERE jira_key = ?",
         )
         .bind(key)
@@ -459,6 +509,16 @@ impl Store {
             let id = self.add_ticket(Some(key), "jira", title, "", None).await?;
             Ok((id, true))
         }
+    }
+
+    /// Replace the ticket's Claude task list (JSON array of {content, status}).
+    pub async fn set_ticket_todos(&self, id: i64, todos_json: &str) -> Result<()> {
+        sqlx::query("UPDATE tickets SET todos = ? WHERE id = ?")
+            .bind(todos_json)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     /// Set the agent spec (does not change the column).

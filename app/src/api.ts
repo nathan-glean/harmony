@@ -7,13 +7,20 @@ export const api = {
   listRepos: () => invoke<Repo[]>("list_repos"),
   addRepo: (name: string, path: string, project: string | null) =>
     invoke<number>("add_repo", { name, path, project }),
+  getPermissionMode: () => invoke<string>("get_permission_mode"),
+  setPermissionMode: (mode: string) => invoke<void>("set_permission_mode", { mode }),
   renameRepo: (id: number, name: string) => invoke<void>("rename_repo", { id, name }),
   deleteRepo: (id: number) => invoke<void>("delete_repo", { id }),
   getTicket: (id: number) => invoke<Ticket | null>("get_ticket", { id }),
   listSessions: () => invoke<SessionView[]>("list_sessions"),
   liveSessions: () => invoke<[number, number][]>("live_sessions"),
+  pendingReattach: () => invoke<number[]>("pending_reattach"),
+  sessionTranscript: (ticketId: number) =>
+    invoke<string>("session_transcript", { ticketId }),
   clearEndedSessions: () => invoke<number>("clear_ended_sessions"),
   deleteSession: (id: number) => invoke<void>("delete_session", { id }),
+  deleteWorktreeSessions: (worktreeId: number) =>
+    invoke<number>("delete_worktree_sessions", { worktreeId }),
   listWorktrees: () => invoke<WorktreeView[]>("list_worktrees"),
   deleteWorktree: (id: number) => invoke<void>("delete_worktree", { id }),
   cleanupTicketWorktrees: (ticketId: number) =>
@@ -31,7 +38,16 @@ export const api = {
   jiraLogout: () => invoke<void>("jira_logout"),
   jiraSync: () => invoke<number>("jira_sync"),
   draftTicket: (id: number) => invoke<string>("draft_ticket", { id }),
+  jiraDetail: (ticketId: number) =>
+    invoke<{ description: string; comments: { author: string; created: string; body: string }[] }>(
+      "jira_detail",
+      { ticketId }
+    ),
   openPr: (ticketId: number) => invoke<string>("open_pr", { ticketId }),
+  openInJira: (ticketId: number) => invoke<void>("open_in_jira", { ticketId }),
+  ticketDiff: (ticketId: number) => invoke<string>("ticket_diff", { ticketId }),
+  ticketPr: (ticketId: number) =>
+    invoke<{ pr: any | null; checks: any[] }>("ticket_pr", { ticketId }),
   startSession: (ticketId: number, repo: string | null) =>
     invoke<number>("start_session", { ticketId, repo }),
   sendInput: (sessionId: number, data: string) =>

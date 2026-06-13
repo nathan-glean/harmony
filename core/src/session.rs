@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use serde_json::Value;
 
 use crate::models::Ticket;
 use crate::store::Store;
@@ -73,8 +74,21 @@ impl SessionManager {
             .store
             .latest_claude_session_id_for_ticket(ticket_id)
             .await?;
-        let prompt = render_prompt(&ticket);
-        let (master, child) = spawn_claude(&wt.path, &prompt, resume.as_deref())?;
+        // Fresh start sends the full spec; a resume restores the conversation via
+        // `--resume` and only nudges Claude to continue (don't re-paste the spec).
+        let prompt = if resume.is_some() {
+            "Continue where you left off.".to_string()
+        } else {
+            render_prompt(&ticket)
+        };
+        // Permission mode (DESIGN Q1: autonomy). Defaults to `auto` so Claude runs
+        // autonomously; configurable in Settings.
+        let mode = self
+            .store
+            .get_setting("permission_mode")
+            .await?
+            .unwrap_or_else(|| "auto".to_string());
+        let (master, child) = spawn_claude(&wt.path, &prompt, resume.as_deref(), &mode)?;
 
         let session_id = self.store.add_session(ticket_id, wt.id).await?;
         self.store
@@ -102,10 +116,77 @@ fn render_prompt(t: &Ticket) -> String {
     }
 }
 
+/// Render a Claude Code session transcript (JSONL) into a readable plain-text
+/// conversation for the "Conversation so far" pane. Best-effort / approximate — the TUI
+/// uses the alternate screen, so we can't faithfully rebuild xterm scrollback; this gives
+/// the prior conversation instead.
+pub fn render_transcript(path: &str) -> Result<String> {
+    let content = std::fs::read_to_string(path)?;
+    let mut out = String::new();
+    for line in content.lines() {
+        let v: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let typ = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
+        let msg = v.get("message");
+        let role = msg
+            .and_then(|m| m.get("role"))
+            .and_then(|x| x.as_str())
+            .unwrap_or(typ);
+        let content_node = msg.and_then(|m| m.get("content")).or_else(|| v.get("content"));
+        let text = extract_blocks(content_node);
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        match role {
+            "user" => {
+                out.push_str("❯ ");
+                out.push_str(text);
+                out.push_str("\n\n");
+            }
+            "assistant" => {
+                out.push_str(text);
+                out.push_str("\n\n");
+            }
+            _ => {}
+        }
+    }
+    Ok(out.trim_end().to_string())
+}
+
+fn extract_blocks(content: Option<&Value>) -> String {
+    match content {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(arr)) => {
+            let mut s = String::new();
+            for b in arr {
+                match b.get("type").and_then(|x| x.as_str()).unwrap_or("") {
+                    "text" => {
+                        if let Some(t) = b.get("text").and_then(|x| x.as_str()) {
+                            s.push_str(t);
+                            s.push('\n');
+                        }
+                    }
+                    "tool_use" => {
+                        let name = b.get("name").and_then(|x| x.as_str()).unwrap_or("tool");
+                        s.push_str(&format!("⏺ {name}\n"));
+                    }
+                    _ => {}
+                }
+            }
+            s
+        }
+        _ => String::new(),
+    }
+}
+
 fn spawn_claude(
     cwd: &str,
     prompt: &str,
     resume: Option<&str>,
+    permission_mode: &str,
 ) -> Result<(Box<dyn MasterPty + Send>, Box<dyn Child + Send + Sync>)> {
     let pty = native_pty_system();
     let pair = pty.openpty(PtySize {
@@ -118,7 +199,7 @@ fn spawn_claude(
     let mut cmd = CommandBuilder::new("claude");
     cmd.cwd(cwd);
     cmd.arg("--permission-mode");
-    cmd.arg("default"); // supervised; autonomy mode would elevate this
+    cmd.arg(permission_mode);
     if let Some(id) = resume {
         cmd.arg("--resume");
         cmd.arg(id);

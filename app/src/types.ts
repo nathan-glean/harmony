@@ -8,6 +8,7 @@ export type Ticket = {
   repo_id: number | null;
   created_at: number;
   updated_at: number;
+  todos: string; // JSON array of { content, status }
 };
 
 export type Repo = {
@@ -33,6 +34,7 @@ export type WorktreeView = {
 export type SessionView = {
   id: number;
   ticket_id: number;
+  worktree_id: number;
   ticket_title: string;
   jira_key: string | null;
   branch: string;

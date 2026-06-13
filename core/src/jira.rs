@@ -7,6 +7,7 @@
 //! once against real `acli jira workitem search --json` output and tighten if needed.
 
 use anyhow::{anyhow, Result};
+use serde::Serialize;
 use serde_json::Value;
 use tokio::process::Command;
 
@@ -15,6 +16,13 @@ pub struct JiraIssue {
     pub summary: String,
     pub description: String,
     pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct JiraComment {
+    pub author: String,
+    pub created: String,
+    pub body: String,
 }
 
 /// PATH augmented with common Homebrew bin dirs. macOS GUI apps (a bundled Tauri app
@@ -202,6 +210,54 @@ pub async fn transition_to_any(key: &str, candidates: &[&str]) -> Result<bool> {
 pub async fn add_comment(key: &str, body: &str) -> Result<()> {
     acli(&["jira", "workitem", "comment", "create", "--key", key, "--body", body]).await?;
     Ok(())
+}
+
+/// Open the issue in the browser via acli (uses its auth/site knowledge).
+pub async fn open_in_browser(key: &str) -> Result<()> {
+    acli(&["jira", "workitem", "view", "--key", key, "--web"]).await?;
+    Ok(())
+}
+
+/// Fetch the issue's comments (oldest-first as Jira returns them). Defensive JSON parsing.
+pub async fn comments(key: &str) -> Result<Vec<JiraComment>> {
+    let json = acli(&["jira", "workitem", "comment", "list", "--key", key, "--json"]).await?;
+    let v: Value = serde_json::from_str(json.trim())
+        .map_err(|e| anyhow!("could not parse acli comments JSON ({e})"))?;
+    let arr: Vec<Value> = if let Some(a) = v.as_array() {
+        a.clone()
+    } else {
+        ["comments", "values", "results", "data"]
+            .iter()
+            .find_map(|k| v.get(*k).and_then(|x| x.as_array()).cloned())
+            .unwrap_or_default()
+    };
+    Ok(arr.iter().map(comment_from_json).collect())
+}
+
+fn comment_from_json(c: &Value) -> JiraComment {
+    JiraComment {
+        author: str_at(
+            c,
+            &[
+                &["author", "displayName"],
+                &["author", "name"],
+                &["author"],
+                &["updateAuthor", "displayName"],
+            ],
+        )
+        .unwrap_or_default(),
+        created: str_at(c, &[&["created"], &["createdAt"], &["updated"]]).unwrap_or_default(),
+        body: node_text(c.get("body").or_else(|| c.get("renderedBody"))),
+    }
+}
+
+/// Plain text from a node that may be a string or an ADF object/array.
+fn node_text(node: Option<&Value>) -> String {
+    match node {
+        Some(Value::String(s)) => s.clone(),
+        Some(v @ Value::Object(_)) | Some(v @ Value::Array(_)) => adf_to_text(v),
+        _ => String::new(),
+    }
 }
 
 // ---- JSON parsing (defensive) --------------------------------------------

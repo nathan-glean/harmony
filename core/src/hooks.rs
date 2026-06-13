@@ -77,12 +77,40 @@ async fn handle(
                     let _ = store.set_session_claude_id(sess.id, cid).await;
                 }
             }
+            if let Some(tp) = v.get("transcript_path").and_then(|x| x.as_str()) {
+                let _ = store.set_session_transcript_path(sess.id, tp).await;
+            }
             let (session_state, ticket_status) = match event.as_str() {
                 "Stop" | "Notification" => ("waiting", crate::status::WAITING),
                 _ => ("working", crate::status::WORKING),
             };
             let _ = store.set_session_state(sess.id, session_state, tool).await;
             let _ = store.set_ticket_status(sess.ticket_id, ticket_status).await;
+
+            // Claude's task list (TodoWrite) → mirror onto the ticket as a checklist.
+            if tool == Some("TodoWrite") {
+                if let Some(arr) = v
+                    .get("tool_input")
+                    .and_then(|ti| ti.get("todos"))
+                    .and_then(|t| t.as_array())
+                {
+                    let compact: Vec<Value> = arr
+                        .iter()
+                        .map(|t| {
+                            json!({
+                                "content": t.get("content").and_then(|x| x.as_str())
+                                    .or_else(|| t.get("activeForm").and_then(|x| x.as_str()))
+                                    .unwrap_or(""),
+                                "status": t.get("status").and_then(|x| x.as_str()).unwrap_or("pending"),
+                            })
+                        })
+                        .collect();
+                    if let Ok(s) = serde_json::to_string(&compact) {
+                        let _ = store.set_ticket_todos(sess.ticket_id, &s).await;
+                    }
+                }
+            }
+
             log_event(&format!(
                 "[hook] {event} ticket=#{} session=#{} tool={}",
                 sess.ticket_id,
