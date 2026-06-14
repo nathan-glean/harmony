@@ -111,7 +111,7 @@ The Rust core behind a `harmony` CLI. Lives in `core/` (workspace member).
 - [x] **CLI** (`core/src/main.rs`): `repo add/list`, `ticket add/list`, `start`, `serve`.
 
 Deferred within Phase 1 (do alongside the UI / as needed):
-- [ ] **Transcript tailer**: tail session JSONL → richer in-session progress.
+- [x] **Transcript tailer**: tail session JSONL → richer in-session progress.
 - [ ] **Hook auth token** (shared secret in the injected settings; localhost-bind is the
       boundary for now) — Phase 4 hardening.
 - [ ] **Structured spec fields** (acceptance criteria / paths / constraints as columns) —

@@ -139,6 +139,49 @@ fn live_sessions(state: State<'_, AppState>) -> Vec<(i64, i64)> {
     map.iter().map(|(sid, io)| (io.ticket_id, *sid)).collect()
 }
 
+#[derive(Clone, Serialize)]
+struct SessionProgress {
+    ticket_id: i64,
+    session_id: i64,
+    message: Option<String>,
+    tool: Option<String>,
+}
+
+/// Live "latest progress" for every session live in THIS process, tailed from each one's
+/// JSONL transcript (last assistant message + current tool). Richer than the hook-derived
+/// working/waiting flag; polled alongside the board to drive the card/detail progress line.
+#[tauri::command]
+async fn live_progress(state: State<'_, AppState>) -> Result<Vec<SessionProgress>, String> {
+    // Snapshot the live pairs and release the lock before any awaits.
+    let live: Vec<(i64, i64)> = {
+        let map = state.sessions.lock().unwrap();
+        map.iter().map(|(sid, io)| (io.ticket_id, *sid)).collect()
+    };
+    let mut out = Vec::new();
+    for (ticket_id, session_id) in live {
+        let path = state
+            .store
+            .latest_transcript_path_for_ticket(ticket_id)
+            .await
+            .ok()
+            .flatten();
+        let Some(path) = path else { continue };
+        let prog = tokio::task::spawn_blocking(move || harmony_core::session::latest_progress(&path))
+            .await
+            .ok()
+            .flatten();
+        if let Some(p) = prog {
+            out.push(SessionProgress {
+                ticket_id,
+                session_id,
+                message: p.message,
+                tool: p.tool,
+            });
+        }
+    }
+    Ok(out)
+}
+
 #[tauri::command]
 async fn clear_ended_sessions(state: State<'_, AppState>) -> Result<u64, String> {
     state.store.delete_ended_sessions().await.map_err(|e| e.to_string())
@@ -724,6 +767,7 @@ pub fn run() {
             get_ticket,
             list_sessions,
             live_sessions,
+            live_progress,
             pending_reattach,
             session_transcript,
             clear_ended_sessions,

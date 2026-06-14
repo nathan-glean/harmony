@@ -50,13 +50,15 @@ Core already resumes via `claude --resume <id>`, but the terminal opens blank. R
 - **AC:** Relaunching the app reattaches live tickets and renders the prior conversation, not an empty terminal. (Scrollback is an approximation — see risks.) ✅
 - Built: **(a) Reattach** — startup captures tickets that were live at shutdown (`tickets_with_open_session`, before the zombie reconcile); UI drains `pending_reattach` on mount and resumes each (`claude --resume`), repopulating the live map. **(b) Prior conversation** — the hook stores `transcript_path`; `session_transcript` renders the JSONL into a read-only "Conversation so far" pane in the detail. NOTE: rendered as a separate pane, not in-terminal scrollback — Claude's TUI uses the **alternate screen**, so writing scrollback into the live xterm would be wiped on redraw.
 
-### 3. Transcript tailer `[session]`
-Tail `~/.claude/projects/<hash>/<id>.jsonl` for richer in-session progress (last assistant message, current tool) beyond the hook-derived working/waiting flag. Named in DESIGN architecture; not yet implemented.
-- **AC:** Board card / detail shows a live "latest progress" line sourced from the transcript.
+### 3. Transcript tailer `[session]` — ✅ DONE
+Tail `~/.claude/projects/<hash>/<id>.jsonl` for richer in-session progress (last assistant message, current tool) beyond the hook-derived working/waiting flag. Named in DESIGN architecture.
+- **AC:** Board card / detail shows a live "latest progress" line sourced from the transcript. ✅
+- Built: **(a) Tailer** — `session::latest_progress` seeks the last 64 KB of the JSONL (dropping the partial leading line, lossy UTF-8 at the boundary), walks the assistant lines and returns the latest text block (whitespace-collapsed, capped 280 chars) + most recent `tool_use` name. **(b) Plumbing** — `live_progress` command tails every session live in *this* process (reusing `latest_transcript_path_for_ticket`, off-thread via `spawn_blocking`); the UI polls it on the existing 1.5 s board loop into a ticket-keyed `progress` map. **(c) UI** — shared `ProgressLine` renders a tool chip + message; shown compact on board cards and in the detail panel. Live-only (keyed off the in-process session map), so ended sessions drop their line.
 
-### 4. Verify `acli --json` mapping + tighten `parse_issues` `[jira][test]`
+### 4. Verify `acli --json` mapping + tighten `parse_issues` `[jira][test]` — ✅ DONE
 `acli`'s JSON schema is undocumented and `jira.rs` already parses defensively across multiple shapes. Validate against a real instance and lock it down.
-- **AC:** A recorded real `acli` payload round-trips through `parse_issues` under test; brittle field guesses removed or asserted.
+- **AC:** A recorded real `acli` payload round-trips through `parse_issues` under test; brittle field guesses removed or asserted. ✅
+- Done (verified live against acli 1.3.19 / teamgenio.atlassian.net, 2026-06-15): captured real payloads — `workitem search` → top-level **array**, `summary`/`status.name`/`description`(ADF) under `fields`; `comment list` → `{comments:[…]}` with **plain-string** `author`+`body` and **no timestamp**. Reordered `item_to_issue`/`comment_from_json` to try verified paths first (defensive fallbacks kept + asserted), documented the schema in the module header, and added 3 regression tests from the recorded fixtures (`parses_real_search_shape`, `parses_real_comment_shape`, `description_handles_plain_string_fallback`). Note: fixtures are snapshots — they pin our parser to the recorded shape, not acli version drift (the fallbacks hedge that).
 
 ### 5. Core test suite `[test]`
 No tests today. Cover the load-bearing logic: store CRUD, worktree create/reuse + branch-naming/slugify, and the cwd→worktree→session correlation in the hook server.
@@ -78,9 +80,11 @@ Promote acceptance criteria / relevant paths / constraints from one markdown blo
 PR body is currently the spec verbatim. Generate a summary of the actual diff for the PR body, and let Draft scan the repo for relevant paths.
 - **AC:** `harmony pr` uses a generated diff summary when available; Draft output references real repo paths.
 
-### 9. Jira pagination + optional JQL scope `[jira]`
+### 9. Jira pagination + optional JQL scope `[jira]` — ⏳ PARTIAL
 Sync currently caps at the first ~50 assigned issues. Add `acli --paginate`, and optionally allow pulling an arbitrary issue by key / a JQL query.
-- **AC:** Sync retrieves >50 issues; an issue can be imported by key even if unassigned.
+- **AC:** Sync retrieves >50 issues ✅; an issue can be imported by key even if unassigned ⬜ (not yet).
+- Done: `search_assigned` now uses `--paginate` instead of `--limit 50` (acli returns the full set as one top-level array — verified 127 results in a single call, 2026-06-15).
+- Remaining: import-by-key / arbitrary-JQL scope for unassigned issues.
 
 ### 10. Hook auth token `[hardening]`
 The only boundary today is localhost-bind. Inject a shared secret into the per-worktree settings and verify it server-side.

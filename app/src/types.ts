@@ -59,6 +59,15 @@ export type SessionView = {
   ended_at: number | null;
 };
 
+// Live in-session progress tailed from a session's transcript (last assistant message +
+// current tool), keyed by ticket. Richer than SessionView.state's working/waiting flag.
+export type SessionProgress = {
+  ticket_id: number;
+  session_id: number;
+  message: string | null;
+  tool: string | null;
+};
+
 export const COLUMNS = ["todo", "working", "waiting", "in_review", "done"] as const;
 
 export const COLUMN_LABELS: Record<string, string> = {

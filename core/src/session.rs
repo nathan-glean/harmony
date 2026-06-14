@@ -246,6 +246,93 @@ pub fn render_transcript(path: &str) -> Result<String> {
     Ok(out.trim_end().to_string())
 }
 
+/// A snapshot of in-session progress tailed from the live transcript: the latest assistant
+/// text and the most recently invoked tool. Richer than the hook-derived working/waiting flag.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct TranscriptProgress {
+    /// Latest assistant text block (newlines collapsed, capped), if any.
+    pub message: Option<String>,
+    /// Name of the most recent `tool_use`, if any.
+    pub tool: Option<String>,
+}
+
+/// Tail a session's JSONL transcript and extract the latest in-session progress without
+/// reading the whole file: we seek to the last `TAIL` bytes, drop the (likely partial) first
+/// line, then walk the complete assistant lines tracking the most recent text + tool_use.
+pub fn latest_progress(path: &str) -> Option<TranscriptProgress> {
+    use std::io::{Read, Seek, SeekFrom};
+    const TAIL: u64 = 64 * 1024;
+    const MAX_MSG: usize = 280;
+
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    let start = len.saturating_sub(TAIL);
+    f.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = Vec::new();
+    f.read_to_end(&mut bytes).ok()?;
+    // The seek may land mid-character; lossily decode and discard a partial leading line.
+    let buf = String::from_utf8_lossy(&bytes);
+    let body = if start > 0 {
+        match buf.find('\n') {
+            Some(i) => &buf[i + 1..],
+            None => "",
+        }
+    } else {
+        &buf[..]
+    };
+
+    let mut progress = TranscriptProgress::default();
+    for line in body.lines() {
+        let v: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let msg = v.get("message");
+        let role = msg.and_then(|m| m.get("role")).and_then(|x| x.as_str()).unwrap_or("");
+        if role != "assistant" {
+            continue;
+        }
+        if let Some(Value::Array(arr)) = msg.and_then(|m| m.get("content")) {
+            for b in arr {
+                match b.get("type").and_then(|x| x.as_str()).unwrap_or("") {
+                    "text" => {
+                        if let Some(t) = b.get("text").and_then(|x| x.as_str()) {
+                            let t = t.trim();
+                            if !t.is_empty() {
+                                progress.message = Some(collapse(t, MAX_MSG));
+                            }
+                        }
+                    }
+                    "tool_use" => {
+                        if let Some(n) = b.get("name").and_then(|x| x.as_str()) {
+                            progress.tool = Some(n.to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    if progress.message.is_none() && progress.tool.is_none() {
+        None
+    } else {
+        Some(progress)
+    }
+}
+
+/// Collapse whitespace runs (incl. newlines) into single spaces and cap the length, so a
+/// progress line stays a single tidy line in the UI.
+fn collapse(s: &str, max: usize) -> String {
+    let one_line: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() > max {
+        let truncated: String = one_line.chars().take(max).collect();
+        format!("{truncated}…")
+    } else {
+        one_line
+    }
+}
+
 fn extract_blocks(content: Option<&Value>) -> String {
     match content {
         Some(Value::String(s)) => s.clone(),

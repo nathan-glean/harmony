@@ -17,9 +17,10 @@ import { JiraInfo } from "./components/JiraInfo";
 import { Tasks } from "./components/Tasks";
 import { QuestionCard } from "./components/QuestionCard";
 import { TranscriptPane } from "./components/TranscriptPane";
+import { ProgressLine } from "./components/ProgressLine";
 import { TerminalView } from "./components/Terminal";
 import { api } from "./api";
-import type { Ticket, Repo, SessionView, WorktreeView, PendingQuestion } from "./types";
+import type { Ticket, Repo, SessionView, WorktreeView, PendingQuestion, SessionProgress } from "./types";
 
 export function App() {
   const [view, setView] = useState<"board" | "sessions" | "worktrees" | "settings">("board");
@@ -31,6 +32,8 @@ export function App() {
   const [spec, setSpec] = useState("");
   // Live terminals keyed by ticket id → session id (supports several at once).
   const [liveSessions, setLiveSessions] = useState<Record<number, number>>({});
+  // Live in-session progress (last assistant message + current tool), keyed by ticket id.
+  const [progress, setProgress] = useState<Record<number, SessionProgress>>({});
   const detailRef = useRef<HTMLElement>(null);
   // Attention notifications: track prior session states to fire on entry into "waiting".
   const prevStates = useRef<Map<number, string>>(new Map());
@@ -61,6 +64,10 @@ export function App() {
       const live = await api.liveSessions();
       setLiveSessions(Object.fromEntries(live.map(([tid, sid]) => [tid, sid])));
       setLiveSessionIds(new Set(live.map(([, sid]) => sid)));
+
+      // Richer in-session progress tailed from each live transcript (board/detail line).
+      const prog = await api.liveProgress();
+      setProgress(Object.fromEntries(prog.map((p) => [p.ticket_id, p])));
 
       // Notify when a live session enters "waiting" (Claude wants input). Skip the first
       // pass so we don't fire for sessions that were already waiting on launch.
@@ -623,6 +630,7 @@ export function App() {
         <Board
           tickets={tickets}
           selectedId={selected?.id ?? null}
+          progress={progress}
           onSelect={setSelected}
           onMove={moveTicket}
         />
@@ -646,6 +654,10 @@ export function App() {
               </button>
             </div>
             <h2>{selected.title}</h2>
+
+            {progress[selected.id] && (
+              <ProgressLine p={progress[selected.id]} className="detail-progress" />
+            )}
 
             <div className="actions">
               {selected.jira_key && (

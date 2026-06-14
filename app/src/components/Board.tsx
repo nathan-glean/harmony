@@ -1,15 +1,18 @@
 import { useState } from "react";
-import type { Ticket } from "../types";
+import type { Ticket, SessionProgress } from "../types";
 import { COLUMNS, COLUMN_LABELS } from "../types";
+import { ProgressLine } from "./ProgressLine";
 
 export function Board({
   tickets,
   selectedId,
+  progress,
   onSelect,
   onMove,
 }: {
   tickets: Ticket[];
   selectedId: number | null;
+  progress: Record<number, SessionProgress>;
   onSelect: (t: Ticket) => void;
   onMove: (id: number, status: string) => void;
 }) {
@@ -57,6 +60,9 @@ export function Board({
                     {t.drafting ? <span className="card-drafting">drafting…</span> : null}
                   </div>
                   <div className="card-title">{t.title}</div>
+                  {progress[t.id] && (
+                    <ProgressLine p={progress[t.id]} className="card-progress" />
+                  )}
                 </button>
               ))}
             </div>

@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Ticket, Repo, SessionView, WorktreeView } from "./types";
+import type { Ticket, Repo, SessionView, WorktreeView, SessionProgress } from "./types";
 
 // Tauri converts camelCase JS arg keys to snake_case Rust params.
 export const api = {
@@ -14,6 +14,7 @@ export const api = {
   getTicket: (id: number) => invoke<Ticket | null>("get_ticket", { id }),
   listSessions: () => invoke<SessionView[]>("list_sessions"),
   liveSessions: () => invoke<[number, number][]>("live_sessions"),
+  liveProgress: () => invoke<SessionProgress[]>("live_progress"),
   pendingReattach: () => invoke<number[]>("pending_reattach"),
   sessionTranscript: (ticketId: number) =>
     invoke<string>("session_transcript", { ticketId }),
