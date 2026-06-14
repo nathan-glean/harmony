@@ -9,7 +9,18 @@ export type Ticket = {
   created_at: number;
   updated_at: number;
   todos: string; // JSON array of { content, status }
+  pending_question: string; // JSON { session_id, questions:[…] } or "" when none
 };
+
+// Shape of `Ticket.pending_question` once parsed (from an AskUserQuestion tool call).
+export type QuestionOption = { label: string; description: string };
+export type Question = {
+  question: string;
+  header: string;
+  multiSelect: boolean;
+  options: QuestionOption[];
+};
+export type PendingQuestion = { session_id: number; questions: Question[] };
 
 export type Repo = {
   id: number;

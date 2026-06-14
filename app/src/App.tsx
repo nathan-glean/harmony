@@ -15,10 +15,11 @@ import { Settings } from "./components/Settings";
 import { DiffPane } from "./components/DiffPane";
 import { JiraInfo } from "./components/JiraInfo";
 import { Tasks } from "./components/Tasks";
+import { QuestionCard } from "./components/QuestionCard";
 import { TranscriptPane } from "./components/TranscriptPane";
 import { TerminalView } from "./components/Terminal";
 import { api } from "./api";
-import type { Ticket, Repo, SessionView, WorktreeView } from "./types";
+import type { Ticket, Repo, SessionView, WorktreeView, PendingQuestion } from "./types";
 
 export function App() {
   const [view, setView] = useState<"board" | "sessions" | "worktrees" | "settings">("board");
@@ -49,7 +50,8 @@ export function App() {
 
   const refresh = useCallback(async () => {
     try {
-      setTickets(await api.listTickets());
+      const tks = await api.listTickets();
+      setTickets(tks);
       const sess = await api.listSessions();
       setSessions(sess);
       setWorktrees(await api.listWorktrees());
@@ -66,7 +68,7 @@ export function App() {
         const prev = prevStates.current.get(s.id);
         if (seeded.current && s.state === "waiting" && prev !== "waiting") {
           lastAttention.current = s.ticket_id;
-          notifyAttention(s);
+          notifyAttention(s, questionText(tks, s.ticket_id));
         }
       }
       const next = new Map<number, string>();
@@ -78,14 +80,28 @@ export function App() {
     }
   }, []);
 
-  async function notifyAttention(s: SessionView) {
+  // First pending-question text for a ticket (if Claude asked a structured question), so the
+  // notification can carry it. Returns null when there's no captured question.
+  function questionText(tks: Ticket[], ticketId: number): string | null {
+    const t = tks.find((x) => x.id === ticketId);
+    if (!t?.pending_question) return null;
+    try {
+      const pq: PendingQuestion = JSON.parse(t.pending_question);
+      return pq.questions[0]?.question ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function notifyAttention(s: SessionView, question: string | null) {
     try {
       let granted = await isPermissionGranted();
       if (!granted) granted = (await requestPermission()) === "granted";
       if (!granted) return;
+      const who = s.jira_key ?? `local #${s.ticket_id}`;
       sendNotification({
-        title: "Claude needs your input",
-        body: `${s.jira_key ?? `local #${s.ticket_id}`} — ${s.ticket_title}`,
+        title: question ? `Claude is asking — ${who}` : "Claude needs your input",
+        body: question ?? `${who} — ${s.ticket_title}`,
       });
     } catch {
       /* notifications unavailable */
@@ -354,6 +370,16 @@ export function App() {
 
   // The selected ticket, but kept fresh from the poll (so live todos/status update).
   const liveTicket = selected ? tickets.find((t) => t.id === selected.id) ?? selected : null;
+
+  // Claude's pending AskUserQuestion for the selected ticket, parsed for the question card.
+  const pendingQuestion: PendingQuestion | null = (() => {
+    if (!liveTicket?.pending_question) return null;
+    try {
+      return JSON.parse(liveTicket.pending_question);
+    } catch {
+      return null;
+    }
+  })();
 
   return (
     <div className="app">
@@ -648,6 +674,19 @@ export function App() {
                 {busy === "delete" ? "Deleting…" : "Delete"}
               </button>
             </div>
+
+            {pendingQuestion && (
+              <QuestionCard
+                pq={pendingQuestion}
+                onAnswered={() =>
+                  setTickets((ts) =>
+                    ts.map((t) =>
+                      t.id === selected.id ? { ...t, pending_question: "" } : t
+                    )
+                  )
+                }
+              />
+            )}
 
             {selected.jira_key && <JiraInfo ticketId={selected.id} />}
 

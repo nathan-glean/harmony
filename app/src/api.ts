@@ -52,6 +52,20 @@ export const api = {
     invoke<number>("start_session", { ticketId, repo }),
   sendInput: (sessionId: number, data: string) =>
     invoke<void>("send_input", { sessionId, data }),
+  answerQuestion: (
+    sessionId: number,
+    optionCount: number,
+    selected: number[],
+    customText: string | null,
+    multiSelect: boolean
+  ) =>
+    invoke<void>("answer_question", {
+      sessionId,
+      optionCount,
+      selected,
+      customText,
+      multiSelect,
+    }),
   stopSession: (sessionId: number) => invoke<void>("stop_session", { sessionId }),
   resize: (sessionId: number, cols: number, rows: number) =>
     invoke<void>("resize", { sessionId, cols, rows }),

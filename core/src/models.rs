@@ -27,6 +27,9 @@ pub struct Ticket {
     pub updated_at: i64,
     /// Claude's task list (TodoWrite), as a JSON array of {content, status}.
     pub todos: String,
+    /// Pending AskUserQuestion, as a JSON object {session_id, questions:[…]} or "" when
+    /// none. Surfaced as an answerable question card; cleared when Claude moves on.
+    pub pending_question: String,
 }
 
 /// An isolated git worktree for a ticket. Per-ticket and reused; `is_alternate`

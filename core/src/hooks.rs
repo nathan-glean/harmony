@@ -111,6 +111,48 @@ async fn handle(
                 }
             }
 
+            // AskUserQuestion → surface as an answerable question card in the UI.
+            // PreToolUse carries the questions+options; PostToolUse means it's answered.
+            if tool == Some("AskUserQuestion") {
+                if event == "PostToolUse" {
+                    let _ = store.clear_ticket_question(sess.ticket_id).await;
+                } else if let Some(questions) = v
+                    .get("tool_input")
+                    .and_then(|ti| ti.get("questions"))
+                    .and_then(|q| q.as_array())
+                {
+                    let compact: Vec<Value> = questions
+                        .iter()
+                        .map(|q| {
+                            let options: Vec<Value> = q
+                                .get("options")
+                                .and_then(|o| o.as_array())
+                                .map(|arr| {
+                                    arr.iter()
+                                        .map(|o| {
+                                            json!({
+                                                "label": o.get("label").and_then(|x| x.as_str()).unwrap_or(""),
+                                                "description": o.get("description").and_then(|x| x.as_str()).unwrap_or(""),
+                                            })
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            json!({
+                                "question": q.get("question").and_then(|x| x.as_str()).unwrap_or(""),
+                                "header": q.get("header").and_then(|x| x.as_str()).unwrap_or(""),
+                                "multiSelect": q.get("multiSelect").and_then(|x| x.as_bool()).unwrap_or(false),
+                                "options": options,
+                            })
+                        })
+                        .collect();
+                    let payload = json!({ "session_id": sess.id, "questions": compact });
+                    if let Ok(s) = serde_json::to_string(&payload) {
+                        let _ = store.set_ticket_question(sess.ticket_id, &s).await;
+                    }
+                }
+            }
+
             log_event(&format!(
                 "[hook] {event} ticket=#{} session=#{} tool={}",
                 sess.ticket_id,

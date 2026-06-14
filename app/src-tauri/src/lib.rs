@@ -567,6 +567,63 @@ fn send_input(state: State<'_, AppState>, session_id: i64, data: String) -> Resu
     Ok(())
 }
 
+/// Relay an answer to a Claude `AskUserQuestion` prompt by driving the live TUI over the
+/// PTY — so the user never has to type in the terminal. The recipe lives here in one place
+/// so it can be tuned against the real TUI (see plan Step 0): the option list starts with
+/// item 0 highlighted; Down arrow moves the cursor, Space toggles a multi-select item,
+/// Enter confirms. A custom answer selects the auto-appended "Other" item (index ==
+/// `option_count`) then types the text.
+#[tauri::command]
+fn answer_question(
+    state: State<'_, AppState>,
+    session_id: i64,
+    option_count: usize,
+    selected: Vec<usize>,
+    custom_text: Option<String>,
+    multi_select: bool,
+) -> Result<(), String> {
+    const DOWN: &str = "\x1b[B";
+    const ENTER: &str = "\r";
+    let mut keys = String::new();
+    match custom_text {
+        Some(text) if !text.is_empty() => {
+            for _ in 0..option_count {
+                keys.push_str(DOWN);
+            }
+            keys.push_str(ENTER);
+            keys.push_str(&text);
+            keys.push_str(ENTER);
+        }
+        _ if multi_select => {
+            let mut sorted = selected;
+            sorted.sort_unstable();
+            sorted.dedup();
+            let mut cur = 0usize;
+            for idx in sorted {
+                while cur < idx {
+                    keys.push_str(DOWN);
+                    cur += 1;
+                }
+                keys.push(' '); // toggle this item
+            }
+            keys.push_str(ENTER);
+        }
+        _ => {
+            let idx = selected.first().copied().unwrap_or(0);
+            for _ in 0..idx {
+                keys.push_str(DOWN);
+            }
+            keys.push_str(ENTER);
+        }
+    }
+    let mut map = state.sessions.lock().unwrap();
+    if let Some(io) = map.get_mut(&session_id) {
+        io.writer.write_all(keys.as_bytes()).map_err(|e| e.to_string())?;
+        io.writer.flush().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// Kill a running session's Claude process. Its wait-task then fires `session-exit`,
 /// which ends the DB row and removes it from the live map.
 #[tauri::command]
@@ -652,6 +709,7 @@ pub fn run() {
             open_pr,
             start_session,
             send_input,
+            answer_question,
             stop_session,
             resize
         ])

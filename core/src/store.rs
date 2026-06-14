@@ -50,7 +50,8 @@ impl Store {
             repo_id INTEGER,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
-            todos TEXT NOT NULL DEFAULT ''
+            todos TEXT NOT NULL DEFAULT '',
+            pending_question TEXT NOT NULL DEFAULT ''
         );
         UPDATE tickets SET status = 'todo' WHERE status IN ('available', 'ready');
         CREATE TABLE IF NOT EXISTS worktrees (
@@ -88,6 +89,9 @@ impl Store {
             .execute(&self.pool)
             .await;
         let _ = sqlx::query("ALTER TABLE sessions ADD COLUMN transcript_path TEXT")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN pending_question TEXT NOT NULL DEFAULT ''")
             .execute(&self.pool)
             .await;
         Ok(())
@@ -203,7 +207,7 @@ impl Store {
 
     pub async fn get_ticket(&self, id: i64) -> Result<Option<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question
              FROM tickets WHERE id = ?",
         )
         .bind(id)
@@ -213,7 +217,7 @@ impl Store {
 
     pub async fn list_tickets(&self) -> Result<Vec<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question
              FROM tickets ORDER BY id",
         )
         .fetch_all(&self.pool)
@@ -486,7 +490,7 @@ impl Store {
 
     pub async fn get_ticket_by_key(&self, key: &str) -> Result<Option<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question
              FROM tickets WHERE jira_key = ?",
         )
         .bind(key)
@@ -515,6 +519,26 @@ impl Store {
     pub async fn set_ticket_todos(&self, id: i64, todos_json: &str) -> Result<()> {
         sqlx::query("UPDATE tickets SET todos = ? WHERE id = ?")
             .bind(todos_json)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Store the ticket's pending AskUserQuestion payload (JSON object with `session_id`
+    /// + `questions`). Surfaced in the UI as an answerable question card.
+    pub async fn set_ticket_question(&self, id: i64, question_json: &str) -> Result<()> {
+        sqlx::query("UPDATE tickets SET pending_question = ? WHERE id = ?")
+            .bind(question_json)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Clear the ticket's pending question (answered, or session moved on).
+    pub async fn clear_ticket_question(&self, id: i64) -> Result<()> {
+        sqlx::query("UPDATE tickets SET pending_question = '' WHERE id = ?")
             .bind(id)
             .execute(&self.pool)
             .await?;
