@@ -157,7 +157,9 @@ Deferred within Phase 2:
       `summary`/`status.name`/`description`(ADF) under `fields`; `comment list` → `{comments:[]}`
       with **plain-string** `author`+`body` and **no timestamp**. Reordered parse paths to
       verified-first, documented the schema, and added regression tests from the real fixtures.)_
-- [ ] **Pagination** beyond the first 50 issues (acli `--paginate`).
+- [x] **Pagination** beyond the first 50 issues (acli `--paginate`). _(Swapped `--limit 50`
+      for `--paginate` in `search_assigned`; acli returns the full set as one top-level JSON
+      array — verified 127 results in a single call vs. the old 50 cap. Verified 2026-06-15.)_
 - [ ] **Claude-generated PR summary** in the body (currently the spec); **repo-aware** Draft.
 - [ ] Tests / live-call validation against real Jira + `gh`.
 

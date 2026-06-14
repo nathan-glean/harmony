@@ -157,6 +157,8 @@ fn extract_site(text: &str) -> Option<String> {
 // ---- read ----------------------------------------------------------------
 
 pub async fn search_assigned() -> Result<Vec<JiraIssue>> {
+    // `--paginate` walks every page (acli returns the full set as one top-level JSON
+    // array; verified 127 results in one call), so we're not capped at the first 50.
     let json = acli(&[
         "jira",
         "workitem",
@@ -165,8 +167,7 @@ pub async fn search_assigned() -> Result<Vec<JiraIssue>> {
         "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC",
         "--fields",
         "key,summary,status",
-        "--limit",
-        "50",
+        "--paginate",
         "--json",
     ])
     .await?;

@@ -1794,17 +1794,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "harmony-spike"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "portable-pty",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "hashbrown"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
