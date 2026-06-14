@@ -60,7 +60,7 @@ Tail `~/.claude/projects/<hash>/<id>.jsonl` for richer in-session progress (last
 - **AC:** A recorded real `acli` payload round-trips through `parse_issues` under test; brittle field guesses removed or asserted. ✅
 - Done (verified live against acli 1.3.19 / teamgenio.atlassian.net, 2026-06-15): captured real payloads — `workitem search` → top-level **array**, `summary`/`status.name`/`description`(ADF) under `fields`; `comment list` → `{comments:[…]}` with **plain-string** `author`+`body` and **no timestamp**. Reordered `item_to_issue`/`comment_from_json` to try verified paths first (defensive fallbacks kept + asserted), documented the schema in the module header, and added 3 regression tests from the recorded fixtures (`parses_real_search_shape`, `parses_real_comment_shape`, `description_handles_plain_string_fallback`). Note: fixtures are snapshots — they pin our parser to the recorded shape, not acli version drift (the fallbacks hedge that).
 
-### 5. Core test suite `[test]`
+### 5. Core test suite `[test]` — ✅ DONE
 No tests today. Cover the load-bearing logic: store CRUD, worktree create/reuse + branch-naming/slugify, and the cwd→worktree→session correlation in the hook server.
 - **AC:** `cargo test -p harmony-core` exercises these paths and passes in CI.
 

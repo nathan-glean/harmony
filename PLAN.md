@@ -161,7 +161,13 @@ Deferred within Phase 2:
       for `--paginate` in `search_assigned`; acli returns the full set as one top-level JSON
       array — verified 127 results in a single call vs. the old 50 cap. Verified 2026-06-15.)_
 - [ ] **Claude-generated PR summary** in the body (currently the spec); **repo-aware** Draft.
-- [ ] Tests / live-call validation against real Jira + `gh`.
+- [x] Tests / live-call validation against real Jira + `gh`. _(Added `#[ignore]`-gated live
+      suite `core/tests/live.rs` (run: `cargo test -p harmony-core --test live -- --ignored`).
+      Validated live 2026-06-15: Jira `connected_site`/`search_assigned` (8 issues, paginated)/
+      `get_issue` (DNA-1685, 875-char ADF)/`comments`; GitHub `diff` vs `origin/main`, and
+      `gh pr view`/`pr checks` field names confirmed against a real PR (number,title,url,state,
+      isDraft / name,state,link,bucket). Write paths (Jira comment/transition, push, PR create)
+      are env-guarded and self-skip — not fired against real data.)_
 
 **Try the full vertical (real Jira + GitHub):**
 ```bash
