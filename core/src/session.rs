@@ -99,10 +99,52 @@ impl SessionManager {
             self.store.mark_ticket_planned(ticket_id).await?;
         }
 
-        let session_id = self.store.add_session(ticket_id, wt.id).await?;
+        let session_id = self
+            .store
+            .add_session(ticket_id, wt.id, &wt.path, "work")
+            .await?;
         self.store
             .set_ticket_status(ticket_id, crate::status::WORKING)
             .await?;
+
+        Ok(SessionHandle {
+            session_id,
+            master,
+            child,
+        })
+    }
+
+    /// Start a worktree-less "spec" session: runs an interactive grill interview in plan
+    /// mode directly in the repo root to produce the ticket's spec, before any work begins.
+    /// No worktree/branch is created; the ticket is flagged `drafting` until the spec is
+    /// captured (on ExitPlanMode, by the hook server). Does not move the ticket off Todo.
+    pub async fn start_spec_session(&self, ticket_id: i64) -> Result<SessionHandle> {
+        let ticket = self
+            .store
+            .get_ticket(ticket_id)
+            .await?
+            .ok_or_else(|| anyhow!("no such ticket #{ticket_id}"))?;
+        let repo_id = ticket
+            .repo_id
+            .ok_or_else(|| anyhow!("ticket #{ticket_id} has no repo assigned"))?;
+        let repo = self
+            .store
+            .get_repo(repo_id)
+            .await?
+            .ok_or_else(|| anyhow!("repo #{repo_id} missing"))?;
+
+        let cwd = std::fs::canonicalize(&repo.path)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| repo.path.clone());
+        crate::settings::inject_hooks(&cwd, self.hook_port)?;
+
+        let prompt = render_grill_prompt(&ticket);
+        // Plan mode keeps the grill read-only — safe to run in the repo root itself.
+        let (master, child) = spawn_claude(&cwd, &prompt, None, "plan")?;
+
+        // worktree_id = 0: no worktree row for a spec session (correlation is by cwd).
+        let session_id = self.store.add_session(ticket_id, 0, &cwd, "spec").await?;
+        self.store.set_ticket_drafting(ticket_id, true).await?;
 
         Ok(SessionHandle {
             session_id,
@@ -125,17 +167,42 @@ fn render_prompt(t: &Ticket) -> String {
     }
 }
 
-/// Opening prompt for the one-time initial plan run: the same task brief plus an
-/// instruction to break the work into a task list (captured onto the ticket via the
-/// TodoWrite hook) before proposing a plan. Launched with `--permission-mode plan`.
+/// Opening prompt for the one-time initial plan run (phase 2, at first In Progress start).
+/// The ticket spec is the agreed plan (produced earlier by the grill, phase 1); this run's
+/// job is to decompose it into the concrete, low-level tasks the agent will then execute,
+/// recorded via TodoWrite (mirrored onto the ticket). Launched with `--permission-mode plan`.
 fn render_plan_prompt(t: &Ticket) -> String {
     format!(
-        "{}\n\n---\nYou are starting this ticket in plan mode. First research the codebase \
-         as needed, then break the work into a concrete, ordered task list and record it \
-         with the TodoWrite tool (this saves it to the ticket). Then present your \
-         implementation plan for approval. Do not make any code changes until the plan is \
-         approved.",
+        "{}\n\n---\nThe specification above is the agreed plan for this ticket. You are in \
+         plan mode. Break it down into a concrete, ordered list of low-level implementation \
+         tasks that you will execute, and record that breakdown with the TodoWrite tool \
+         (this saves it to the ticket). Explore the codebase as needed to make the tasks \
+         specific. Don't re-litigate the approach, and make no code changes until the plan \
+         is approved.",
         render_prompt(t)
+    )
+}
+
+/// Opening prompt for a spec/grill session (phase 1, at ticket creation). Inlines the
+/// `grill-me` interview (the skill isn't installed in target repos) and ends by asking
+/// Claude to write the finished spec as its plan and present it via ExitPlanMode — which the
+/// hook server captures onto the ticket. Launched with `--permission-mode plan` (read-only).
+fn render_grill_prompt(t: &Ticket) -> String {
+    let seed = if t.spec.trim().is_empty() {
+        format!("We're scoping a new task: {}", t.title)
+    } else {
+        format!("We're scoping a new task — \"{}\".\n\nInitial idea:\n{}", t.title, t.spec)
+    };
+    format!(
+        "{seed}\n\n\
+         Interview me relentlessly about every aspect of this task until we reach a shared \
+         understanding. Walk down each branch of the design tree, resolving dependencies \
+         between decisions one-by-one. For each question, provide your recommended answer. \
+         Ask the questions one at a time. If a question can be answered by exploring the \
+         codebase, explore the codebase instead of asking.\n\n\
+         When we've reached a shared understanding, write the complete specification for \
+         this task as your plan and call ExitPlanMode to present it. Do not write any code \
+         or make changes — this session exists only to produce the spec."
     )
 }
 

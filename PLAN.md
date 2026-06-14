@@ -33,27 +33,33 @@ is proven before any UI is built.
    shell script") in **default** permission mode.
 
 **Pass criteria**
-- [ ] `SessionStart` POST arrives with a `session_id`.
-- [ ] A `PreToolUse`/`PermissionRequest` POST arrives **before** the tool runs, carrying
+- [~] `SessionStart` POST arrives with a `session_id`. _(Did NOT fire for the injected
+      interactive session — not a blocker; harmony owns PTY spawn. See findings.)_
+- [x] A `PreToolUse`/`PermissionRequest` POST arrives **before** the tool runs, carrying
       the tool name + input (the proposed command/diff).
-- [ ] Returning `{"permissionDecision":"deny"}` (or `allow`) from the hook **actually
+- [x] Returning `{"permissionDecision":"deny"}` (or `allow`) from the hook **actually
       controls** the interactive session without anyone typing in the TUI.
-- [ ] `Stop` fires at end of turn; `SessionEnd` on exit.
-- [ ] The same `session_id` matches a JSONL file under `~/.claude/projects/<hash>/`.
+- [x] `Stop` fires at end of turn; ~~`SessionEnd` on exit~~ _(Stop ✅; SessionEnd did NOT
+      fire — process-exit detection used instead. See findings.)_
+- [x] The same `session_id` matches a JSONL file under `~/.claude/projects/<hash>/`.
 
 **If it fails** (hooks don't fire interactively, or can't return decisions): fall back to
 the Q13 "notify + jump-to-terminal" path *without* programmatic decisions (badge from
 `Stop`/`Notification` only, user always answers in the terminal), and shelve the triage-UI
 north star. Decide this before Phase 3.
 
-### Task 0.2 — Resume + transcript fidelity
-- [ ] Confirm `claude --resume <id>` (cwd = same worktree) continues the session.
-- [ ] Confirm the JSONL transcript can be parsed line-by-line into a readable
+### Task 0.2 — Resume + transcript fidelity — DONE (proven in Phase 1 + 3)
+- [x] Confirm `claude --resume <id>` (cwd = same worktree) continues the session.
+      _(Built + relied on in `session.rs` resume path and Phase 3 resume-on-relaunch.)_
+- [x] Confirm the JSONL transcript can be parsed line-by-line into a readable
       conversation view (basis for rebuilding terminal scrollback after relaunch).
+      _(Implemented as `session_transcript` → `TranscriptPane.tsx`.)_
 
-### Task 0.3 — Auth/quota sanity
+### Task 0.3 — Auth/quota sanity — NOT DONE
 - [ ] Run 3 concurrent interactive sessions under one `/login`; confirm they coexist and
       observe quota behavior. Note any rate-limit signal in events/transcript.
+      _(Multi-session concurrency was later built — `live_sessions` map, several terminals
+      at once — but the explicit quota/rate-limit observation spike was never recorded.)_
 
 **Exit gate:** Phase 0 green → proceed. Any red → revisit the affected decision in
 `DESIGN.md` before writing app code.
@@ -146,7 +152,11 @@ target/debug/harmony start <ticket_id>   # creates worktree, injects hooks, spaw
 
 Deferred within Phase 2:
 - [x] ~~Auth / token storage~~ — handled entirely by `acli` (no creds in harmony).
-- [ ] **Verify acli `--json` field mapping** on a real run; tighten `parse_issues`.
+- [x] **Verify acli `--json` field mapping** on a real run; tighten `parse_issues`.
+      _(Verified against acli 1.3.19 on 2026-06-15: `workitem search` → top-level array,
+      `summary`/`status.name`/`description`(ADF) under `fields`; `comment list` → `{comments:[]}`
+      with **plain-string** `author`+`body` and **no timestamp**. Reordered parse paths to
+      verified-first, documented the schema, and added regression tests from the real fixtures.)_
 - [ ] **Pagination** beyond the first 50 issues (acli `--paginate`).
 - [ ] **Claude-generated PR summary** in the body (currently the spec); **repo-aware** Draft.
 - [ ] Tests / live-call validation against real Jira + `gh`.

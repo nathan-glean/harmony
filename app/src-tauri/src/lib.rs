@@ -467,6 +467,45 @@ async fn ticket_pr(state: State<'_, AppState>, ticket_id: i64) -> Result<PrStatu
 
 // ---- sessions (PTY ↔ events) ---------------------------------------------
 
+/// Ensure a ticket has a repo assigned before a session starts: use the explicit `repo`
+/// name, else the default repo for the Jira project key, else error asking the user to pick.
+async fn ensure_ticket_repo(
+    state: &AppState,
+    ticket_id: i64,
+    repo: Option<String>,
+) -> Result<(), String> {
+    let ticket = state
+        .store
+        .get_ticket(ticket_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("no such ticket")?;
+    if ticket.repo_id.is_some() {
+        return Ok(());
+    }
+    let repo_id = if let Some(n) = repo {
+        state
+            .store
+            .get_repo_by_name(&n)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or(format!("no repo named {n}"))?
+            .id
+    } else if let Some(k) = ticket.jira_key.as_deref().and_then(|k| k.split('-').next()) {
+        state
+            .store
+            .default_repo_for_key(k)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or("ticket has no repo; choose one")?
+            .id
+    } else {
+        return Err("ticket has no repo; choose one".into());
+    };
+    state.store.set_ticket_repo(ticket_id, repo_id).await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 async fn start_session(
     app: AppHandle,
@@ -474,38 +513,37 @@ async fn start_session(
     ticket_id: i64,
     repo: Option<String>,
 ) -> Result<i64, String> {
-    let ticket = state
-        .store
-        .get_ticket(ticket_id)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or("no such ticket")?;
-
-    if ticket.repo_id.is_none() {
-        let repo_id = if let Some(n) = repo {
-            state
-                .store
-                .get_repo_by_name(&n)
-                .await
-                .map_err(|e| e.to_string())?
-                .ok_or(format!("no repo named {n}"))?
-                .id
-        } else if let Some(k) = ticket.jira_key.as_deref().and_then(|k| k.split('-').next()) {
-            state
-                .store
-                .default_repo_for_key(k)
-                .await
-                .map_err(|e| e.to_string())?
-                .ok_or("ticket has no repo; choose one")?
-                .id
-        } else {
-            return Err("ticket has no repo; choose one".into());
-        };
-        state.store.set_ticket_repo(ticket_id, repo_id).await.map_err(|e| e.to_string())?;
-    }
-
+    ensure_ticket_repo(&state, ticket_id, repo).await?;
     let mgr = SessionManager::new(Arc::new(state.store.clone()), HOOK_PORT);
     let handle = mgr.start(ticket_id).await.map_err(|e| e.to_string())?;
+    wire_session(&app, &state, handle, ticket_id)
+}
+
+/// Start a worktree-less grill/spec session that interviews the user (plan mode) to produce
+/// the ticket's spec. Resolves the repo first (new-ticket flow already assigned one; a Jira
+/// ticket grilled on entry to In Progress resolves via the default-repo mapping).
+#[tauri::command]
+async fn start_spec_session(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ticket_id: i64,
+    repo: Option<String>,
+) -> Result<i64, String> {
+    ensure_ticket_repo(&state, ticket_id, repo).await?;
+    let mgr = SessionManager::new(Arc::new(state.store.clone()), HOOK_PORT);
+    let handle = mgr.start_spec_session(ticket_id).await.map_err(|e| e.to_string())?;
+    wire_session(&app, &state, handle, ticket_id)
+}
+
+/// Shared post-spawn wiring for both `start_session` and `start_spec_session`: bridge PTY
+/// output to `term-output` events, register the session in the live map, and on child exit
+/// end the session row, clear any draft flag, and notify the UI.
+fn wire_session(
+    app: &AppHandle,
+    state: &AppState,
+    handle: harmony_core::session::SessionHandle,
+    ticket_id: i64,
+) -> Result<i64, String> {
     let session_id = handle.session_id;
     let master = handle.master;
     let child = handle.child;
@@ -537,7 +575,7 @@ async fn start_session(
         .unwrap()
         .insert(session_id, SessionIo { master, writer, killer, ticket_id });
 
-    // Wait for exit -> mark ended, drop handles, notify UI
+    // Wait for exit -> mark ended, clear draft flag, drop handles, notify UI
     {
         let app = app.clone();
         let store = state.store.clone();
@@ -549,6 +587,8 @@ async fn start_session(
             })
             .await;
             let _ = store.end_session(session_id).await;
+            // A grill stopped before producing a spec must not leave the ticket "Drafting".
+            let _ = store.set_ticket_drafting(ticket_id, false).await;
             sessions.lock().unwrap().remove(&session_id);
             let _ = app.emit("session-exit", session_id);
         });
@@ -708,6 +748,7 @@ pub fn run() {
             draft_ticket,
             open_pr,
             start_session,
+            start_spec_session,
             send_input,
             answer_question,
             stop_session,

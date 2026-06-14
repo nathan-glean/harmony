@@ -50,6 +50,8 @@ export const api = {
     invoke<{ pr: any | null; checks: any[] }>("ticket_pr", { ticketId }),
   startSession: (ticketId: number, repo: string | null) =>
     invoke<number>("start_session", { ticketId, repo }),
+  startSpecSession: (ticketId: number, repo: string | null) =>
+    invoke<number>("start_spec_session", { ticketId, repo }),
   sendInput: (sessionId: number, data: string) =>
     invoke<void>("send_input", { sessionId, data }),
   answerQuestion: (

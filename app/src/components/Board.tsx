@@ -54,6 +54,7 @@ export function Board({
                 >
                   <div className="card-key">
                     {t.jira_key ?? <span className="local">local #{t.id}</span>}
+                    {t.drafting ? <span className="card-drafting">drafting…</span> : null}
                   </div>
                   <div className="card-title">{t.title}</div>
                 </button>

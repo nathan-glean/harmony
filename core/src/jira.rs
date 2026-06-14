@@ -2,9 +2,15 @@
 //! for GitHub. acli owns auth (`acli jira auth login`: browser, no app registration, no
 //! API key), so harmony stores no Jira credentials of its own.
 //!
-//! NOTE: acli's `--json` schema is not documented. `parse_issues` is intentionally
-//! defensive (array or wrapped object; flat or nested fields). Verify the field mapping
-//! once against real `acli jira workitem search --json` output and tighten if needed.
+//! acli's `--json` schema (verified against acli v1.3.19, 2026-06-15):
+//!   - `workitem search` → a top-level JSON **array** of Jira REST issue objects. `key` is
+//!     top-level; `summary`/`status`/`description` live under `fields` (`fields.summary`,
+//!     `fields.status.name`, `fields.description` as an ADF object).
+//!   - `comment list` → a top-level **object** `{comments:[...], total, ...}`. Each comment
+//!     has `author` (a **plain string** display name, not an object), `body` (**plain
+//!     string**), `id`, `visibility` — and **no timestamp field** (`created` is absent).
+//! Parsing stays defensive (array-or-wrapped, flat-or-nested, string-or-ADF) so an acli
+//! schema change won't break us, but the verified paths above are tried first.
 
 use anyhow::{anyhow, Result};
 use serde::Serialize;
@@ -236,16 +242,19 @@ pub async fn comments(key: &str) -> Result<Vec<JiraComment>> {
 
 fn comment_from_json(c: &Value) -> JiraComment {
     JiraComment {
+        // acli returns `author` as a plain string; the nested paths cover the raw REST
+        // shape in case acli changes to emit the full author object.
         author: str_at(
             c,
             &[
+                &["author"],
                 &["author", "displayName"],
                 &["author", "name"],
-                &["author"],
                 &["updateAuthor", "displayName"],
             ],
         )
         .unwrap_or_default(),
+        // acli omits a timestamp on comments today; left empty if absent (verified 2026-06-15).
         created: str_at(c, &[&["created"], &["createdAt"], &["updated"]]).unwrap_or_default(),
         body: node_text(c.get("body").or_else(|| c.get("renderedBody"))),
     }
@@ -277,9 +286,14 @@ fn parse_issues(json: &str) -> Result<Vec<JiraIssue>> {
 }
 
 fn item_to_issue(it: &Value) -> JiraIssue {
-    let key = str_at(it, &[&["key"]]).unwrap_or_default();
-    let summary = str_at(it, &[&["summary"], &["fields", "summary"]]).unwrap_or_default();
-    let status = str_at(it, &[&["status"], &["status", "name"], &["fields", "status", "name"]]).unwrap_or_default();
+    // Verified shape first (`fields.*`), then flat fallbacks for schema drift.
+    let key = str_at(it, &[&["key"], &["fields", "key"]]).unwrap_or_default();
+    let summary = str_at(it, &[&["fields", "summary"], &["summary"]]).unwrap_or_default();
+    let status = str_at(
+        it,
+        &[&["fields", "status", "name"], &["status", "name"], &["status"]],
+    )
+    .unwrap_or_default();
     let description = description_text(it);
     JiraIssue { key, summary, description, status }
 }
@@ -353,4 +367,70 @@ fn adf_to_text(v: &Value) -> String {
     let mut s = String::new();
     walk(v, &mut s);
     s.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Real `acli jira workitem search --json` item (acli 1.3.19, 2026-06-15): top-level
+    /// array, `key` flat, `summary`/`status.name`/`description` (ADF) under `fields`.
+    const SEARCH_JSON: &str = r#"[
+      {
+        "id": "91577",
+        "key": "DNA-1685",
+        "fields": {
+          "status": { "name": "To Do", "statusCategory": { "key": "new" } },
+          "summary": "Event Classification",
+          "description": {
+            "type": "doc",
+            "content": [
+              { "type": "heading", "content": [ { "type": "text", "text": "Summary" } ] },
+              { "type": "paragraph", "content": [ { "type": "text", "text": "Classify events." } ] }
+            ]
+          }
+        }
+      }
+    ]"#;
+
+    /// Real `acli jira workitem comment list --json` (acli 1.3.19): wrapped in `comments`,
+    /// `author` is a plain string, `body` is a plain string, no timestamp field.
+    const COMMENTS_JSON: &str = r#"{
+      "comments": [
+        { "author": "Jeff Jefferson", "body": "Gemini transcript -   ", "id": "143894", "visibility": "public" }
+      ],
+      "isLast": true, "maxResults": 100, "startAt": 0, "total": 1
+    }"#;
+
+    #[test]
+    fn parses_real_search_shape() {
+        let issues = parse_issues(SEARCH_JSON).unwrap();
+        assert_eq!(issues.len(), 1);
+        let i = &issues[0];
+        assert_eq!(i.key, "DNA-1685");
+        assert_eq!(i.summary, "Event Classification");
+        assert_eq!(i.status, "To Do");
+        assert!(i.description.contains("Summary"));
+        assert!(i.description.contains("Classify events."));
+    }
+
+    #[test]
+    fn parses_real_comment_shape() {
+        let v: Value = serde_json::from_str(COMMENTS_JSON).unwrap();
+        let arr = v.get("comments").and_then(|x| x.as_array()).unwrap();
+        let c = comment_from_json(&arr[0]);
+        assert_eq!(c.author, "Jeff Jefferson"); // plain-string author
+        assert_eq!(c.body, "Gemini transcript -   "); // string body returned verbatim
+        assert_eq!(c.created, ""); // acli omits the timestamp
+    }
+
+    #[test]
+    fn description_handles_plain_string_fallback() {
+        // Defensive: a flat string description (non-ADF) must still parse.
+        let it: Value = serde_json::from_str(
+            r#"{"key":"X-1","fields":{"summary":"s","status":{"name":"Done"}},"description":"plain text"}"#,
+        )
+        .unwrap();
+        assert_eq!(description_text(&it), "plain text");
+    }
 }

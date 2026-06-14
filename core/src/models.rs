@@ -33,6 +33,12 @@ pub struct Ticket {
     /// 0/1 — whether the one-time initial plan-mode run has happened for this ticket.
     /// Gates plan mode so it runs only once at the very start (not on resume/re-entry).
     pub planned: i64,
+    /// 0/1 — a grill/spec session is actively producing this ticket's spec. While 1 the
+    /// ticket is a draft (badge + gated from In Progress); cleared when the spec is captured.
+    pub drafting: i64,
+    /// 0/1 — whether this ticket has been through a grill interview. Gates the auto-grill on
+    /// entry to In Progress so a never-grilled (e.g. Jira-synced) ticket gets grilled once.
+    pub grilled: i64,
 }
 
 /// An isolated git worktree for a ticket. Per-ticket and reused; `is_alternate`
@@ -60,6 +66,10 @@ pub struct Session {
     pub last_tool: Option<String>,
     pub started_at: i64,
     pub ended_at: Option<i64>,
+    /// Launch directory (worktree path for work sessions, repo root for spec sessions).
+    pub cwd: Option<String>,
+    /// "work" | "spec" — a spec session runs the grill in plan mode without a worktree.
+    pub kind: String,
 }
 
 /// A worktree enriched with its ticket + repo info, for the Worktrees view.

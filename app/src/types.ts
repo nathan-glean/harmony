@@ -11,6 +11,8 @@ export type Ticket = {
   todos: string; // JSON array of { content, status }
   pending_question: string; // JSON { session_id, questions:[…] } or "" when none
   planned: number; // 0/1 — initial plan-mode run has happened (one-time, at first start)
+  drafting: number; // 0/1 — a grill/spec session is building this ticket's spec
+  grilled: number; // 0/1 — this ticket has been through a grill interview
 };
 
 // Shape of `Ticket.pending_question` once parsed (from an AskUserQuestion tool call).

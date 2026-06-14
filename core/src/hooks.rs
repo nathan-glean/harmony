@@ -70,7 +70,7 @@ async fn handle(
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| cwd.to_string());
 
-    match store.active_session_by_worktree_path(&cwd_canon).await {
+    match store.active_session_by_cwd(&cwd_canon).await {
         Ok(Some(sess)) => {
             if sess.claude_session_id.is_none() {
                 if let Some(cid) = claude_id {
@@ -85,7 +85,11 @@ async fn handle(
                 _ => ("working", crate::status::WORKING),
             };
             let _ = store.set_session_state(sess.id, session_state, tool).await;
-            let _ = store.set_ticket_status(sess.ticket_id, ticket_status).await;
+            // A spec/grill session must not drag its draft ticket onto the board
+            // (it stays a Todo draft); only work sessions drive ticket status.
+            if sess.kind == "work" {
+                let _ = store.set_ticket_status(sess.ticket_id, ticket_status).await;
+            }
 
             // Claude's task list (TodoWrite) → mirror onto the ticket as a checklist.
             if tool == Some("TodoWrite") {
@@ -150,6 +154,25 @@ async fn handle(
                     if let Ok(s) = serde_json::to_string(&payload) {
                         let _ = store.set_ticket_question(sess.ticket_id, &s).await;
                     }
+                }
+            }
+
+            // Grill/spec session: ExitPlanMode means the spec is ready. Capture the plan
+            // text as the ticket spec and clear `drafting` — the app then auto-stops it.
+            if sess.kind == "spec" && tool == Some("ExitPlanMode") && event == "PreToolUse" {
+                let plan = v
+                    .get("tool_input")
+                    .and_then(|ti| ti.get("plan"))
+                    .and_then(|p| p.as_str())
+                    .map(|s| s.to_string())
+                    .or_else(|| {
+                        // Fallback if the field name differs: serialise the whole input.
+                        v.get("tool_input").map(|ti| ti.to_string())
+                    });
+                if let Some(plan) = plan {
+                    let _ = store.set_ticket_spec(sess.ticket_id, &plan).await;
+                    let _ = store.set_ticket_drafting(sess.ticket_id, false).await;
+                    let _ = store.mark_ticket_grilled(sess.ticket_id).await;
                 }
             }
 

@@ -34,6 +34,7 @@ export function App() {
   const detailRef = useRef<HTMLElement>(null);
   // Attention notifications: track prior session states to fire on entry into "waiting".
   const prevStates = useRef<Map<number, string>>(new Map());
+  const prevDrafting = useRef<Map<number, number>>(new Map());
   const seeded = useRef(false);
   const lastAttention = useRef<number | null>(null);
   const autoSyncing = useRef(false);
@@ -75,6 +76,29 @@ export function App() {
       liveSess.forEach((s) => next.set(s.id, s.state));
       prevStates.current = next;
       seeded.current = true;
+
+      // Grill finished: when a ticket's `drafting` flips 1 → 0 (spec captured by the
+      // ExitPlanMode hook), auto-stop the grill session. If the ticket is already in
+      // In Progress (grilled on entry), auto-continue into the work session
+      // (plan-tasks → execute); a new-ticket grill (status "todo") just stops.
+      const liveByTicket = new Map(live.map(([tid, sid]) => [tid, sid]));
+      for (const t of tks) {
+        const was = prevDrafting.current.get(t.id);
+        if (was === 1 && t.drafting === 0) {
+          const sid = liveByTicket.get(t.id);
+          if (sid != null) api.stopSession(sid).catch(() => {});
+          if (t.status === "working") {
+            api
+              .startSession(t.id, null)
+              .then((workSid) => setLiveSessions((m) => ({ ...m, [t.id]: workSid })))
+              .catch((e) => flash(String(e)));
+            flash(`Spec ready — starting work on #${t.id}`);
+          } else {
+            flash(`Spec ready for #${t.id}`);
+          }
+        }
+      }
+      prevDrafting.current = new Map(tks.map((t) => [t.id, t.drafting]));
     } catch (e) {
       console.error(e);
     }
@@ -342,6 +366,32 @@ export function App() {
   // Drag-and-drop: move a ticket to a column (optimistic, then persist).
   // Into "In Progress" → auto-open a session; out of it → stop any live session.
   const moveTicket = async (id: number, status: string) => {
+    if (status === "working") {
+      const t = tickets.find((x) => x.id === id);
+      // A ticket still being grilled has no finished spec yet — block it from starting work.
+      if (t?.drafting) {
+        flash("Still drafting the spec — finish the interview first");
+        return;
+      }
+      // Never grilled (e.g. a Jira-synced ticket): grill the spec first. When the spec is
+      // captured, `refresh` auto-continues into the work session (plan-tasks → execute).
+      if (t && !t.grilled) {
+        setTickets((prev) => prev.map((x) => (x.id === id ? { ...x, status } : x)));
+        if (selected?.id === id) setSelected((s) => (s ? { ...s, status } : s));
+        try {
+          await api.setStatus(id, status);
+          api.jiraApplyColumn(id, status).catch(() => {});
+          await api.startSpecSession(id, null);
+          setSelected({ ...t, status });
+          setView("board");
+          flash(`Grilling spec for #${id} before work…`);
+        } catch (e) {
+          flash(String(e));
+        }
+        await refresh();
+        return;
+      }
+    }
     setTickets((prev) => prev.map((t) => (t.id === id ? { ...t, status } : t)));
     if (selected?.id === id) setSelected((s) => (s ? { ...s, status } : s));
     try {
@@ -441,7 +491,7 @@ export function App() {
 
       {showNew && (
         <div className="connect">
-          <p>New local ticket (no Jira link):</p>
+          <p>New ticket — pick a repo, then Claude grills you to build the spec:</p>
           <input
             className="grow"
             placeholder="Title"
@@ -449,7 +499,9 @@ export function App() {
             onChange={(e) => setNewTitle(e.target.value)}
           />
           <select value={newRepo} onChange={(e) => setNewRepo(e.target.value)}>
-            <option value="">repo: choose later</option>
+            <option value="" disabled>
+              choose a repo (required)…
+            </option>
             {repos.map((r) => (
               <option key={r.id} value={r.name}>
                 {r.name}
@@ -458,27 +510,30 @@ export function App() {
           </select>
           <textarea
             className="spec"
-            placeholder="Agent spec (optional, markdown)…"
+            placeholder="Initial idea / seed for the interview (optional, markdown)…"
             value={newSpec}
             onChange={(e) => setNewSpec(e.target.value)}
           />
           <button
-            disabled={!newTitle.trim() || busy !== null}
+            disabled={!newTitle.trim() || !newRepo || busy !== null}
             onClick={() =>
               run("create", async () => {
-                const id = await api.addLocalTicket(newTitle.trim(), newSpec, newRepo || null);
+                const id = await api.addLocalTicket(newTitle.trim(), newSpec, newRepo);
                 setShowNew(false);
                 setNewTitle("");
                 setNewSpec("");
                 setNewRepo("");
+                // Kick off the grill/spec session, then open the ticket so the user can
+                // answer the interview in the live terminal / question card.
+                await api.startSpecSession(id, null);
                 await refresh();
                 const t = await api.getTicket(id);
                 if (t) setSelected(t);
-                flash(`Created ticket #${id}`);
+                flash(`Drafting spec for #${id}…`);
               })
             }
           >
-            {busy === "create" ? "Creating…" : "Create ticket"}
+            {busy === "create" ? "Starting…" : "Create & build spec"}
           </button>
         </div>
       )}

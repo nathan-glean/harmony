@@ -52,7 +52,9 @@ impl Store {
             updated_at INTEGER NOT NULL,
             todos TEXT NOT NULL DEFAULT '',
             pending_question TEXT NOT NULL DEFAULT '',
-            planned INTEGER NOT NULL DEFAULT 0
+            planned INTEGER NOT NULL DEFAULT 0,
+            drafting INTEGER NOT NULL DEFAULT 0,
+            grilled INTEGER NOT NULL DEFAULT 0
         );
         UPDATE tickets SET status = 'todo' WHERE status IN ('available', 'ready');
         CREATE TABLE IF NOT EXISTS worktrees (
@@ -72,7 +74,9 @@ impl Store {
             state TEXT NOT NULL DEFAULT 'working',
             last_tool TEXT,
             started_at INTEGER NOT NULL,
-            ended_at INTEGER
+            ended_at INTEGER,
+            cwd TEXT,
+            kind TEXT NOT NULL DEFAULT 'work'
         );
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
@@ -96,6 +100,18 @@ impl Store {
             .execute(&self.pool)
             .await;
         let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN planned INTEGER NOT NULL DEFAULT 0")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN drafting INTEGER NOT NULL DEFAULT 0")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN grilled INTEGER NOT NULL DEFAULT 0")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE sessions ADD COLUMN cwd TEXT")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'work'")
             .execute(&self.pool)
             .await;
         Ok(())
@@ -211,7 +227,7 @@ impl Store {
 
     pub async fn get_ticket(&self, id: i64) -> Result<Option<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled
              FROM tickets WHERE id = ?",
         )
         .bind(id)
@@ -221,7 +237,7 @@ impl Store {
 
     pub async fn list_tickets(&self) -> Result<Vec<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled
              FROM tickets ORDER BY id",
         )
         .fetch_all(&self.pool)
@@ -340,13 +356,24 @@ impl Store {
 
     // ---- sessions --------------------------------------------------------
 
-    pub async fn add_session(&self, ticket_id: i64, worktree_id: i64) -> Result<i64> {
+    /// Insert a session. `worktree_id` is 0 for worktree-less (spec/grill) sessions; `cwd`
+    /// is the launch directory used to correlate incoming hooks; `kind` is "work" | "spec".
+    pub async fn add_session(
+        &self,
+        ticket_id: i64,
+        worktree_id: i64,
+        cwd: &str,
+        kind: &str,
+    ) -> Result<i64> {
         let r = sqlx::query(
-            "INSERT INTO sessions (ticket_id, worktree_id, state, started_at) VALUES (?, ?, 'working', ?)",
+            "INSERT INTO sessions (ticket_id, worktree_id, state, started_at, cwd, kind)
+             VALUES (?, ?, 'working', ?, ?, ?)",
         )
         .bind(ticket_id)
         .bind(worktree_id)
         .bind(now_unix())
+        .bind(cwd)
+        .bind(kind)
         .execute(&self.pool)
         .await?;
         Ok(r.last_insert_rowid())
@@ -377,8 +404,10 @@ impl Store {
     /// Distinct tickets that had an open (not-ended) session — i.e. were live at the last
     /// shutdown. Used to reattach on relaunch (call before `end_all_open_sessions`).
     pub async fn tickets_with_open_session(&self) -> Result<Vec<i64>> {
+        // Exclude spec/grill sessions — they're worktree-less and short-lived; reattaching
+        // one as a normal session would wrongly create a worktree.
         Ok(sqlx::query_scalar::<_, i64>(
-            "SELECT DISTINCT ticket_id FROM sessions WHERE ended_at IS NULL",
+            "SELECT DISTINCT ticket_id FROM sessions WHERE ended_at IS NULL AND kind != 'spec'",
         )
         .fetch_all(&self.pool)
         .await?)
@@ -450,14 +479,16 @@ impl Store {
         Ok(())
     }
 
-    /// Find the live (not-yet-ended) session whose worktree path equals `path`.
-    /// This is how incoming hooks (which carry `cwd`) are correlated to a session.
-    pub async fn active_session_by_worktree_path(&self, path: &str) -> Result<Option<Session>> {
+    /// Find the live (not-yet-ended) session whose launch `cwd` equals `path`. This is how
+    /// incoming hooks (which carry `cwd`) are correlated to a session — works for both
+    /// worktree sessions (cwd = worktree path) and worktree-less spec sessions (cwd = repo
+    /// root). If two live sessions share a cwd (rare: two grills in one repo), the latest wins.
+    pub async fn active_session_by_cwd(&self, path: &str) -> Result<Option<Session>> {
         Ok(sqlx::query_as::<_, Session>(
-            "SELECT s.id, s.ticket_id, s.worktree_id, s.claude_session_id, s.state, s.last_tool, s.started_at, s.ended_at
-             FROM sessions s JOIN worktrees w ON w.id = s.worktree_id
-             WHERE w.path = ? AND s.ended_at IS NULL
-             ORDER BY s.id DESC LIMIT 1",
+            "SELECT id, ticket_id, worktree_id, claude_session_id, state, last_tool, started_at, ended_at, cwd, kind
+             FROM sessions
+             WHERE cwd = ? AND ended_at IS NULL
+             ORDER BY id DESC LIMIT 1",
         )
         .bind(path)
         .fetch_optional(&self.pool)
@@ -494,7 +525,7 @@ impl Store {
 
     pub async fn get_ticket_by_key(&self, key: &str) -> Result<Option<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled
              FROM tickets WHERE jira_key = ?",
         )
         .bind(key)
@@ -553,6 +584,27 @@ impl Store {
     /// re-entry into In Progress) skip plan mode.
     pub async fn mark_ticket_planned(&self, id: i64) -> Result<()> {
         sqlx::query("UPDATE tickets SET planned = 1 WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Flag/unflag a ticket as "drafting" — i.e. its spec is being produced by a live grill
+    /// session. Drives the UI badge + gating and the auto-stop-when-done signal.
+    pub async fn set_ticket_drafting(&self, id: i64, drafting: bool) -> Result<()> {
+        sqlx::query("UPDATE tickets SET drafting = ? WHERE id = ?")
+            .bind(if drafting { 1_i64 } else { 0_i64 })
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Mark a ticket as having been through a grill interview (its spec was produced/refined
+    /// by a spec session). Gates the auto-grill on entry to In Progress so it happens once.
+    pub async fn mark_ticket_grilled(&self, id: i64) -> Result<()> {
+        sqlx::query("UPDATE tickets SET grilled = 1 WHERE id = ?")
             .bind(id)
             .execute(&self.pool)
             .await?;
