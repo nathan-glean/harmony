@@ -1,0 +1,504 @@
+//! Core test suite — covers the load-bearing logic that has no UI to catch regressions:
+//!   1. Store CRUD (repos / tickets / worktrees / sessions).
+//!   2. Worktree create + reuse, branch naming, and slugify.
+//!   3. The cwd → worktree → session correlation in the hook server.
+//!
+//! Run with `cargo test -p harmony-core`. Each test gets its own temp SQLite file and,
+//! where git is needed, its own throwaway repo, so they're independent and parallel-safe.
+
+use std::net::TcpListener;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+
+use harmony_core::hooks;
+use harmony_core::status;
+use harmony_core::store::Store;
+use harmony_core::worktree;
+
+// ---- temp scaffolding ----------------------------------------------------
+
+static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+/// A unique temp directory for this process+test. Best-effort cleanup on drop.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new(tag: &str) -> Self {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let p = std::env::temp_dir().join(format!("harmony-test-{tag}-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&p).unwrap();
+        // Canonicalize so it matches what the store/hooks produce (macOS /tmp -> /private/tmp).
+        TempDir(std::fs::canonicalize(&p).unwrap())
+    }
+    fn path(&self) -> &Path {
+        &self.0
+    }
+    fn str(&self) -> String {
+        self.0.to_string_lossy().to_string()
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+async fn open_store(dir: &TempDir) -> Store {
+    let db = dir.path().join("harmony.db");
+    Store::open(db.to_str().unwrap()).await.unwrap()
+}
+
+// =====================================================================
+// 1. Store CRUD
+// =====================================================================
+
+#[tokio::test]
+async fn repo_crud_and_canonicalization() {
+    let dir = TempDir::new("repo");
+    let store = open_store(&dir).await;
+
+    // add_repo canonicalizes the path it stores.
+    let repo_dir = dir.path().join("myrepo");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    let id = store
+        .add_repo("myrepo", repo_dir.to_str().unwrap(), Some("PROJ"))
+        .await
+        .unwrap();
+
+    let repo = store.get_repo(id).await.unwrap().expect("repo exists");
+    assert_eq!(repo.name, "myrepo");
+    assert_eq!(repo.path, std::fs::canonicalize(&repo_dir).unwrap().to_string_lossy());
+    assert_eq!(repo.default_project_key.as_deref(), Some("PROJ"));
+
+    // lookups
+    assert_eq!(store.get_repo_by_name("myrepo").await.unwrap().unwrap().id, id);
+    assert_eq!(store.default_repo_for_key("PROJ").await.unwrap().unwrap().id, id);
+    assert!(store.get_repo_by_name("nope").await.unwrap().is_none());
+
+    // rename
+    store.rename_repo(id, "renamed").await.unwrap();
+    assert_eq!(store.get_repo(id).await.unwrap().unwrap().name, "renamed");
+    assert_eq!(store.list_repos().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn delete_repo_refuses_with_worktrees_then_clears_ticket_binding() {
+    let dir = TempDir::new("repodel");
+    let store = open_store(&dir).await;
+
+    let repo_id = store.add_repo("r", dir.path().to_str().unwrap(), None).await.unwrap();
+    let ticket_id = store.add_ticket(None, "local", "T", "", Some(repo_id)).await.unwrap();
+    let wt_id = store.add_worktree(ticket_id, repo_id, "harmony/x", "/tmp/x", false).await.unwrap();
+
+    // Refuses while a worktree still references the repo.
+    assert!(store.delete_repo(repo_id).await.is_err());
+
+    // After the worktree is gone, delete succeeds and the ticket's repo binding is cleared.
+    store.delete_worktree(wt_id).await.unwrap();
+    store.delete_repo(repo_id).await.unwrap();
+    assert!(store.get_repo(repo_id).await.unwrap().is_none());
+    assert_eq!(store.get_ticket(ticket_id).await.unwrap().unwrap().repo_id, None);
+}
+
+#[tokio::test]
+async fn ticket_crud_and_flags() {
+    let dir = TempDir::new("ticket");
+    let store = open_store(&dir).await;
+
+    let id = store.add_ticket(None, "local", "My Ticket", "spec body", None).await.unwrap();
+    let t = store.get_ticket(id).await.unwrap().unwrap();
+    // New tickets land in Todo (DESIGN Q14).
+    assert_eq!(t.status, status::TODO);
+    assert_eq!(t.title, "My Ticket");
+    assert_eq!(t.spec, "spec body");
+    assert_eq!((t.planned, t.drafting, t.grilled), (0, 0, 0));
+
+    store.set_ticket_status(id, status::WORKING).await.unwrap();
+    store.set_ticket_spec(id, "new spec").await.unwrap();
+    store.set_ticket_todos(id, r#"[{"content":"a","status":"pending"}]"#).await.unwrap();
+    store.set_ticket_question(id, r#"{"session_id":1}"#).await.unwrap();
+    store.mark_ticket_planned(id).await.unwrap();
+    store.set_ticket_drafting(id, true).await.unwrap();
+    store.mark_ticket_grilled(id).await.unwrap();
+
+    let t = store.get_ticket(id).await.unwrap().unwrap();
+    assert_eq!(t.status, status::WORKING);
+    assert_eq!(t.spec, "new spec");
+    assert!(t.todos.contains("pending"));
+    assert!(t.pending_question.contains("session_id"));
+    assert_eq!((t.planned, t.drafting, t.grilled), (1, 1, 1));
+
+    store.clear_ticket_question(id).await.unwrap();
+    assert_eq!(store.get_ticket(id).await.unwrap().unwrap().pending_question, "");
+
+    // repo (re)binding
+    let repo_id = store.add_repo("r", dir.path().to_str().unwrap(), None).await.unwrap();
+    store.set_ticket_repo(id, repo_id).await.unwrap();
+    assert_eq!(store.get_ticket(id).await.unwrap().unwrap().repo_id, Some(repo_id));
+
+    assert_eq!(store.list_tickets().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn upsert_jira_ticket_inserts_then_updates_title_only() {
+    let dir = TempDir::new("jira");
+    let store = open_store(&dir).await;
+
+    let (id, inserted) = store.upsert_jira_ticket("DNA-1", "Original Title").await.unwrap();
+    assert!(inserted);
+    // Author a local spec + advance the board column.
+    store.set_ticket_spec(id, "local spec").await.unwrap();
+    store.set_ticket_status(id, status::WORKING).await.unwrap();
+
+    // Re-sync: title refreshes, but the locally-authored spec and status are preserved.
+    let (id2, inserted2) = store.upsert_jira_ticket("DNA-1", "Renamed Upstream").await.unwrap();
+    assert_eq!(id2, id);
+    assert!(!inserted2);
+    let t = store.get_ticket(id).await.unwrap().unwrap();
+    assert_eq!(t.title, "Renamed Upstream");
+    assert_eq!(t.spec, "local spec");
+    assert_eq!(t.status, status::WORKING);
+
+    assert_eq!(store.get_ticket_by_key("DNA-1").await.unwrap().unwrap().id, id);
+}
+
+#[tokio::test]
+async fn worktree_crud_primary_and_alternate() {
+    let dir = TempDir::new("wt");
+    let store = open_store(&dir).await;
+
+    let repo_id = store.add_repo("r", dir.path().to_str().unwrap(), None).await.unwrap();
+    let ticket_id = store.add_ticket(Some("K-1"), "jira", "Title", "", Some(repo_id)).await.unwrap();
+
+    let primary = store.add_worktree(ticket_id, repo_id, "harmony/K-1", "/tmp/p", false).await.unwrap();
+    let _alt = store.add_worktree(ticket_id, repo_id, "harmony/K-1-alt", "/tmp/a", true).await.unwrap();
+
+    // primary_worktree_for_ticket returns the non-alternate (reuse target).
+    let p = store.primary_worktree_for_ticket(ticket_id).await.unwrap().unwrap();
+    assert_eq!(p.id, primary);
+    assert_eq!(p.is_alternate, 0);
+
+    assert_eq!(store.worktrees_for_ticket(ticket_id).await.unwrap().len(), 2);
+
+    // list_worktrees join carries ticket + repo info.
+    let views = store.list_worktrees().await.unwrap();
+    assert_eq!(views.len(), 2);
+    assert!(views.iter().all(|v| v.repo_name == "r" && v.jira_key.as_deref() == Some("K-1")));
+
+    store.delete_worktree(primary).await.unwrap();
+    assert!(store.get_worktree(primary).await.unwrap().is_none());
+    // The alternate remains; with no primary left, the reuse lookup is now empty.
+    assert!(store.primary_worktree_for_ticket(ticket_id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn session_lifecycle_and_resume_lookup() {
+    let dir = TempDir::new("sess");
+    let store = open_store(&dir).await;
+
+    let repo_id = store.add_repo("r", dir.path().to_str().unwrap(), None).await.unwrap();
+    let ticket_id = store.add_ticket(None, "local", "T", "", Some(repo_id)).await.unwrap();
+    let wt_id = store.add_worktree(ticket_id, repo_id, "harmony/local-1", "/tmp/w", false).await.unwrap();
+
+    let sid = store.add_session(ticket_id, wt_id, "/tmp/w", "work").await.unwrap();
+    store.set_session_claude_id(sid, "claude-abc").await.unwrap();
+    store.set_session_transcript_path(sid, "/tmp/t.jsonl").await.unwrap();
+
+    // set_session_state keeps last_tool when passed None (COALESCE).
+    store.set_session_state(sid, "working", Some("Edit")).await.unwrap();
+    store.set_session_state(sid, "waiting", None).await.unwrap();
+    let view = store.list_sessions().await.unwrap();
+    assert_eq!(view.len(), 1);
+    assert_eq!(view[0].state, "waiting");
+    assert_eq!(view[0].last_tool.as_deref(), Some("Edit"));
+    assert_eq!(view[0].claude_session_id.as_deref(), Some("claude-abc"));
+
+    // resume + transcript lookups
+    assert_eq!(
+        store.latest_claude_session_id_for_ticket(ticket_id).await.unwrap().as_deref(),
+        Some("claude-abc")
+    );
+    assert_eq!(
+        store.latest_transcript_path_for_ticket(ticket_id).await.unwrap().as_deref(),
+        Some("/tmp/t.jsonl")
+    );
+
+    // Open work session shows up for reattach.
+    assert_eq!(store.tickets_with_open_session().await.unwrap(), vec![ticket_id]);
+
+    // end → no longer open.
+    store.end_session(sid).await.unwrap();
+    assert!(store.tickets_with_open_session().await.unwrap().is_empty());
+
+    // delete_session only drops ended ones.
+    let removed = store.delete_ended_sessions().await.unwrap();
+    assert_eq!(removed, 1);
+    assert!(store.list_sessions().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn tickets_with_open_session_excludes_spec_and_end_all() {
+    let dir = TempDir::new("specsess");
+    let store = open_store(&dir).await;
+
+    let repo_id = store.add_repo("r", dir.path().to_str().unwrap(), None).await.unwrap();
+    let ticket_id = store.add_ticket(None, "local", "T", "", Some(repo_id)).await.unwrap();
+    let wt_id = store.add_worktree(ticket_id, repo_id, "b", "/tmp/w", false).await.unwrap();
+
+    // A worktree-less spec/grill session must not count as a reattachable work session.
+    let _spec = store.add_session(ticket_id, 0, dir.path().to_str().unwrap(), "spec").await.unwrap();
+    assert!(store.tickets_with_open_session().await.unwrap().is_empty());
+
+    let _work = store.add_session(ticket_id, wt_id, "/tmp/w", "work").await.unwrap();
+    assert_eq!(store.tickets_with_open_session().await.unwrap(), vec![ticket_id]);
+
+    // end_all_open_sessions zombifies everything still open (called on startup).
+    store.end_all_open_sessions().await.unwrap();
+    assert!(store.tickets_with_open_session().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn settings_kv_upsert() {
+    let dir = TempDir::new("kv");
+    let store = open_store(&dir).await;
+
+    assert!(store.get_setting("permission_mode").await.unwrap().is_none());
+    store.set_setting("permission_mode", "auto").await.unwrap();
+    store.set_setting("permission_mode", "plan").await.unwrap(); // ON CONFLICT update
+    assert_eq!(store.get_setting("permission_mode").await.unwrap().as_deref(), Some("plan"));
+}
+
+// =====================================================================
+// 2. Worktree: branch naming / slugify / git create + reuse
+// =====================================================================
+
+#[test]
+fn slugify_normalizes_and_truncates() {
+    assert_eq!(worktree::slugify("Hello World"), "hello-world");
+    assert_eq!(worktree::slugify("  Spaces & Symbols!! "), "spaces-symbols");
+    assert_eq!(worktree::slugify("multi---dash__case"), "multi-dash-case");
+    assert_eq!(worktree::slugify("café déjà"), "caf-d-j"); // non-ascii dropped
+    assert_eq!(worktree::slugify("---"), ""); // all separators trim to empty
+    // Capped at 40 chars.
+    let long = "a".repeat(100);
+    assert_eq!(worktree::slugify(&long).len(), 40);
+}
+
+#[test]
+fn branch_name_prefers_jira_key_else_local_id() {
+    let mut t = sample_ticket();
+    t.jira_key = Some("DNA-42".into());
+    t.title = "Add Login Page".into();
+    assert_eq!(worktree::branch_name(&t), "harmony/DNA-42-add-login-page");
+
+    t.jira_key = None;
+    t.id = 7;
+    assert_eq!(worktree::branch_name(&t), "harmony/local-7-add-login-page");
+}
+
+#[test]
+fn worktree_path_flattens_branch_slashes() {
+    let p = worktree::worktree_path("myrepo", "harmony/DNA-1-foo");
+    // The repo name is a path segment; the branch's '/' is flattened to '__'.
+    assert!(p.ends_with(Path::new("myrepo").join("harmony__DNA-1-foo")), "got {p:?}");
+    assert!(p.starts_with(worktree::worktree_root()));
+}
+
+#[test]
+fn git_worktree_create_then_reuse() {
+    let dir = TempDir::new("git");
+    let repo = dir.path().join("repo");
+    init_git_repo(&repo);
+    let repo_str = repo.to_string_lossy().to_string();
+
+    // No remote → default branch falls back to current HEAD ("main").
+    assert_eq!(worktree::default_branch(&repo_str).unwrap(), "main");
+
+    let branch = "harmony/local-1-feature";
+    let dest = dir.path().join("wt");
+
+    // First create: branch doesn't exist yet → created off base, worktree checked out.
+    worktree::create(&repo_str, "main", branch, &dest).unwrap();
+    assert!(dest.join("README.md").exists(), "worktree should contain the committed file");
+    assert!(branch_exists(&repo_str, branch), "branch should now exist");
+
+    // Remove the worktree dir but keep the branch (mirrors Done: drop worktree, keep PR branch).
+    worktree::remove(&repo_str, &dest).unwrap();
+    assert!(!dest.exists());
+
+    // Second create: branch already exists → reused (not re-forked), worktree re-checked-out.
+    worktree::create(&repo_str, "main", branch, &dest).unwrap();
+    assert!(dest.join("README.md").exists(), "reused worktree should be checked out again");
+}
+
+// =====================================================================
+// 3. Hook server: cwd → session correlation
+// =====================================================================
+
+#[tokio::test]
+async fn active_session_by_cwd_latest_wins_and_excludes_ended() {
+    let dir = TempDir::new("cwd");
+    let store = open_store(&dir).await;
+    let repo_id = store.add_repo("r", dir.path().to_str().unwrap(), None).await.unwrap();
+    let ticket_id = store.add_ticket(None, "local", "T", "", Some(repo_id)).await.unwrap();
+    let wt_id = store.add_worktree(ticket_id, repo_id, "b", "/tmp/w", false).await.unwrap();
+
+    let cwd = "/tmp/work-a";
+    let first = store.add_session(ticket_id, wt_id, cwd, "work").await.unwrap();
+    let second = store.add_session(ticket_id, wt_id, cwd, "work").await.unwrap();
+
+    // Two live sessions share a cwd → the latest (highest id) wins.
+    assert_eq!(store.active_session_by_cwd(cwd).await.unwrap().unwrap().id, second);
+
+    // End the latest → correlation falls back to the still-open earlier one.
+    store.end_session(second).await.unwrap();
+    assert_eq!(store.active_session_by_cwd(cwd).await.unwrap().unwrap().id, first);
+
+    // Unknown cwd → no match.
+    assert!(store.active_session_by_cwd("/tmp/nowhere").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn hook_server_correlates_and_drives_work_session() {
+    let dir = TempDir::new("hookwork");
+    let store = Arc::new(open_store(&dir).await);
+    let repo_id = store.add_repo("r", dir.path().to_str().unwrap(), None).await.unwrap();
+    let ticket_id = store.add_ticket(None, "local", "T", "", Some(repo_id)).await.unwrap();
+    // cwd must be a real directory so the server's canonicalize matches what we stored.
+    let cwd = dir.str();
+    let wt_id = store.add_worktree(ticket_id, repo_id, "b", &cwd, false).await.unwrap();
+    let sid = store.add_session(ticket_id, wt_id, &cwd, "work").await.unwrap();
+
+    let port = spawn_hooks(store.clone()).await;
+    let client = reqwest::Client::new();
+
+    // PreToolUse(TodoWrite): learns the claude session id, sets working, mirrors todos.
+    post(&client, port, "PreToolUse", &serde_json::json!({
+        "cwd": cwd,
+        "session_id": "claude-xyz",
+        "transcript_path": "/tmp/transcript.jsonl",
+        "tool_name": "TodoWrite",
+        "tool_input": { "todos": [ { "content": "do thing", "status": "in_progress" } ] }
+    })).await;
+
+    let sess = store.active_session_by_cwd(&cwd).await.unwrap().unwrap();
+    assert_eq!(sess.id, sid);
+    assert_eq!(sess.claude_session_id.as_deref(), Some("claude-xyz"));
+    assert_eq!(sess.state, "working");
+    let t = store.get_ticket(ticket_id).await.unwrap().unwrap();
+    assert_eq!(t.status, status::WORKING);
+    assert!(t.todos.contains("do thing") && t.todos.contains("in_progress"));
+    assert_eq!(
+        store.latest_transcript_path_for_ticket(ticket_id).await.unwrap().as_deref(),
+        Some("/tmp/transcript.jsonl")
+    );
+
+    // Stop → session waiting, ticket moves to "For Your Review".
+    post(&client, port, "Stop", &serde_json::json!({ "cwd": cwd, "session_id": "claude-xyz" })).await;
+    assert_eq!(store.active_session_by_cwd(&cwd).await.unwrap().unwrap().state, "waiting");
+    assert_eq!(store.get_ticket(ticket_id).await.unwrap().unwrap().status, status::WAITING);
+
+    // A hook for an unknown cwd is a no-op (no panic, no state change).
+    post(&client, port, "PreToolUse", &serde_json::json!({ "cwd": "/tmp/no-such-session" })).await;
+    assert_eq!(store.get_ticket(ticket_id).await.unwrap().unwrap().status, status::WAITING);
+}
+
+#[tokio::test]
+async fn hook_server_spec_session_captures_plan_without_moving_board() {
+    let dir = TempDir::new("hookspec");
+    let store = Arc::new(open_store(&dir).await);
+    let repo_id = store.add_repo("r", dir.path().to_str().unwrap(), None).await.unwrap();
+    let ticket_id = store.add_ticket(None, "local", "Draft", "", Some(repo_id)).await.unwrap();
+    store.set_ticket_drafting(ticket_id, true).await.unwrap();
+    let cwd = dir.str();
+    // Spec/grill session: worktree-less (worktree_id 0), cwd = repo root.
+    store.add_session(ticket_id, 0, &cwd, "spec").await.unwrap();
+
+    let port = spawn_hooks(store.clone()).await;
+    let client = reqwest::Client::new();
+
+    // ExitPlanMode in a spec session: capture plan as spec, clear drafting, mark grilled —
+    // but the ticket must NOT be dragged onto the board (stays a Todo draft).
+    post(&client, port, "PreToolUse", &serde_json::json!({
+        "cwd": cwd,
+        "tool_name": "ExitPlanMode",
+        "tool_input": { "plan": "# The Spec\n- step one" }
+    })).await;
+
+    let t = store.get_ticket(ticket_id).await.unwrap().unwrap();
+    assert_eq!(t.spec, "# The Spec\n- step one");
+    assert_eq!(t.drafting, 0);
+    assert_eq!(t.grilled, 1);
+    assert_eq!(t.status, status::TODO, "spec session must not move the board column");
+}
+
+// ---- helpers -------------------------------------------------------------
+
+fn sample_ticket() -> harmony_core::models::Ticket {
+    harmony_core::models::Ticket {
+        id: 1,
+        jira_key: None,
+        source: "local".into(),
+        title: "T".into(),
+        spec: "".into(),
+        status: status::TODO.into(),
+        repo_id: None,
+        created_at: 0,
+        updated_at: 0,
+        todos: "".into(),
+        pending_question: "".into(),
+        planned: 0,
+        drafting: 0,
+        grilled: 0,
+    }
+}
+
+fn init_git_repo(repo: &Path) {
+    std::fs::create_dir_all(repo).unwrap();
+    let run = |args: &[&str]| {
+        let ok = Command::new("git").arg("-C").arg(repo).args(args).status().unwrap().success();
+        assert!(ok, "git {args:?} failed");
+    };
+    run(&["init", "-q", "-b", "main"]);
+    run(&["config", "user.email", "test@harmony.local"]);
+    run(&["config", "user.name", "Harmony Test"]);
+    std::fs::write(repo.join("README.md"), "hello").unwrap();
+    run(&["add", "."]);
+    run(&["commit", "-q", "-m", "init"]);
+}
+
+fn branch_exists(repo: &str, branch: &str) -> bool {
+    // `rev-parse --verify` prints the SHA on success — capture it so it doesn't leak to
+    // the test runner's stdout.
+    Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")])
+        .output()
+        .unwrap()
+        .status
+        .success()
+}
+
+/// Bind the hook server on a free ephemeral port and return it.
+async fn spawn_hooks(store: Arc<Store>) -> u16 {
+    let port = {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    hooks::spawn_server(store, port).await.unwrap();
+    port
+}
+
+async fn post(client: &reqwest::Client, port: u16, event: &str, body: &serde_json::Value) {
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/hook/{event}"))
+        .json(body)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "hook POST {event} failed: {}", resp.status());
+}
