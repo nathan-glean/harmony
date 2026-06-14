@@ -30,6 +30,9 @@ pub struct Ticket {
     /// Pending AskUserQuestion, as a JSON object {session_id, questions:[…]} or "" when
     /// none. Surfaced as an answerable question card; cleared when Claude moves on.
     pub pending_question: String,
+    /// 0/1 — whether the one-time initial plan-mode run has happened for this ticket.
+    /// Gates plan mode so it runs only once at the very start (not on resume/re-entry).
+    pub planned: i64,
 }
 
 /// An isolated git worktree for a ticket. Per-ticket and reused; `is_alternate`

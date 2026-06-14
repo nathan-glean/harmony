@@ -74,21 +74,30 @@ impl SessionManager {
             .store
             .latest_claude_session_id_for_ticket(ticket_id)
             .await?;
-        // Fresh start sends the full spec; a resume restores the conversation via
-        // `--resume` and only nudges Claude to continue (don't re-paste the spec).
-        let prompt = if resume.is_some() {
-            "Continue where you left off.".to_string()
-        } else {
-            render_prompt(&ticket)
-        };
-        // Permission mode (DESIGN Q1: autonomy). Defaults to `auto` so Claude runs
-        // autonomously; configurable in Settings.
-        let mode = self
+        // The very first session for a ticket runs in plan mode to build the task list
+        // before any work. Only once: never on resume, and never again after re-entering
+        // In Progress (gated by the persisted `planned` flag, set right after launch).
+        let do_plan = resume.is_none() && ticket.planned == 0;
+        // Configured permission mode (DESIGN Q1: autonomy). Defaults to `auto`; the initial
+        // plan run forces `plan` regardless.
+        let configured_mode = self
             .store
             .get_setting("permission_mode")
             .await?
             .unwrap_or_else(|| "auto".to_string());
+        // Fresh start sends the full spec; a resume restores the conversation via
+        // `--resume` and only nudges Claude to continue (don't re-paste the spec).
+        let (prompt, mode) = if do_plan {
+            (render_plan_prompt(&ticket), "plan".to_string())
+        } else if resume.is_some() {
+            ("Continue where you left off.".to_string(), configured_mode)
+        } else {
+            (render_prompt(&ticket), configured_mode)
+        };
         let (master, child) = spawn_claude(&wt.path, &prompt, resume.as_deref(), &mode)?;
+        if do_plan {
+            self.store.mark_ticket_planned(ticket_id).await?;
+        }
 
         let session_id = self.store.add_session(ticket_id, wt.id).await?;
         self.store
@@ -114,6 +123,20 @@ fn render_prompt(t: &Ticket) -> String {
     } else {
         format!("# {}\n\n{}", t.title, t.spec)
     }
+}
+
+/// Opening prompt for the one-time initial plan run: the same task brief plus an
+/// instruction to break the work into a task list (captured onto the ticket via the
+/// TodoWrite hook) before proposing a plan. Launched with `--permission-mode plan`.
+fn render_plan_prompt(t: &Ticket) -> String {
+    format!(
+        "{}\n\n---\nYou are starting this ticket in plan mode. First research the codebase \
+         as needed, then break the work into a concrete, ordered task list and record it \
+         with the TodoWrite tool (this saves it to the ticket). Then present your \
+         implementation plan for approval. Do not make any code changes until the plan is \
+         approved.",
+        render_prompt(t)
+    )
 }
 
 /// Render a Claude Code session transcript (JSONL) into a readable plain-text

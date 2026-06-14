@@ -51,7 +51,8 @@ impl Store {
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
             todos TEXT NOT NULL DEFAULT '',
-            pending_question TEXT NOT NULL DEFAULT ''
+            pending_question TEXT NOT NULL DEFAULT '',
+            planned INTEGER NOT NULL DEFAULT 0
         );
         UPDATE tickets SET status = 'todo' WHERE status IN ('available', 'ready');
         CREATE TABLE IF NOT EXISTS worktrees (
@@ -92,6 +93,9 @@ impl Store {
             .execute(&self.pool)
             .await;
         let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN pending_question TEXT NOT NULL DEFAULT ''")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN planned INTEGER NOT NULL DEFAULT 0")
             .execute(&self.pool)
             .await;
         Ok(())
@@ -207,7 +211,7 @@ impl Store {
 
     pub async fn get_ticket(&self, id: i64) -> Result<Option<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned
              FROM tickets WHERE id = ?",
         )
         .bind(id)
@@ -217,7 +221,7 @@ impl Store {
 
     pub async fn list_tickets(&self) -> Result<Vec<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned
              FROM tickets ORDER BY id",
         )
         .fetch_all(&self.pool)
@@ -490,7 +494,7 @@ impl Store {
 
     pub async fn get_ticket_by_key(&self, key: &str) -> Result<Option<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned
              FROM tickets WHERE jira_key = ?",
         )
         .bind(key)
@@ -539,6 +543,16 @@ impl Store {
     /// Clear the ticket's pending question (answered, or session moved on).
     pub async fn clear_ticket_question(&self, id: i64) -> Result<()> {
         sqlx::query("UPDATE tickets SET pending_question = '' WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Mark a ticket's one-time initial plan run as done, so subsequent starts (resume or
+    /// re-entry into In Progress) skip plan mode.
+    pub async fn mark_ticket_planned(&self, id: i64) -> Result<()> {
+        sqlx::query("UPDATE tickets SET planned = 1 WHERE id = ?")
             .bind(id)
             .execute(&self.pool)
             .await?;

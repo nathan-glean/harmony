@@ -10,6 +10,7 @@ export type Ticket = {
   updated_at: number;
   todos: string; // JSON array of { content, status }
   pending_question: string; // JSON { session_id, questions:[…] } or "" when none
+  planned: number; // 0/1 — initial plan-mode run has happened (one-time, at first start)
 };
 
 // Shape of `Ticket.pending_question` once parsed (from an AskUserQuestion tool call).
