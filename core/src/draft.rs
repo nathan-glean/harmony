@@ -16,9 +16,10 @@ pub fn draft_spec(summary: &str, description: &str) -> Result<String> {
     let prompt = format!(
         "You are drafting an implementation spec for a coding agent from a Jira ticket.\n\n\
          Jira summary: {summary}\n\nJira description:\n{desc}\n\n\
-         Write a concise, actionable spec in markdown with these sections: Goal, Context, \
-         Relevant files (best guess), Acceptance criteria, Out of scope. Output ONLY the \
-         spec markdown, no preamble."
+         Write a concise, actionable spec in markdown. Start with a short body (a `## Goal` and \
+         `## Context`), then include these exact section headings so the fields can be parsed \
+         out: `## Acceptance criteria`, `## Relevant paths` (best-guess file paths), and \
+         `## Constraints`. Output ONLY the spec markdown, no preamble."
     );
 
     let out = Command::new("claude")

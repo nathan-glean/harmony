@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Ticket, Repo, SessionView, WorktreeView, SessionProgress } from "./types";
+import type { Ticket, Repo, SessionView, WorktreeView, SessionProgress, SpecFields } from "./types";
 
 // Tauri converts camelCase JS arg keys to snake_case Rust params.
 export const api = {
@@ -31,6 +31,14 @@ export const api = {
   addLocalTicket: (title: string, spec: string, repo: string | null) =>
     invoke<number>("add_local_ticket", { title, spec, repo }),
   setSpec: (id: number, spec: string) => invoke<void>("set_spec", { id, spec }),
+  setSpecFields: (id: number, fields: SpecFields) =>
+    invoke<void>("set_spec_fields", {
+      id,
+      spec: fields.spec,
+      acceptanceCriteria: fields.acceptance_criteria,
+      relevantPaths: fields.relevant_paths,
+      constraints: fields.constraints,
+    }),
   setStatus: (id: number, status: string) =>
     invoke<void>("set_ticket_status", { id, status }),
   jiraApplyColumn: (ticketId: number, status: string) =>
@@ -41,7 +49,7 @@ export const api = {
   installAcli: () => invoke<string>("install_acli"),
   jiraLogout: () => invoke<void>("jira_logout"),
   jiraSync: () => invoke<number>("jira_sync"),
-  draftTicket: (id: number) => invoke<string>("draft_ticket", { id }),
+  draftTicket: (id: number) => invoke<SpecFields>("draft_ticket", { id }),
   jiraDetail: (ticketId: number) =>
     invoke<{ description: string; comments: { author: string; created: string; body: string }[] }>(
       "jira_detail",

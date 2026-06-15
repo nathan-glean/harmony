@@ -170,6 +170,12 @@ button:disabled { opacity: 0.5; cursor: default; }
   background: var(--bg); color: var(--text); border: 1px solid var(--border);
   border-radius: 8px; padding: 10px; font: 13px/1.5 Menlo, monospace;
 }
+.spec-fields { display: flex; flex-direction: column; gap: 4px; }
+.spec-fields .field-label {
+  margin-top: 8px; color: var(--muted); font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.spec-fields .spec-sub { min-height: 64px; }
 
 .transcript-pane { display: flex; flex-direction: column; gap: 6px; }
 .transcript-toggle {

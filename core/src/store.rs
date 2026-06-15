@@ -54,7 +54,10 @@ impl Store {
             pending_question TEXT NOT NULL DEFAULT '',
             planned INTEGER NOT NULL DEFAULT 0,
             drafting INTEGER NOT NULL DEFAULT 0,
-            grilled INTEGER NOT NULL DEFAULT 0
+            grilled INTEGER NOT NULL DEFAULT 0,
+            acceptance_criteria TEXT NOT NULL DEFAULT '',
+            relevant_paths TEXT NOT NULL DEFAULT '',
+            constraints TEXT NOT NULL DEFAULT ''
         );
         UPDATE tickets SET status = 'todo' WHERE status IN ('available', 'ready');
         CREATE TABLE IF NOT EXISTS worktrees (
@@ -112,6 +115,15 @@ impl Store {
             .execute(&self.pool)
             .await;
         let _ = sqlx::query("ALTER TABLE sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'work'")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN acceptance_criteria TEXT NOT NULL DEFAULT ''")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN relevant_paths TEXT NOT NULL DEFAULT ''")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN constraints TEXT NOT NULL DEFAULT ''")
             .execute(&self.pool)
             .await;
         Ok(())
@@ -227,7 +239,7 @@ impl Store {
 
     pub async fn get_ticket(&self, id: i64) -> Result<Option<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints
              FROM tickets WHERE id = ?",
         )
         .bind(id)
@@ -237,7 +249,7 @@ impl Store {
 
     pub async fn list_tickets(&self) -> Result<Vec<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints
              FROM tickets ORDER BY id",
         )
         .fetch_all(&self.pool)
@@ -537,7 +549,7 @@ impl Store {
 
     pub async fn get_ticket_by_key(&self, key: &str) -> Result<Option<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints
              FROM tickets WHERE jira_key = ?",
         )
         .bind(key)
@@ -623,7 +635,7 @@ impl Store {
         Ok(())
     }
 
-    /// Set the agent spec (does not change the column).
+    /// Set the agent spec body (does not change the column or the structured fields).
     pub async fn set_ticket_spec(&self, id: i64, spec: &str) -> Result<()> {
         sqlx::query("UPDATE tickets SET spec = ?, updated_at = ? WHERE id = ?")
             .bind(spec)
@@ -631,6 +643,31 @@ impl Store {
             .bind(id)
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    /// Set the spec body and all three first-class fields together (one save from the editor,
+    /// or one capture from the grill/draft). Each persists independently.
+    pub async fn set_ticket_spec_fields(
+        &self,
+        id: i64,
+        spec: &str,
+        acceptance_criteria: &str,
+        relevant_paths: &str,
+        constraints: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE tickets SET spec = ?, acceptance_criteria = ?, relevant_paths = ?, \
+             constraints = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(spec)
+        .bind(acceptance_criteria)
+        .bind(relevant_paths)
+        .bind(constraints)
+        .bind(now_unix())
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 

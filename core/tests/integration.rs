@@ -143,6 +143,37 @@ async fn ticket_crud_and_flags() {
 }
 
 #[tokio::test]
+async fn spec_fields_persist_independently_and_compose() {
+    let dir = TempDir::new("specfields");
+    let store = open_store(&dir).await;
+    let id = store.add_ticket(None, "local", "T", "body text", None).await.unwrap();
+
+    store
+        .set_ticket_spec_fields(id, "Goal body.", "- must pass", "src/a.rs\nsrc/b.rs", "no new deps")
+        .await
+        .unwrap();
+
+    let t = store.get_ticket(id).await.unwrap().unwrap();
+    assert_eq!(t.spec, "Goal body.");
+    assert_eq!(t.acceptance_criteria, "- must pass");
+    assert_eq!(t.relevant_paths, "src/a.rs\nsrc/b.rs");
+    assert_eq!(t.constraints, "no new deps");
+
+    // compose_spec rebuilds the canonical markdown with the section headings.
+    let composed = harmony_core::spec::compose_spec(&t);
+    assert!(composed.contains("Goal body."));
+    assert!(composed.contains("## Acceptance criteria\n- must pass"));
+    assert!(composed.contains("## Relevant paths\nsrc/a.rs"));
+    assert!(composed.contains("## Constraints\nno new deps"));
+
+    // A field can be cleared independently without touching the others.
+    store.set_ticket_spec_fields(id, "Goal body.", "", "src/a.rs\nsrc/b.rs", "no new deps").await.unwrap();
+    let t = store.get_ticket(id).await.unwrap().unwrap();
+    assert_eq!(t.acceptance_criteria, "");
+    assert_eq!(t.relevant_paths, "src/a.rs\nsrc/b.rs");
+}
+
+#[tokio::test]
 async fn upsert_jira_ticket_inserts_then_updates_title_only() {
     let dir = TempDir::new("jira");
     let store = open_store(&dir).await;
@@ -498,6 +529,9 @@ fn sample_ticket() -> harmony_core::models::Ticket {
         planned: 0,
         drafting: 0,
         grilled: 0,
+        acceptance_criteria: "".into(),
+        relevant_paths: "".into(),
+        constraints: "".into(),
     }
 }
 

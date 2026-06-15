@@ -30,6 +30,10 @@ export function App() {
   const [liveSessionIds, setLiveSessionIds] = useState<Set<number>>(new Set());
   const [selected, setSelected] = useState<Ticket | null>(null);
   const [spec, setSpec] = useState("");
+  // First-class spec fields, edited alongside the spec body.
+  const [acceptance, setAcceptance] = useState("");
+  const [paths, setPaths] = useState("");
+  const [constraints, setConstraints] = useState("");
   // Live terminals keyed by ticket id → session id (supports several at once).
   const [liveSessions, setLiveSessions] = useState<Record<number, number>>({});
   // Live in-session progress (last assistant message + current tool), keyed by ticket id.
@@ -380,9 +384,12 @@ export function App() {
     return () => document.removeEventListener("mousedown", onDown);
   }, [selected]);
 
-  // Keep the spec editor in sync with the selected ticket.
+  // Keep the spec editor (body + first-class fields) in sync with the selected ticket.
   useEffect(() => {
     setSpec(selected?.spec ?? "");
+    setAcceptance(selected?.acceptance_criteria ?? "");
+    setPaths(selected?.relevant_paths ?? "");
+    setConstraints(selected?.constraints ?? "");
   }, [selected?.id]);
 
   const flash = (m: string) => {
@@ -697,8 +704,11 @@ export function App() {
                   disabled={busy !== null}
                   onClick={() =>
                     run("draft", async () => {
-                      const s = await api.draftTicket(selected.id);
-                      setSpec(s);
+                      const f = await api.draftTicket(selected.id);
+                      setSpec(f.spec);
+                      setAcceptance(f.acceptance_criteria);
+                      setPaths(f.relevant_paths);
+                      setConstraints(f.constraints);
                       await refresh();
                     })
                   }
@@ -708,7 +718,17 @@ export function App() {
               )}
               <button
                 disabled={busy !== null}
-                onClick={() => run("save", async () => { await api.setSpec(selected.id, spec); await refresh(); })}
+                onClick={() =>
+                  run("save", async () => {
+                    await api.setSpecFields(selected.id, {
+                      spec,
+                      acceptance_criteria: acceptance,
+                      relevant_paths: paths,
+                      constraints,
+                    });
+                    await refresh();
+                  })
+                }
               >
                 Save spec
               </button>
@@ -793,12 +813,36 @@ export function App() {
 
             {selected.jira_key && <JiraInfo ticketId={selected.id} />}
 
-            <textarea
-              className="spec"
-              value={spec}
-              placeholder="Agent spec (markdown) — write or Draft from Jira…"
-              onChange={(e) => setSpec(e.target.value)}
-            />
+            <div className="spec-fields">
+              <label className="field-label">Spec</label>
+              <textarea
+                className="spec"
+                value={spec}
+                placeholder="Agent spec body (markdown) — Goal, Context… or Draft from Jira…"
+                onChange={(e) => setSpec(e.target.value)}
+              />
+              <label className="field-label">Acceptance criteria</label>
+              <textarea
+                className="spec spec-sub"
+                value={acceptance}
+                placeholder="What must be true to call this done (one per line)…"
+                onChange={(e) => setAcceptance(e.target.value)}
+              />
+              <label className="field-label">Relevant paths</label>
+              <textarea
+                className="spec spec-sub"
+                value={paths}
+                placeholder="Files/dirs the agent should focus on (one per line)…"
+                onChange={(e) => setPaths(e.target.value)}
+              />
+              <label className="field-label">Constraints</label>
+              <textarea
+                className="spec spec-sub"
+                value={constraints}
+                placeholder="Boundaries / non-goals / must-nots…"
+                onChange={(e) => setConstraints(e.target.value)}
+              />
+            </div>
 
             {liveTicket?.todos && <Tasks todosJson={liveTicket.todos} />}
 

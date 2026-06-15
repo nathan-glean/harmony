@@ -170,7 +170,18 @@ async fn handle(
                         v.get("tool_input").map(|ti| ti.to_string())
                     });
                 if let Some(plan) = plan {
-                    let _ = store.set_ticket_spec(sess.ticket_id, &plan).await;
+                    // Split the produced spec into the first-class fields (best-effort; the
+                    // body keeps anything not under a recognized heading).
+                    let f = crate::spec::parse_spec(&plan);
+                    let _ = store
+                        .set_ticket_spec_fields(
+                            sess.ticket_id,
+                            &f.spec,
+                            &f.acceptance_criteria,
+                            &f.relevant_paths,
+                            &f.constraints,
+                        )
+                        .await;
                     let _ = store.set_ticket_drafting(sess.ticket_id, false).await;
                     let _ = store.mark_ticket_grilled(sess.ticket_id).await;
                 }

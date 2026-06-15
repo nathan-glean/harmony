@@ -320,6 +320,23 @@ async fn set_spec(state: State<'_, AppState>, id: i64, spec: String) -> Result<(
     state.store.set_ticket_spec(id, &spec).await.map_err(|e| e.to_string())
 }
 
+/// Save the spec body and all three first-class fields together (the detail editor's Save).
+#[tauri::command]
+async fn set_spec_fields(
+    state: State<'_, AppState>,
+    id: i64,
+    spec: String,
+    acceptance_criteria: String,
+    relevant_paths: String,
+    constraints: String,
+) -> Result<(), String> {
+    state
+        .store
+        .set_ticket_spec_fields(id, &spec, &acceptance_criteria, &relevant_paths, &constraints)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Move a ticket to a column (drag-and-drop / manual override).
 #[tauri::command]
 async fn set_ticket_status(state: State<'_, AppState>, id: i64, status: String) -> Result<(), String> {
@@ -449,7 +466,10 @@ async fn jira_detail(state: State<'_, AppState>, ticket_id: i64) -> Result<JiraD
 }
 
 #[tauri::command]
-async fn draft_ticket(state: State<'_, AppState>, id: i64) -> Result<String, String> {
+async fn draft_ticket(
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<harmony_core::spec::SpecFields, String> {
     let ticket = state
         .store
         .get_ticket(id)
@@ -464,8 +484,14 @@ async fn draft_ticket(state: State<'_, AppState>, id: i64) -> Result<String, Str
     .await
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())?;
-    state.store.set_ticket_spec(id, &spec).await.map_err(|e| e.to_string())?;
-    Ok(spec)
+    // Split the drafted markdown into the first-class fields and persist them independently.
+    let f = harmony_core::spec::parse_spec(&spec);
+    state
+        .store
+        .set_ticket_spec_fields(id, &f.spec, &f.acceptance_criteria, &f.relevant_paths, &f.constraints)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(f)
 }
 
 // ---- pull request --------------------------------------------------------
@@ -485,10 +511,11 @@ async fn open_pr(state: State<'_, AppState>, ticket_id: i64) -> Result<String, S
         .map_err(|e| e.to_string())?
         .ok_or("no worktree — start a session first")?;
 
-    let body = if ticket.spec.trim().is_empty() {
+    let composed = harmony_core::spec::compose_spec(&ticket);
+    let body = if composed.trim().is_empty() {
         format!("Ticket: {}", ticket.title)
     } else {
-        ticket.spec.clone()
+        composed
     };
     let (title, path, branch) = (ticket.title.clone(), wt.path.clone(), wt.branch.clone());
 
@@ -863,6 +890,7 @@ pub fn run() {
             ticket_pr,
             add_local_ticket,
             set_spec,
+            set_spec_fields,
             set_ticket_status,
             jira_apply_column,
             delete_ticket,

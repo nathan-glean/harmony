@@ -172,12 +172,13 @@ impl SessionManager {
     }
 }
 
-/// Render the ticket spec into Claude's opening prompt (DESIGN Q10).
+/// Render the ticket spec (body + structured fields) into Claude's opening prompt (DESIGN Q10).
 fn render_prompt(t: &Ticket) -> String {
-    if t.spec.trim().is_empty() {
+    let composed = crate::spec::compose_spec(t);
+    if composed.trim().is_empty() {
         format!("Work on this task: {}", t.title)
     } else {
-        format!("# {}\n\n{}", t.title, t.spec)
+        format!("# {}\n\n{}", t.title, composed)
     }
 }
 
@@ -202,10 +203,11 @@ fn render_plan_prompt(t: &Ticket) -> String {
 /// Claude to write the finished spec as its plan and present it via ExitPlanMode — which the
 /// hook server captures onto the ticket. Launched with `--permission-mode plan` (read-only).
 fn render_grill_prompt(t: &Ticket) -> String {
-    let seed = if t.spec.trim().is_empty() {
+    let composed = crate::spec::compose_spec(t);
+    let seed = if composed.trim().is_empty() {
         format!("We're scoping a new task: {}", t.title)
     } else {
-        format!("We're scoping a new task — \"{}\".\n\nInitial idea:\n{}", t.title, t.spec)
+        format!("We're scoping a new task — \"{}\".\n\nInitial idea:\n{}", t.title, composed)
     };
     format!(
         "{seed}\n\n\
@@ -215,8 +217,10 @@ fn render_grill_prompt(t: &Ticket) -> String {
          Ask the questions one at a time. If a question can be answered by exploring the \
          codebase, explore the codebase instead of asking.\n\n\
          When we've reached a shared understanding, write the complete specification for \
-         this task as your plan and call ExitPlanMode to present it. Do not write any code \
-         or make changes — this session exists only to produce the spec."
+         this task as your plan and call ExitPlanMode to present it. Structure the spec as a \
+         short body (Goal, Context) followed by these exact markdown sections so it can be \
+         parsed into fields: `## Acceptance criteria`, `## Relevant paths`, `## Constraints`. \
+         Do not write any code or make changes — this session exists only to produce the spec."
     )
 }
 

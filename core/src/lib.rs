@@ -14,6 +14,7 @@ pub mod jira;
 pub mod models;
 pub mod session;
 pub mod settings;
+pub mod spec;
 pub mod store;
 pub mod worktree;
 

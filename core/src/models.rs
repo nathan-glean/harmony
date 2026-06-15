@@ -39,6 +39,11 @@ pub struct Ticket {
     /// 0/1 — whether this ticket has been through a grill interview. Gates the auto-grill on
     /// entry to In Progress so a never-grilled (e.g. Jira-synced) ticket gets grilled once.
     pub grilled: i64,
+    /// Promoted first-class spec fields (DESIGN Q10). Freeform text alongside the `spec` body;
+    /// composed into the opening prompt via `crate::spec::compose_spec`.
+    pub acceptance_criteria: String,
+    pub relevant_paths: String,
+    pub constraints: String,
 }
 
 /// An isolated git worktree for a ticket. Per-ticket and reused; `is_alternate`
