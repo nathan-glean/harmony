@@ -476,10 +476,18 @@ async fn draft_ticket(
         .await
         .map_err(|e| e.to_string())?
         .ok_or("no such ticket")?;
-    let key = ticket.jira_key.ok_or("ticket is not linked to Jira")?;
+    let key = ticket.jira_key.clone().ok_or("ticket is not linked to Jira")?;
     let issue = harmony_core::jira::get_issue(&key).await.map_err(|e| e.to_string())?;
+    // Repo-aware when we can resolve a repo (assigned, else the default for the project key):
+    // Claude scans it read-only for real paths. None → pure text draft.
+    let repo_path: Option<String> = if let Some(rid) = ticket.repo_id {
+        state.store.get_repo(rid).await.map_err(|e| e.to_string())?.map(|r| r.path)
+    } else {
+        let proj = key.split('-').next().unwrap_or("");
+        state.store.default_repo_for_key(proj).await.map_err(|e| e.to_string())?.map(|r| r.path)
+    };
     let spec = tokio::task::spawn_blocking(move || {
-        harmony_core::draft::draft_spec(&issue.summary, &issue.description)
+        harmony_core::draft::draft_spec(&issue.summary, &issue.description, repo_path.as_deref())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -511,15 +519,33 @@ async fn open_pr(state: State<'_, AppState>, ticket_id: i64) -> Result<String, S
         .map_err(|e| e.to_string())?
         .ok_or("no worktree — start a session first")?;
 
+    let repo = state
+        .store
+        .get_repo(wt.repo_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("repo missing")?;
     let composed = harmony_core::spec::compose_spec(&ticket);
-    let body = if composed.trim().is_empty() {
+    let fallback = if composed.trim().is_empty() {
         format!("Ticket: {}", ticket.title)
     } else {
         composed
     };
-    let (title, path, branch) = (ticket.title.clone(), wt.path.clone(), wt.branch.clone());
+    // Jira issue link woven into the generated PR body (browse URL when the site is known).
+    let ticket_ref: Option<String> = match ticket.jira_key.as_deref() {
+        Some(key) => Some(match harmony_core::jira::connected_site().await {
+            Some(site) => format!("https://{site}/browse/{key}"),
+            None => key.to_string(),
+        }),
+        None => None,
+    };
+    let (title, path, branch, repo_path) =
+        (ticket.title.clone(), wt.path.clone(), wt.branch.clone(), repo.path.clone());
 
     let url = tokio::task::spawn_blocking(move || -> Result<String, String> {
+        // Generated diff summary (conforms to the repo's PR template if present), else the spec.
+        let body =
+            harmony_core::github::generated_pr_body(&path, &repo_path, ticket_ref.as_deref(), &fallback);
         harmony_core::github::push_branch(&path, &branch).map_err(|e| e.to_string())?;
         harmony_core::github::create_draft_pr(&path, &title, &body, &branch).map_err(|e| e.to_string())
     })

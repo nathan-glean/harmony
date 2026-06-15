@@ -82,6 +82,9 @@ enum Cmd {
         /// Skip Jira writeback (status → In Review + PR-link comment)
         #[arg(long)]
         no_writeback: bool,
+        /// Skip the Claude-generated diff summary; use the spec as the PR body
+        #[arg(long)]
+        no_summary: bool,
     },
 }
 
@@ -288,23 +291,73 @@ async fn main() -> Result<()> {
                 .ok_or_else(|| anyhow!("no such ticket #{ticket_id}"))?;
             let key = ticket
                 .jira_key
+                .clone()
                 .ok_or_else(|| anyhow!("ticket #{ticket_id} is not linked to a Jira issue"))?;
             let issue = harmony_core::jira::get_issue(&key).await?;
-            println!("[draft] generating spec from {key} via `claude -p` …");
-            let spec = harmony_core::draft::draft_spec(&issue.summary, &issue.description)?;
-            store.set_ticket_spec(ticket_id, &spec).await?;
+            // Repo-aware when we can resolve a repo: Claude scans it (read-only) for real paths.
+            let repo_path = ticket_repo_path(&store, &ticket).await;
+            let aware = if repo_path.is_some() { " (repo-aware)" } else { "" };
+            println!("[draft] generating spec from {key} via `claude -p`{aware} …");
+            let spec = harmony_core::draft::draft_spec(
+                &issue.summary,
+                &issue.description,
+                repo_path.as_deref(),
+            )?;
+            let f = harmony_core::spec::parse_spec(&spec);
+            store
+                .set_ticket_spec_fields(
+                    ticket_id,
+                    &f.spec,
+                    &f.acceptance_criteria,
+                    &f.relevant_paths,
+                    &f.constraints,
+                )
+                .await?;
             println!("\n--- drafted spec for #{ticket_id} ({key}) ---\n{spec}");
         }
-        Cmd::Pr { ticket_id, title, no_writeback } => {
-            pr_flow(&store, ticket_id, title, !no_writeback).await?;
+        Cmd::Pr { ticket_id, title, no_writeback, no_summary } => {
+            pr_flow(&store, ticket_id, title, !no_writeback, !no_summary).await?;
         }
     }
     Ok(())
 }
 
+/// Repo filesystem path for a ticket: its assigned repo, else the default repo for its Jira
+/// project key. `None` when neither is set (so a draft stays a pure text transform).
+async fn ticket_repo_path(store: &Store, ticket: &harmony_core::models::Ticket) -> Option<String> {
+    if let Some(rid) = ticket.repo_id {
+        if let Ok(Some(r)) = store.get_repo(rid).await {
+            return Some(r.path);
+        }
+    }
+    let key = ticket.jira_key.as_deref()?;
+    let proj = key.split('-').next()?;
+    match store.default_repo_for_key(proj).await {
+        Ok(Some(r)) => Some(r.path),
+        _ => None,
+    }
+}
+
+/// A reference to the originating Jira issue for the PR body — a browse URL when the connected
+/// site is known, else the bare key. `None` for local tickets.
+async fn jira_ref(ticket: &harmony_core::models::Ticket) -> Option<String> {
+    let key = ticket.jira_key.as_deref()?;
+    match harmony_core::jira::connected_site().await {
+        Some(site) => Some(format!("https://{site}/browse/{key}")),
+        None => Some(key.to_string()),
+    }
+}
+
 /// Push the branch, open a draft PR, set ticket → In Review, and (opt-in) write back to
-/// Jira (status + PR-link comment). DESIGN Q7/Q11.
-async fn pr_flow(store: &Store, ticket_id: i64, title: Option<String>, writeback: bool) -> Result<()> {
+/// Jira (status + PR-link comment). DESIGN Q7/Q11. With `summary`, the PR body is a
+/// Claude-generated diff summary (else the composed spec).
+async fn pr_flow(
+    store: &Store,
+    ticket_id: i64,
+    title: Option<String>,
+    writeback: bool,
+    summary: bool,
+) -> Result<()> {
     let ticket = store
         .get_ticket(ticket_id)
         .await?
@@ -313,12 +366,24 @@ async fn pr_flow(store: &Store, ticket_id: i64, title: Option<String>, writeback
         .primary_worktree_for_ticket(ticket_id)
         .await?
         .ok_or_else(|| anyhow!("ticket #{ticket_id} has no worktree — run `harmony start` first"))?;
+    let repo = store
+        .get_repo(wt.repo_id)
+        .await?
+        .ok_or_else(|| anyhow!("repo #{} missing", wt.repo_id))?;
 
     let pr_title = title.unwrap_or_else(|| ticket.title.clone());
-    let body = if ticket.spec.trim().is_empty() {
+    let composed = harmony_core::spec::compose_spec(&ticket);
+    let fallback = if composed.trim().is_empty() {
         format!("Ticket: {}", ticket.title)
     } else {
-        ticket.spec.clone()
+        composed
+    };
+    let body = if summary {
+        let tref = jira_ref(&ticket).await;
+        println!("[pr] summarizing diff via `claude -p` …");
+        harmony_core::github::generated_pr_body(&wt.path, &repo.path, tref.as_deref(), &fallback)
+    } else {
+        fallback
     };
 
     println!("[pr] pushing {} …", wt.branch);

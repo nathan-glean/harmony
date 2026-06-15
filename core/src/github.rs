@@ -27,6 +27,27 @@ pub fn diff(worktree: &str, base: &str) -> Result<String> {
     run("git", &["diff", "--merge-base", base], worktree)
 }
 
+/// Build a PR body: a Claude-generated summary of the branch diff (conforming to the repo's PR
+/// template when one exists, and referencing `ticket_ref`), falling back to `fallback` (the
+/// composed spec) whenever a summary can't be produced — no diff, or `claude`/`git` unavailable.
+/// The single place the "generated summary when available, else spec" rule lives.
+pub fn generated_pr_body(
+    worktree: &str,
+    repo_path: &str,
+    ticket_ref: Option<&str>,
+    fallback: &str,
+) -> String {
+    let base = crate::worktree::default_branch(repo_path).unwrap_or_else(|_| "main".into());
+    let diff = match diff(worktree, &base) {
+        Ok(d) if !d.trim().is_empty() => d,
+        _ => return fallback.to_string(),
+    };
+    match crate::draft::pr_summary(worktree, &diff, ticket_ref) {
+        Ok(s) if !s.trim().is_empty() => s,
+        _ => fallback.to_string(),
+    }
+}
+
 /// `gh pr view --json …` for the branch's PR (Err if there's no PR).
 pub fn pr_view_json(worktree: &str) -> Result<String> {
     run("gh", &["pr", "view", "--json", "number,title,url,state,isDraft"], worktree)
