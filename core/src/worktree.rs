@@ -88,6 +88,19 @@ pub fn remove(repo: &str, dest: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Number of uncommitted changes (staged, unstaged, or untracked) in a worktree, via
+/// `git status --porcelain`. Used to gate destructive removal so we never silently
+/// `--force` away the user's work.
+pub fn uncommitted_count(worktree: &str) -> Result<usize> {
+    let out = git(worktree, &["status", "--porcelain"])?;
+    Ok(out.lines().filter(|l| !l.trim().is_empty()).count())
+}
+
+/// Whether a worktree has uncommitted changes.
+pub fn is_dirty(worktree: &str) -> Result<bool> {
+    Ok(uncommitted_count(worktree)? > 0)
+}
+
 /// Best-effort removal of all git worktrees for a ticket (used before deleting it).
 /// Errors (e.g. a dirty or in-use worktree) are ignored.
 pub async fn cleanup_for_ticket(store: &crate::store::Store, ticket_id: i64) {

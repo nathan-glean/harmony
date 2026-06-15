@@ -115,7 +115,9 @@ export function Sessions({
                 {g.runs > 1 && <span className="runs-badge"> ×{g.runs} runs</span>}
               </td>
               <td>
-                <span className="badge">{g.live ? g.state : "ended"}</span>
+                <span className={`badge${!g.live && g.state === "error" ? " badge-error" : ""}`}>
+                  {g.live ? g.state : g.state === "error" ? "error" : "ended"}
+                </span>
               </td>
               <td>{g.lastTool ?? "—"}</td>
               <td className="mono">{g.branch}</td>

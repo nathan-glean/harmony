@@ -4,7 +4,7 @@
 //!
 //! Note: `claude -p` counts against separate Agent-SDK usage credits (Phase 0 finding).
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use std::process::Command;
 
 pub fn draft_spec(summary: &str, description: &str) -> Result<String> {
@@ -24,12 +24,10 @@ pub fn draft_spec(summary: &str, description: &str) -> Result<String> {
     let out = Command::new("claude")
         .args(["-p", &prompt])
         .current_dir(std::env::temp_dir())
-        .output()?;
+        .output()
+        .map_err(|e| crate::cmd_err::spawn_error("claude", &e))?;
     if !out.status.success() {
-        return Err(anyhow!(
-            "claude -p failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+        return Err(crate::cmd_err::classify("claude", &String::from_utf8_lossy(&out.stderr)));
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }

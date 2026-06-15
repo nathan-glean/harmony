@@ -59,6 +59,15 @@ export type SessionView = {
   ended_at: number | null;
 };
 
+// Payload of the `session-exit` event. `ok` is false when the Claude process exited
+// abnormally (a crash) and it wasn't a user-initiated stop.
+export type SessionExit = {
+  session_id: number;
+  ticket_id: number;
+  ok: boolean;
+  code: number;
+};
+
 // Live in-session progress tailed from a session's transcript (last assistant message +
 // current tool), keyed by ticket. Richer than SessionView.state's working/waiting flag.
 export type SessionProgress = {

@@ -5,13 +5,13 @@ use anyhow::{anyhow, Result};
 use std::process::Command;
 
 fn run(cmd: &str, args: &[&str], cwd: &str) -> Result<String> {
-    let out = Command::new(cmd).args(args).current_dir(cwd).output()?;
+    let out = Command::new(cmd)
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .map_err(|e| crate::cmd_err::spawn_error(cmd, &e))?;
     if !out.status.success() {
-        return Err(anyhow!(
-            "{cmd} {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+        return Err(crate::cmd_err::classify(cmd, &String::from_utf8_lossy(&out.stderr)));
     }
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
@@ -38,10 +38,11 @@ pub fn pr_checks_json(worktree: &str) -> Result<String> {
     let out = Command::new("gh")
         .args(["pr", "checks", "--json", "name,state,link,bucket"])
         .current_dir(worktree)
-        .output()?;
+        .output()
+        .map_err(|e| crate::cmd_err::spawn_error("gh", &e))?;
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     if stdout.trim().is_empty() {
-        return Err(anyhow!("{}", String::from_utf8_lossy(&out.stderr).trim()));
+        return Err(crate::cmd_err::classify("gh", &String::from_utf8_lossy(&out.stderr)));
     }
     Ok(stdout)
 }
@@ -55,11 +56,11 @@ pub fn create_draft_pr(worktree: &str, title: &str, body: &str, branch: &str) ->
         ],
         worktree,
     )?;
-    let url = out
-        .lines()
+    // `gh pr create` succeeded; the PR URL is the last http line it printed. If we can't find
+    // one, don't hand the raw output back as a "URL" — surface it as an error instead.
+    out.lines()
         .rev()
         .find(|l| l.trim_start().starts_with("http"))
         .map(|l| l.trim().to_string())
-        .unwrap_or_else(|| out.trim().to_string());
-    Ok(url)
+        .ok_or_else(|| anyhow!("gh pr create did not return a PR URL: {}", out.trim()))
 }

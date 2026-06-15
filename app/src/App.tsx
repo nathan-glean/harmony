@@ -20,7 +20,7 @@ import { TranscriptPane } from "./components/TranscriptPane";
 import { ProgressLine } from "./components/ProgressLine";
 import { TerminalView } from "./components/Terminal";
 import { api } from "./api";
-import type { Ticket, Repo, SessionView, WorktreeView, PendingQuestion, SessionProgress } from "./types";
+import type { Ticket, Repo, SessionView, WorktreeView, PendingQuestion, SessionProgress, SessionExit } from "./types";
 
 export function App() {
   const [view, setView] = useState<"board" | "sessions" | "worktrees" | "settings">("board");
@@ -201,14 +201,41 @@ export function App() {
     }
   };
 
-  const deleteWorktree = async (w: WorktreeView) => {
-    const ok = await confirm(
-      `Delete worktree ${w.branch}? Removes it from disk and forgets its sessions.`,
-      { title: "Delete worktree", kind: "warning" }
-    );
-    if (!ok) return;
+  // Run a destructive worktree op that may refuse with a "DIRTY: …" error when there are
+  // uncommitted changes. On refusal, confirm discarding the work and retry forced. Returns
+  // false if the user cancelled. Non-DIRTY errors propagate to the caller.
+  const withDirtyConfirm = async (
+    action: (force: boolean) => Promise<unknown>,
+    what: string
+  ): Promise<boolean> => {
     try {
-      await api.deleteWorktree(w.id);
+      await action(false);
+      return true;
+    } catch (e) {
+      const msg = String(e);
+      const i = msg.indexOf("DIRTY:");
+      if (i === -1) throw e;
+      const ok = await confirm(
+        `${what} has uncommitted changes (${msg.slice(i + 6).trim()}). Discard and continue?`,
+        { title: "Uncommitted changes", kind: "warning" }
+      );
+      if (!ok) return false;
+      await action(true);
+      return true;
+    }
+  };
+
+  const deleteWorktree = async (w: WorktreeView) => {
+    try {
+      const dirty = await api.worktreeDirty(w.id);
+      const ok = await confirm(
+        dirty
+          ? `Worktree ${w.branch} has uncommitted changes. Discard them and delete?`
+          : `Delete worktree ${w.branch}? Removes it from disk and forgets its sessions.`,
+        { title: "Delete worktree", kind: "warning" }
+      );
+      if (!ok) return;
+      await api.deleteWorktree(w.id, dirty);
       await refresh();
       flash("Worktree deleted");
     } catch (e) {
@@ -319,14 +346,18 @@ export function App() {
 
   // A finished session clears the terminal.
   useEffect(() => {
-    const un = listen<number>("session-exit", (e) => {
+    const un = listen<SessionExit>("session-exit", (e) => {
+      const { session_id, ticket_id, ok, code } = e.payload;
       setLiveSessions((m) => {
-        const entry = Object.entries(m).find(([, sid]) => sid === e.payload);
+        const entry = Object.entries(m).find(([, sid]) => sid === session_id);
         if (!entry) return m;
         const next = { ...m };
         delete next[Number(entry[0])];
         return next;
       });
+      // Abnormal exit (a crash, not a user stop) — surface it; the session also shows an
+      // 'error' badge in the Sessions view.
+      if (!ok) flash(`Session for #${ticket_id} exited unexpectedly (code ${code})`);
       refresh();
     });
     return () => {
@@ -415,9 +446,10 @@ export function App() {
         const t = tickets.find((x) => x.id === id);
         if (t) await openTerminal({ ...t, status });
       }
-      // Done → tidy up: remove the worktree(s) (branch/PR are untouched).
+      // Done → tidy up: remove the worktree(s) (branch/PR are untouched). Confirm first if
+      // there are uncommitted changes that would be discarded.
       if (status === "done") {
-        await api.cleanupTicketWorktrees(id);
+        await withDirtyConfirm((force) => api.cleanupTicketWorktrees(id, force), "This ticket's worktree");
       }
     } catch (e) {
       flash(String(e));
@@ -731,7 +763,11 @@ export function App() {
                       { title: "Delete ticket", kind: "warning" }
                     );
                     if (!ok) return;
-                    await api.deleteTicket(t.id);
+                    const done = await withDirtyConfirm(
+                      (force) => api.deleteTicket(t.id, force),
+                      `"${t.title}"`
+                    );
+                    if (!done) return;
                     setSelected(null);
                     await refresh();
                     flash("Ticket deleted");

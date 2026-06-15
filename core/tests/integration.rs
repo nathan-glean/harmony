@@ -334,6 +334,51 @@ fn git_worktree_create_then_reuse() {
     assert!(dest.join("README.md").exists(), "reused worktree should be checked out again");
 }
 
+#[test]
+fn worktree_dirty_detection() {
+    let dir = TempDir::new("dirty");
+    let repo = dir.path().join("repo");
+    init_git_repo(&repo);
+    let repo_str = repo.to_string_lossy().to_string();
+
+    let dest = dir.path().join("wt");
+    worktree::create(&repo_str, "main", "harmony/local-1-x", &dest).unwrap();
+    let wt = dest.to_string_lossy().to_string();
+
+    // Freshly checked-out worktree is clean.
+    assert!(!worktree::is_dirty(&wt).unwrap());
+    assert_eq!(worktree::uncommitted_count(&wt).unwrap(), 0);
+
+    // An untracked file makes it dirty.
+    std::fs::write(dest.join("scratch.txt"), "wip").unwrap();
+    assert!(worktree::is_dirty(&wt).unwrap());
+    assert_eq!(worktree::uncommitted_count(&wt).unwrap(), 1);
+
+    // A modification to a tracked file also counts.
+    std::fs::write(dest.join("README.md"), "changed").unwrap();
+    assert_eq!(worktree::uncommitted_count(&wt).unwrap(), 2);
+}
+
+#[tokio::test]
+async fn fail_session_marks_error_and_ends() {
+    let dir = TempDir::new("failsess");
+    let store = open_store(&dir).await;
+    let repo_id = store.add_repo("r", dir.path().to_str().unwrap(), None).await.unwrap();
+    let ticket_id = store.add_ticket(None, "local", "T", "", Some(repo_id)).await.unwrap();
+    let wt_id = store.add_worktree(ticket_id, repo_id, "b", "/tmp/w", false).await.unwrap();
+    let sid = store.add_session(ticket_id, wt_id, "/tmp/w", "work").await.unwrap();
+
+    store.fail_session(sid).await.unwrap();
+
+    // Errored session is ended (state 'error', not a lingering 'working') and no longer open.
+    let view = store.list_sessions().await.unwrap();
+    assert_eq!(view[0].state, "error");
+    assert!(view[0].ended_at.is_some());
+    assert!(store.tickets_with_open_session().await.unwrap().is_empty());
+    // It is ended, so the cleanup sweep can remove it.
+    assert_eq!(store.delete_ended_sessions().await.unwrap(), 1);
+}
+
 // =====================================================================
 // 3. Hook server: cwd → session correlation
 // =====================================================================

@@ -57,14 +57,28 @@ impl SessionManager {
                 let canon = std::fs::canonicalize(&dest)
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_else(|_| dest.to_string_lossy().to_string());
-                let id = self
-                    .store
-                    .add_worktree(ticket_id, repo_id, &branch, &canon, false)
-                    .await?;
-                self.store
-                    .get_worktree(id)
-                    .await?
-                    .ok_or_else(|| anyhow!("worktree insert failed"))?
+                // The git worktree now exists on disk. If recording it in the DB fails, roll
+                // back the on-disk worktree so we don't leave a half-created worktree (no row,
+                // but a directory that makes the next `git worktree add` fail). Restores the
+                // "no row, no dir" invariant so a retry is clean.
+                let recorded = async {
+                    let id = self
+                        .store
+                        .add_worktree(ticket_id, repo_id, &branch, &canon, false)
+                        .await?;
+                    self.store
+                        .get_worktree(id)
+                        .await?
+                        .ok_or_else(|| anyhow!("worktree insert failed"))
+                }
+                .await;
+                match recorded {
+                    Ok(w) => w,
+                    Err(e) => {
+                        let _ = worktree::remove(&repo.path, &dest);
+                        return Err(e);
+                    }
+                }
             }
         };
 

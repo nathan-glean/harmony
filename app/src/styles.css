@@ -160,6 +160,7 @@ button:disabled { opacity: 0.5; cursor: default; }
   background: var(--panel2); border: 1px solid var(--border); border-radius: 6px;
   padding: 2px 8px; font-size: 11px; text-transform: uppercase; color: var(--muted);
 }
+.badge.badge-error { color: #f7768e; border-color: #f7768e; }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .actions .danger { margin-left: auto; }
 .actions .danger:hover:not(:disabled) { border-color: #f7768e; color: #f7768e; }

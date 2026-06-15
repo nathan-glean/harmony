@@ -54,17 +54,17 @@ async fn acli(args: &[&str]) -> Result<String> {
         .env("PATH", bin_path())
         .output()
         .await
-        .map_err(|e| anyhow!(
-            "the Atlassian CLI (acli) isn't installed ({e}). Install it: \
-             `brew tap atlassian/homebrew-acli && brew install acli` \
-             (or run `harmony jira install`, or see https://developer.atlassian.com/cloud/acli/guides/install-macos/)"
-        ))?;
+        .map_err(|e| if e.kind() == std::io::ErrorKind::NotFound {
+            anyhow!(
+                "the Atlassian CLI (acli) isn't installed. Install it: \
+                 `brew tap atlassian/homebrew-acli && brew install acli` \
+                 (or run `harmony jira install`, or see https://developer.atlassian.com/cloud/acli/guides/install-macos/)"
+            )
+        } else {
+            crate::cmd_err::spawn_error("acli", &e)
+        })?;
     if !out.status.success() {
-        return Err(anyhow!(
-            "acli {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+        return Err(crate::cmd_err::classify("acli", &String::from_utf8_lossy(&out.stderr)));
     }
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
@@ -129,8 +129,7 @@ pub fn login_passthrough() -> Result<()> {
 }
 
 pub async fn logout() -> Result<()> {
-    let _ = acli(&["jira", "auth", "logout"]).await;
-    Ok(())
+    acli(&["jira", "auth", "logout"]).await.map(|_| ())
 }
 
 /// The connected site (Some = logged in). Best-effort: acli exits 0 when authenticated.

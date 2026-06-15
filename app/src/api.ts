@@ -23,9 +23,11 @@ export const api = {
   deleteWorktreeSessions: (worktreeId: number) =>
     invoke<number>("delete_worktree_sessions", { worktreeId }),
   listWorktrees: () => invoke<WorktreeView[]>("list_worktrees"),
-  deleteWorktree: (id: number) => invoke<void>("delete_worktree", { id }),
-  cleanupTicketWorktrees: (ticketId: number) =>
-    invoke<void>("cleanup_ticket_worktrees", { ticketId }),
+  worktreeDirty: (id: number) => invoke<boolean>("worktree_dirty", { id }),
+  deleteWorktree: (id: number, force: boolean) =>
+    invoke<void>("delete_worktree", { id, force }),
+  cleanupTicketWorktrees: (ticketId: number, force: boolean) =>
+    invoke<void>("cleanup_ticket_worktrees", { ticketId, force }),
   addLocalTicket: (title: string, spec: string, repo: string | null) =>
     invoke<number>("add_local_ticket", { title, spec, repo }),
   setSpec: (id: number, spec: string) => invoke<void>("set_spec", { id, spec }),
@@ -33,7 +35,8 @@ export const api = {
     invoke<void>("set_ticket_status", { id, status }),
   jiraApplyColumn: (ticketId: number, status: string) =>
     invoke<void>("jira_apply_column", { ticketId, status }),
-  deleteTicket: (id: number) => invoke<void>("delete_ticket", { ticketId: id }),
+  deleteTicket: (id: number, force: boolean) =>
+    invoke<void>("delete_ticket", { ticketId: id, force }),
   jiraEnv: () => invoke<{ acli_installed: boolean; site: string | null }>("jira_env"),
   installAcli: () => invoke<string>("install_acli"),
   jiraLogout: () => invoke<void>("jira_logout"),

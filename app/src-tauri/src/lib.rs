@@ -6,7 +6,7 @@
 //! keystrokes come back via the `send_input` command. State is detected out-of-band by
 //! the same hook server the core runs (started in `setup`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 
@@ -32,12 +32,25 @@ struct AppState {
     sessions: Arc<Mutex<HashMap<i64, SessionIo>>>,
     /// Tickets that were live at the last shutdown — drained once by the UI to reattach.
     reattach: Mutex<Vec<i64>>,
+    /// Session ids the user deliberately stopped, so their non-zero exit isn't mistaken for a
+    /// crash. The wait-task removes the id once it has handled the exit.
+    stopping: Arc<Mutex<HashSet<i64>>>,
 }
 
 #[derive(Clone, Serialize)]
 struct TermOutput {
     session_id: i64,
     data: String,
+}
+
+/// Emitted when a session's Claude process exits. `ok` is false for an abnormal exit (crash)
+/// that wasn't a user-initiated stop, so the UI can flash a toast and show an error badge.
+#[derive(Clone, Serialize)]
+struct SessionExit {
+    session_id: i64,
+    ticket_id: i64,
+    ok: bool,
+    code: i32,
 }
 
 // ---- board / ticket commands --------------------------------------------
@@ -192,10 +205,44 @@ async fn list_worktrees(state: State<'_, AppState>) -> Result<Vec<WorktreeView>,
     state.store.list_worktrees().await.map_err(|e| e.to_string())
 }
 
-/// Remove ALL of a ticket's worktrees from disk + DB (keeps the ticket). Used when a
-/// ticket is moved to Done. The pushed branch/PR is unaffected.
+/// Total uncommitted changes across all of a ticket's worktrees (so the UI can warn before a
+/// destructive move-to-Done / delete). 0 means clean.
+async fn ticket_uncommitted(state: &AppState, ticket_id: i64) -> usize {
+    let worktrees = state.store.worktrees_for_ticket(ticket_id).await.unwrap_or_default();
+    worktrees
+        .iter()
+        .map(|wt| harmony_core::worktree::uncommitted_count(&wt.path).unwrap_or(0))
+        .sum()
+}
+
+/// Whether a single worktree has uncommitted changes — the UI calls this before deleting it so
+/// it can confirm before discarding work.
 #[tauri::command]
-async fn cleanup_ticket_worktrees(state: State<'_, AppState>, ticket_id: i64) -> Result<(), String> {
+async fn worktree_dirty(state: State<'_, AppState>, id: i64) -> Result<bool, String> {
+    let wt = state
+        .store
+        .get_worktree(id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("no such worktree")?;
+    Ok(harmony_core::worktree::is_dirty(&wt.path).unwrap_or(false))
+}
+
+/// Remove ALL of a ticket's worktrees from disk + DB (keeps the ticket). Used when a
+/// ticket is moved to Done. The pushed branch/PR is unaffected. Unless `force`, refuses if any
+/// worktree has uncommitted changes (returns a `DIRTY:` error the UI confirms before retrying).
+#[tauri::command]
+async fn cleanup_ticket_worktrees(
+    state: State<'_, AppState>,
+    ticket_id: i64,
+    force: bool,
+) -> Result<(), String> {
+    if !force {
+        let n = ticket_uncommitted(&state, ticket_id).await;
+        if n > 0 {
+            return Err(format!("DIRTY: {n} uncommitted change(s) would be discarded"));
+        }
+    }
     harmony_core::worktree::cleanup_for_ticket(&state.store, ticket_id).await;
     let worktrees = state
         .store
@@ -208,10 +255,18 @@ async fn cleanup_ticket_worktrees(state: State<'_, AppState>, ticket_id: i64) ->
     Ok(())
 }
 
-/// Remove a worktree from disk (best-effort) then delete its DB row + sessions.
+/// Remove a worktree from disk then delete its DB row + sessions. Unless `force`, refuses a
+/// worktree with uncommitted changes (returns a `DIRTY:` error the UI confirms before retrying)
+/// so we never silently `--force`-discard the user's work.
 #[tauri::command]
-async fn delete_worktree(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+async fn delete_worktree(state: State<'_, AppState>, id: i64, force: bool) -> Result<(), String> {
     if let Ok(Some(wt)) = state.store.get_worktree(id).await {
+        if !force {
+            let n = harmony_core::worktree::uncommitted_count(&wt.path).unwrap_or(0);
+            if n > 0 {
+                return Err(format!("DIRTY: {n} uncommitted change(s) would be discarded"));
+            }
+        }
         if let Ok(Some(repo)) = state.store.get_repo(wt.repo_id).await {
             let _ = harmony_core::worktree::remove(&repo.path, std::path::Path::new(&wt.path));
         }
@@ -298,9 +353,16 @@ async fn jira_apply_column(state: State<'_, AppState>, ticket_id: i64, status: S
     Ok(())
 }
 
-/// Delete a ticket: remove its git worktrees (best-effort) then its DB records.
+/// Delete a ticket: remove its git worktrees then its DB records. Unless `force`, refuses if
+/// any worktree has uncommitted changes (returns a `DIRTY:` error the UI confirms first).
 #[tauri::command]
-async fn delete_ticket(state: State<'_, AppState>, ticket_id: i64) -> Result<(), String> {
+async fn delete_ticket(state: State<'_, AppState>, ticket_id: i64, force: bool) -> Result<(), String> {
+    if !force {
+        let n = ticket_uncommitted(&state, ticket_id).await;
+        if n > 0 {
+            return Err(format!("DIRTY: {n} uncommitted change(s) would be discarded"));
+        }
+    }
     harmony_core::worktree::cleanup_for_ticket(&state.store, ticket_id).await;
     state.store.delete_ticket(ticket_id).await.map_err(|e| e.to_string())
 }
@@ -618,22 +680,39 @@ fn wire_session(
         .unwrap()
         .insert(session_id, SessionIo { master, writer, killer, ticket_id });
 
-    // Wait for exit -> mark ended, clear draft flag, drop handles, notify UI
+    // Wait for exit -> mark ended (or failed), clear draft flag, drop handles, notify UI
     {
         let app = app.clone();
         let store = state.store.clone();
         let sessions = state.sessions.clone();
+        let stopping = state.stopping.clone();
         tauri::async_runtime::spawn(async move {
-            let _ = tokio::task::spawn_blocking(move || {
+            let wait = tokio::task::spawn_blocking(move || {
                 let mut child = child;
                 child.wait()
             })
             .await;
-            let _ = store.end_session(session_id).await;
+            // exit_code() is 0 on a clean exit; treat a join/wait error as abnormal (code -1).
+            let (ok, code) = match wait {
+                Ok(Ok(status)) => (status.success(), status.exit_code() as i32),
+                _ => (false, -1),
+            };
+            // A user-initiated stop (kill) exits non-zero but isn't a crash.
+            let user_stopped = stopping.lock().unwrap().remove(&session_id);
+            if ok || user_stopped {
+                let _ = store.end_session(session_id).await;
+            } else {
+                // Crash: end the session but mark it errored so the UI can surface it. Either
+                // way the session is ended — never left orphaned as "working".
+                let _ = store.fail_session(session_id).await;
+            }
             // A grill stopped before producing a spec must not leave the ticket "Drafting".
             let _ = store.set_ticket_drafting(ticket_id, false).await;
             sessions.lock().unwrap().remove(&session_id);
-            let _ = app.emit("session-exit", session_id);
+            let _ = app.emit(
+                "session-exit",
+                SessionExit { session_id, ticket_id, ok: ok || user_stopped, code },
+            );
         });
     }
 
@@ -713,6 +792,8 @@ fn answer_question(
 fn stop_session(state: State<'_, AppState>, session_id: i64) -> Result<(), String> {
     let mut map = state.sessions.lock().unwrap();
     if let Some(io) = map.get_mut(&session_id) {
+        // Record the intentional stop first so the wait-task ends it as 'done', not 'error'.
+        state.stopping.lock().unwrap().insert(session_id);
         io.killer.kill().map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -752,6 +833,7 @@ pub fn run() {
                     store,
                     sessions: Arc::new(Mutex::new(HashMap::new())),
                     reattach: Mutex::new(reattach),
+                    stopping: Arc::new(Mutex::new(HashSet::new())),
                 });
             });
             Ok(())
@@ -775,6 +857,7 @@ pub fn run() {
             delete_worktree_sessions,
             list_worktrees,
             delete_worktree,
+            worktree_dirty,
             cleanup_ticket_worktrees,
             ticket_diff,
             ticket_pr,

@@ -442,6 +442,18 @@ impl Store {
         Ok(())
     }
 
+    /// Mark a session as crashed: state 'error', and ended (so it never lingers as an
+    /// orphaned "working"/"waiting" session). Distinct from `end_session` so the UI can show
+    /// a failure badge. Used when the Claude process exits abnormally (not a user stop).
+    pub async fn fail_session(&self, id: i64) -> Result<()> {
+        sqlx::query("UPDATE sessions SET state = 'error', ended_at = ? WHERE id = ?")
+            .bind(now_unix())
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Mark every still-open session as ended. Called on app startup — their PTYs died
     /// with the previous process, so they're zombies, not live.
     pub async fn end_all_open_sessions(&self) -> Result<()> {
