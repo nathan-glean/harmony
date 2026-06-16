@@ -92,6 +92,20 @@ export type SessionProgress = {
   tool: string | null;
 };
 
+// A reviewer comment left on a diff line (matches harmony_core::models::DiffComment).
+// `status`: "open" (will be sent to Claude on next resume), "sent", or "resolved".
+export type DiffComment = {
+  id: number;
+  ticket_id: number;
+  file_path: string;
+  line: number; // start line of the range
+  end_line: number; // end line; == line for single-line comments
+  side: "new" | "old";
+  body: string;
+  status: "open" | "sent" | "resolved";
+  created_at: number;
+};
+
 export const COLUMNS = ["todo", "working", "waiting", "in_review", "done"] as const;
 
 export const COLUMN_LABELS: Record<string, string> = {

@@ -11,7 +11,7 @@ use anyhow::{anyhow, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde_json::Value;
 
-use crate::models::{Repo, Ticket, Worktree};
+use crate::models::{DiffComment, Repo, Ticket, Worktree};
 use crate::store::Store;
 use crate::worktree;
 
@@ -104,14 +104,28 @@ impl SessionManager {
         // Default is fully autonomous (`bypassPermissions`) — the worktree is isolated and the
         // run is unattended, so it must never stall on a permission prompt.
         let mode = claude_mode(&self.store.get_setting("permission_mode").await?.unwrap_or_default());
+        // On resume, fold any open reviewer comments left on the diff into the opening turn so
+        // Claude addresses them; otherwise just continue. A fresh first run implements from spec.
+        let pending = if resume.is_some() {
+            self.store.pending_diff_comments_for_ticket(ticket_id).await?
+        } else {
+            Vec::new()
+        };
         let prompt = if resume.is_some() {
-            "Continue where you left off.".to_string()
+            if pending.is_empty() {
+                "Continue where you left off.".to_string()
+            } else {
+                render_review_comments_prompt(&pending)
+            }
         } else {
             render_implement_prompt(&ticket)
         };
         let (master, child) = spawn_claude(&wt.path, &prompt, resume.as_deref(), mode)?;
         if resume.is_none() {
             self.store.mark_ticket_planned(ticket_id).await?;
+        }
+        if !pending.is_empty() {
+            self.store.mark_diff_comments_sent(ticket_id).await?;
         }
 
         let session_id = self
@@ -225,6 +239,26 @@ fn render_review_prompt(t: &Ticket) -> String {
         t.title,
         crate::spec::compose_spec(t)
     )
+}
+
+/// Opening prompt for a resume that carries reviewer feedback: the user left inline comments
+/// on the diff (anchored to file:line) and wants them addressed. Each comment is rendered as a
+/// bullet so Claude can locate and act on it, then summarize what changed.
+fn render_review_comments_prompt(comments: &[DiffComment]) -> String {
+    let mut out = String::from(
+        "The reviewer left comments on your changes. Address each one, making the necessary code \
+         edits, then briefly summarize what you changed per comment. Comments are anchored to \
+         `file:line`:\n\n",
+    );
+    for c in comments {
+        let loc = if c.end_line > c.line {
+            format!("{}:{}-{}", c.file_path, c.line, c.end_line)
+        } else {
+            format!("{}:{}", c.file_path, c.line)
+        };
+        out.push_str(&format!("- `{}` ({}): {}\n", loc, c.side, c.body.trim()));
+    }
+    out
 }
 
 /// Render the ticket spec (body + structured fields) into Claude's opening prompt (DESIGN Q10).

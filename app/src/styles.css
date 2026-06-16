@@ -311,7 +311,14 @@ button:disabled { opacity: 0.5; cursor: default; }
   display: flex; align-items: center; justify-content: space-between;
   font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted);
 }
+.diffpane-actions { display: flex; align-items: center; gap: 8px; text-transform: none; letter-spacing: 0; }
+.send-claude { color: var(--accent); border-color: var(--accent); }
+.view-toggle { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.view-toggle button { border: 0; border-radius: 0; padding: 3px 10px; background: var(--panel); color: var(--muted); }
+.view-toggle button.on { background: var(--panel2); color: var(--text); }
+.view-toggle button:not(:last-child) { border-right: 1px solid var(--border); }
 .diff-err { color: #f7768e; font-size: 12px; }
+.diff-empty { font-size: 13px; padding: 8px; }
 .pr-meta { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 .pr-meta a { color: var(--accent); text-decoration: none; }
 .checks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
@@ -321,16 +328,98 @@ button:disabled { opacity: 0.5; cursor: default; }
 .chk.ok .chk-dot { background: #9ece6a; }
 .chk.bad .chk-dot { background: #f7768e; }
 .chk.pending .chk-dot { background: #e0af68; }
-.diff {
-  margin: 0; max-height: 360px; overflow: auto; background: var(--bg);
-  border: 1px solid var(--border); border-radius: 8px; padding: 8px;
-  font: 12px/1.45 Menlo, monospace; white-space: pre; tab-size: 2;
+
+/* ---- GitHub-style diff (react-diff-view) -------------------------------- */
+.diff-files { display: flex; flex-direction: column; gap: 12px; max-height: 65vh; overflow: auto; }
+/* flex: none so files keep their natural height — otherwise the flex column shrinks each
+   file to fit the max-height and `overflow: hidden` clips their content to a few lines. */
+.diff-file { flex: none; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--bg); }
+.diff-file-head {
+  display: flex; align-items: center; gap: 8px; padding: 6px 10px; cursor: pointer;
+  background: var(--panel2); border-bottom: 1px solid var(--border); font-size: 12px;
 }
-.diff .muted { color: var(--muted); }
-.diff .d-add { color: #9ece6a; }
-.diff .d-del { color: #f7768e; }
-.diff .d-hunk { color: #7aa2f7; }
-.diff .d-meta { color: var(--muted); }
+.diff-file-head .caret { color: var(--muted); transition: transform 0.1s; }
+.diff-file-head .caret.collapsed { transform: rotate(-90deg); }
+.diff-file-path { font-family: Menlo, monospace; color: var(--text); }
+.diff-file-rename { font-family: Menlo, monospace; font-size: 11px; }
+.diff-file-stat { margin-left: auto; font-family: Menlo, monospace; font-size: 11px; }
+.diff-file-stat .d-add { color: #9ece6a; }
+.diff-file-stat .d-del { color: #f7768e; }
+.diff-binary { padding: 10px; font-size: 12px; }
+
+.diff-file .diff {
+  --diff-background-color: var(--bg);
+  --diff-text-color: var(--text);
+  --diff-font-family: Menlo, monospace;
+  --diff-gutter-insert-background-color: #1c2b1c;
+  --diff-gutter-delete-background-color: #311c20;
+  --diff-code-insert-background-color: #16251a;
+  --diff-code-delete-background-color: #2a1a20;
+  --diff-code-insert-text-color: var(--text);
+  --diff-code-delete-text-color: var(--text);
+  --diff-code-insert-edit-background-color: #29452f;
+  --diff-code-delete-edit-background-color: #54262f;
+  /* blue range-selection tint (drag-to-comment), instead of the library's default yellow */
+  --diff-code-selected-background-color: #1b2740;
+  --diff-gutter-selected-background-color: #243152;
+  --diff-omit-gutter-line-color: var(--accent);
+  font: 12px/1.5 Menlo, monospace; width: 100%;
+}
+/* while dragging a selection, suppress native text selection across the pane */
+.diffpane.dragging, .diffpane.dragging * { user-select: none; cursor: cell; }
+.diff-file .diff-gutter-col { width: 42px; }
+/* keep gutter cells out of the way of the +button and tight like GitHub */
+.diff-file .diff-gutter { color: var(--muted); position: relative; padding: 0 8px 0 2px; }
+.diff-file .diff-code { padding: 0 8px; }
+/* the hunk-header decoration cell spans all columns — DO NOT make the <td> display:block
+   (that breaks table-layout:fixed in WKWebView and collapses rows). Style the inner span. */
+.diff-file .diff-decoration-content { background: var(--panel); padding: 0; }
+.diff-file .hunk-header {
+  display: block; color: #7aa2f7; background: var(--panel); font-size: 11px;
+  padding: 1px 10px; white-space: pre; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+}
+
+/* hover-to-comment "+" button in the gutter, GitHub-style */
+.add-comment-btn {
+  position: absolute; top: 0; right: 1px; height: 100%;
+  width: 15px; padding: 0; line-height: 1; font-size: 12px; font-weight: 700;
+  border-radius: 3px; background: var(--accent); color: #0b0e14; border: 0;
+  opacity: 0; cursor: pointer; display: flex; align-items: center; justify-content: center;
+}
+.diff-file .diff-line:hover .add-comment-btn { opacity: 1; }
+
+/* inline comment widgets */
+.diff-comments { display: flex; flex-direction: column; gap: 8px; padding: 8px 10px; background: var(--panel); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+.comment-card { border: 1px solid var(--border); border-radius: 6px; background: var(--bg); padding: 6px 8px; font-family: -apple-system, system-ui, sans-serif; }
+.comment-card.resolved { opacity: 0.55; }
+.comment-head { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+.comment-author { color: var(--text); font-weight: 600; }
+.comment-range { font-family: Menlo, monospace; }
+.comment-composer-range { font-size: 11px; font-family: Menlo, monospace; }
+.comment-status { padding: 0 6px; border-radius: 10px; border: 1px solid var(--border); }
+.comment-status.sent { color: var(--accent); border-color: var(--accent); }
+.comment-actions { margin-left: auto; display: flex; gap: 4px; }
+.comment-actions button { font-size: 11px; padding: 1px 6px; }
+.comment-body { font-size: 13px; white-space: pre-wrap; color: var(--text); }
+.comment-composer { display: flex; flex-direction: column; gap: 6px; font-family: -apple-system, system-ui, sans-serif; }
+.comment-composer textarea {
+  width: 100%; min-height: 60px; resize: vertical; background: var(--bg);
+  border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 6px 8px; font: inherit;
+}
+.comment-composer-actions { display: flex; gap: 6px; }
+.comment-composer-actions .primary { color: var(--accent); border-color: var(--accent); }
+
+/* Prism token colors (dark, Catppuccin-ish) */
+.diff .token.comment, .diff .token.prolog, .diff .token.doctype, .diff .token.cdata { color: var(--muted); font-style: italic; }
+.diff .token.punctuation { color: #9aa5ce; }
+.diff .token.keyword, .diff .token.boolean, .diff .token.tag, .diff .token.atrule { color: #bb9af7; }
+.diff .token.string, .diff .token.char, .diff .token.attr-value, .diff .token.regex { color: #9ece6a; }
+.diff .token.number, .diff .token.constant, .diff .token.symbol { color: #ff9e64; }
+.diff .token.function, .diff .token.class-name, .diff .token.builtin { color: #7aa2f7; }
+.diff .token.operator, .diff .token.entity, .diff .token.url { color: #89ddff; }
+.diff .token.property, .diff .token.attr-name, .diff .token.variable { color: #e0af68; }
+.diff .token.deleted { color: #f7768e; }
+.diff .token.inserted { color: #9ece6a; }
 
 .toast {
   position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);

@@ -83,6 +83,23 @@ pub struct Session {
     pub kind: String,
 }
 
+/// A reviewer comment left on a specific diff line, for a ticket. Surfaced in the diff
+/// pane (GitHub-style inline cards) and, while `status == "open"`, injected into Claude's
+/// next resume prompt so it can address the feedback. `side` is which gutter the comment
+/// anchors to ("new" for added/context on the new file, "old" for the original).
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct DiffComment {
+    pub id: i64,
+    pub ticket_id: i64,
+    pub file_path: String,
+    pub line: i64,      // first line of the commented range (start)
+    pub end_line: i64,  // last line of the range; == line for a single-line comment
+    pub side: String,   // "new" | "old"
+    pub body: String,
+    pub status: String, // "open" | "sent" | "resolved"
+    pub created_at: i64,
+}
+
 /// A worktree enriched with its ticket + repo info, for the Worktrees view.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct WorktreeView {

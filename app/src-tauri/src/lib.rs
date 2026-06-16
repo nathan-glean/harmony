@@ -11,7 +11,7 @@ use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 
 use harmony_core::flow::{self, Action, Column, Ctx, Event};
-use harmony_core::models::{Repo, SessionView, Ticket, WorktreeView};
+use harmony_core::models::{DiffComment, Repo, SessionView, Ticket, WorktreeView};
 use harmony_core::session::SessionManager;
 use harmony_core::store::Store;
 use portable_pty::{ChildKiller, MasterPty, PtySize};
@@ -613,6 +613,58 @@ async fn ticket_pr(state: State<'_, AppState>, ticket_id: i64) -> Result<PrStatu
     Ok(status)
 }
 
+// ---- diff comments -------------------------------------------------------
+
+/// All review comments left on a ticket's diff (open + sent + resolved).
+#[tauri::command]
+async fn list_diff_comments(
+    state: State<'_, AppState>,
+    ticket_id: i64,
+) -> Result<Vec<DiffComment>, String> {
+    state
+        .store
+        .list_diff_comments(ticket_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Leave a new comment on a diff line; returns its id. `side` is "new" or "old".
+#[tauri::command]
+async fn add_diff_comment(
+    state: State<'_, AppState>,
+    ticket_id: i64,
+    file_path: String,
+    line: i64,
+    end_line: i64,
+    side: String,
+    body: String,
+) -> Result<i64, String> {
+    state
+        .store
+        .add_diff_comment(ticket_id, &file_path, line, end_line, &side, &body)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn delete_diff_comment(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+    state
+        .store
+        .delete_diff_comment(id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Mark a comment resolved (kept for history, no longer injected into Claude's prompt).
+#[tauri::command]
+async fn resolve_diff_comment(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+    state
+        .store
+        .set_diff_comment_status(id, "resolved")
+        .await
+        .map_err(|e| e.to_string())
+}
+
 // ---- sessions (PTY ↔ events) ---------------------------------------------
 
 /// Ensure a ticket has a repo assigned before a session starts: use the explicit `repo`
@@ -1210,6 +1262,10 @@ pub fn run() {
             cleanup_ticket_worktrees,
             ticket_diff,
             ticket_pr,
+            list_diff_comments,
+            add_diff_comment,
+            delete_diff_comment,
+            resolve_diff_comment,
             add_local_ticket,
             set_spec,
             set_spec_fields,

@@ -6,7 +6,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 use std::path::Path;
 
-use crate::models::{Repo, Session, SessionView, Ticket, Worktree, WorktreeView};
+use crate::models::{DiffComment, Repo, Session, SessionView, Ticket, Worktree, WorktreeView};
 use crate::now_unix;
 
 #[derive(Clone)]
@@ -87,6 +87,17 @@ impl Store {
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS diff_comments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticket_id INTEGER NOT NULL,
+            file_path TEXT NOT NULL,
+            line INTEGER NOT NULL,
+            end_line INTEGER NOT NULL DEFAULT 0,
+            side TEXT NOT NULL DEFAULT 'new',
+            body TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open',
+            created_at INTEGER NOT NULL
+        );
         "#;
         for stmt in DDL.split(';') {
             let s = stmt.trim();
@@ -132,6 +143,9 @@ impl Store {
             .execute(&self.pool)
             .await;
         let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN reviewed_sha TEXT NOT NULL DEFAULT ''")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE diff_comments ADD COLUMN end_line INTEGER NOT NULL DEFAULT 0")
             .execute(&self.pool)
             .await;
         Ok(())
@@ -722,5 +736,80 @@ impl Store {
                 .fetch_optional(&self.pool)
                 .await?,
         )
+    }
+
+    // ---- diff comments ---------------------------------------------------
+
+    /// All comments for a ticket, oldest first (open + sent + resolved), for the diff pane.
+    pub async fn list_diff_comments(&self, ticket_id: i64) -> Result<Vec<DiffComment>> {
+        Ok(sqlx::query_as::<_, DiffComment>(
+            "SELECT * FROM diff_comments WHERE ticket_id = ? ORDER BY created_at ASC, id ASC",
+        )
+        .bind(ticket_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    pub async fn add_diff_comment(
+        &self,
+        ticket_id: i64,
+        file_path: &str,
+        line: i64,
+        end_line: i64,
+        side: &str,
+        body: &str,
+    ) -> Result<i64> {
+        let r = sqlx::query(
+            "INSERT INTO diff_comments (ticket_id, file_path, line, end_line, side, body, status, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, 'open', ?)",
+        )
+        .bind(ticket_id)
+        .bind(file_path)
+        .bind(line)
+        .bind(end_line)
+        .bind(side)
+        .bind(body)
+        .bind(now_unix())
+        .execute(&self.pool)
+        .await?;
+        Ok(r.last_insert_rowid())
+    }
+
+    pub async fn delete_diff_comment(&self, id: i64) -> Result<()> {
+        sqlx::query("DELETE FROM diff_comments WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn set_diff_comment_status(&self, id: i64, status: &str) -> Result<()> {
+        sqlx::query("UPDATE diff_comments SET status = ? WHERE id = ?")
+            .bind(status)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Open (un-sent, un-resolved) comments for a ticket — the feedback to inject into
+    /// Claude's next resume prompt.
+    pub async fn pending_diff_comments_for_ticket(&self, ticket_id: i64) -> Result<Vec<DiffComment>> {
+        Ok(sqlx::query_as::<_, DiffComment>(
+            "SELECT * FROM diff_comments WHERE ticket_id = ? AND status = 'open'
+             ORDER BY file_path ASC, line ASC, id ASC",
+        )
+        .bind(ticket_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Mark a ticket's open comments as sent (handed to Claude) so they aren't re-injected.
+    pub async fn mark_diff_comments_sent(&self, ticket_id: i64) -> Result<()> {
+        sqlx::query("UPDATE diff_comments SET status = 'sent' WHERE ticket_id = ? AND status = 'open'")
+            .bind(ticket_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 }
