@@ -522,8 +522,16 @@ async fn open_pr_for(state: &AppState, ticket_id: i64) -> Result<String, String>
     };
     let (title, path, branch, repo_path) =
         (ticket.title.clone(), wt.path.clone(), wt.branch.clone(), repo.path.clone());
+    let commit_msg = commit_message(&ticket);
 
     let url = tokio::task::spawn_blocking(move || -> Result<String, String> {
+        // Commit any leftover uncommitted work (e.g. edits made directly during human review) so
+        // the branch isn't empty, then refuse clearly if there's still nothing to PR.
+        harmony_core::github::commit_all(&path, &commit_msg).map_err(|e| e.to_string())?;
+        let base = harmony_core::worktree::default_branch(&repo_path).unwrap_or_else(|_| "main".into());
+        if harmony_core::github::commits_ahead(&path, &base) == 0 {
+            return Err("no committed changes to open a PR for".into());
+        }
         // Generated diff summary (conforms to the repo's PR template if present), else the spec.
         let body =
             harmony_core::github::generated_pr_body(&path, &repo_path, ticket_ref.as_deref(), &fallback);
@@ -930,6 +938,15 @@ async fn apply_event(
     if let Some(reason) = decision.blocked {
         return Err(reason.to_string());
     }
+    // Work just finished → commit the agent's changes (harmony owns version control). Doing it
+    // here, before the move to Human Review / `/review`, means the review and the reviewed-SHA
+    // fingerprint see committed state and the branch is PR-ready.
+    if event == Event::WorkFinished {
+        if let Ok(Some(wt)) = state.store.primary_worktree_for_ticket(ticket_id).await {
+            let (path, msg) = (wt.path.clone(), commit_message(&ticket));
+            let _ = tokio::task::spawn_blocking(move || harmony_core::github::commit_all(&path, &msg)).await;
+        }
+    }
     for action in &decision.actions {
         run_action(app, state, &ticket, *action, force).await?;
     }
@@ -1018,6 +1035,15 @@ fn stop_ticket_sessions(state: &AppState, ticket_id: i64) {
         if let Some(io) = map.get_mut(&sid) {
             let _ = io.killer.kill();
         }
+    }
+}
+
+/// Commit message for harmony's auto-commit of a ticket's work: `"<KEY>: <title>"` (or just the
+/// title for local tickets).
+fn commit_message(ticket: &Ticket) -> String {
+    match ticket.jira_key.as_deref() {
+        Some(key) => format!("{key}: {}", ticket.title),
+        None => ticket.title.clone(),
     }
 }
 

@@ -75,6 +75,34 @@ pub fn head_sha(worktree: &str) -> Result<String> {
     Ok(run("git", &["rev-parse", "HEAD"], worktree)?.trim().to_string())
 }
 
+/// Stage everything and commit it (`git add -A` + `git commit`), if there's anything to commit.
+/// Returns whether a commit was actually made (false when the worktree is clean). harmony owns
+/// committing the agent's work — deterministic, and the squash-merge makes granularity moot.
+pub fn commit_all(worktree: &str, message: &str) -> Result<bool> {
+    run("git", &["add", "-A"], worktree)?;
+    // `diff --cached --quiet` exits 1 when there ARE staged changes.
+    let staged = Command::new("git")
+        .args(["diff", "--cached", "--quiet"])
+        .current_dir(worktree)
+        .status()
+        .map(|s| !s.success())
+        .unwrap_or(false);
+    if !staged {
+        return Ok(false);
+    }
+    run("git", &["commit", "-q", "-m", message], worktree)?;
+    Ok(true)
+}
+
+/// Number of commits the branch is ahead of `base` (`git rev-list --count <base>..HEAD`).
+/// Used to refuse opening an empty PR with a clear message instead of a cryptic `gh` failure.
+pub fn commits_ahead(worktree: &str, base: &str) -> usize {
+    run("git", &["rev-list", "--count", &format!("{base}..HEAD")], worktree)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
+}
+
 /// PR status for the worktree's branch. `exists` is false when there is no PR (or `gh` can't
 /// answer) — that's a normal state, not an error, so this never returns `Err`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -166,5 +194,34 @@ mod tests {
         // `gh` prints an empty object / null fields when there's no PR.
         assert_eq!(parse_pr_status("{}"), PrStatus::default());
         assert_eq!(parse_pr_status(""), PrStatus::default());
+    }
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        assert!(Command::new("git").arg("-C").arg(dir).args(args).status().unwrap().success());
+    }
+
+    #[test]
+    fn commit_all_commits_when_dirty_and_noops_when_clean() {
+        let dir = std::env::temp_dir().join(format!("harmony-gh-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.to_string_lossy().to_string();
+        git(&dir, &["init", "-q", "-b", "main"]);
+        git(&dir, &["config", "user.email", "t@h.local"]);
+        git(&dir, &["config", "user.name", "T"]);
+        std::fs::write(dir.join("README.md"), "hi").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-q", "-m", "init"]);
+
+        assert_eq!(commits_ahead(&p, "main"), 0);
+        // Clean tree → no-op.
+        assert_eq!(commit_all(&p, "noop").unwrap(), false);
+
+        // Dirty → commits, HEAD advances, but still 0 ahead of main (we committed onto main here).
+        std::fs::write(dir.join("new.txt"), "x").unwrap();
+        assert_eq!(commit_all(&p, "feat: add").unwrap(), true);
+        assert_eq!(commit_all(&p, "again").unwrap(), false); // now clean
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

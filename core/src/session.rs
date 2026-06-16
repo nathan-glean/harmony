@@ -91,36 +91,26 @@ impl SessionManager {
 
         crate::settings::inject_hooks(&wt.path, self.hook_port)?;
 
-        // The very first work session for a ticket runs in plan mode to build the task list
-        // from the spec, and ALWAYS starts fresh — never `--resume`. Resuming here would
-        // continue an earlier conversation (in particular the grill/spec interview, which
-        // shares this worktree's cwd) instead of implementing the spec. Only after that
-        // one-time plan run (persisted via `planned`) do later sessions resume the work
-        // conversation to continue where they left off.
-        let do_plan = ticket.planned == 0;
-        let resume = if do_plan {
+        // The first work session starts fresh from the spec (planning + implementing in one
+        // autonomous run — see `render_implement_prompt`); never `--resume` (that would continue
+        // an earlier conversation, e.g. the grill, instead of implementing). Only after that
+        // first run (persisted via `planned`) do later sessions resume where they left off.
+        let resume = if ticket.planned == 0 {
             None
         } else {
             self.store.latest_claude_session_id_for_ticket(ticket_id).await?
         };
-        // Configured permission mode (DESIGN Q1: autonomy). Defaults to `auto`; the initial
-        // plan run forces `plan` regardless.
-        let configured_mode = self
-            .store
-            .get_setting("permission_mode")
-            .await?
-            .unwrap_or_else(|| "auto".to_string());
-        // Fresh start sends the full spec; a resume restores the conversation via
-        // `--resume` and only nudges Claude to continue (don't re-paste the spec).
-        let (prompt, mode) = if do_plan {
-            (render_plan_prompt(&ticket), "plan".to_string())
-        } else if resume.is_some() {
-            ("Continue where you left off.".to_string(), configured_mode)
+        // Autonomy (DESIGN Q1): map the configured setting to a real Claude permission mode.
+        // Default is fully autonomous (`bypassPermissions`) — the worktree is isolated and the
+        // run is unattended, so it must never stall on a permission prompt.
+        let mode = claude_mode(&self.store.get_setting("permission_mode").await?.unwrap_or_default());
+        let prompt = if resume.is_some() {
+            "Continue where you left off.".to_string()
         } else {
-            (render_prompt(&ticket), configured_mode)
+            render_implement_prompt(&ticket)
         };
-        let (master, child) = spawn_claude(&wt.path, &prompt, resume.as_deref(), &mode)?;
-        if do_plan {
+        let (master, child) = spawn_claude(&wt.path, &prompt, resume.as_deref(), mode)?;
+        if resume.is_none() {
             self.store.mark_ticket_planned(ticket_id).await?;
         }
 
@@ -247,20 +237,31 @@ fn render_prompt(t: &Ticket) -> String {
     }
 }
 
-/// Opening prompt for the one-time initial plan run (phase 2, at first In Progress start).
-/// The ticket spec is the agreed plan (produced earlier by the grill, phase 1); this run's
-/// job is to decompose it into the concrete, low-level tasks the agent will then execute,
-/// recorded via TodoWrite (mirrored onto the ticket). Launched with `--permission-mode plan`.
-fn render_plan_prompt(t: &Ticket) -> String {
+/// Opening prompt for the autonomous implement session (first In Progress start). The spec is
+/// the agreed plan (from the grill); this run plans *and* executes in one go: first record the
+/// task breakdown with TodoWrite (mirrored onto the ticket — the visible "plan pass"), then
+/// implement it fully. Launched fully autonomous (`bypassPermissions`); harmony commits the work,
+/// so the agent must not git-commit/push itself.
+fn render_implement_prompt(t: &Ticket) -> String {
     format!(
-        "{}\n\n---\nThe specification above is the agreed plan for this ticket. You are in \
-         plan mode. Break it down into a concrete, ordered list of low-level implementation \
-         tasks that you will execute, and record that breakdown with the TodoWrite tool \
-         (this saves it to the ticket). Explore the codebase as needed to make the tasks \
-         specific. Don't re-litigate the approach, and make no code changes until the plan \
-         is approved.",
+        "{}\n\n---\nImplement this task autonomously and to completion — no human is watching, so \
+         do not ask for confirmation. First break the spec into a concrete, ordered list of \
+         low-level steps and record it with the TodoWrite tool (this saves the plan to the \
+         ticket), then carry the steps out, keeping the task list updated as you go. Make all \
+         necessary code changes and run whatever you need (tests, build) to be confident it's \
+         correct. Do NOT run `git commit` or `git push` — harmony handles version control.",
         render_prompt(t)
     )
+}
+
+/// Map harmony's `permission_mode` setting to a real Claude `--permission-mode`. Default (and
+/// the `auto` legacy value) is `bypassPermissions` — fully autonomous in the isolated worktree;
+/// an explicit `plan`/`default`/`supervised` setting keeps prompts on (supervised).
+fn claude_mode(setting: &str) -> &'static str {
+    match setting {
+        "plan" | "default" | "supervised" => "default",
+        _ => "bypassPermissions",
+    }
 }
 
 /// Opening prompt for a spec/grill session (phase 1, at ticket creation). Inlines the
