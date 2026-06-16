@@ -143,6 +143,8 @@ mod tests {
             acceptance_criteria: fields.acceptance_criteria,
             relevant_paths: fields.relevant_paths,
             constraints: fields.constraints,
+            reviewed: 0,
+            reviewed_sha: String::new(),
         }
     }
 

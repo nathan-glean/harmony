@@ -1,7 +1,8 @@
-//! GitHub PR creation via `gh` (DESIGN Q11): push the worktree's branch and open a
-//! draft PR. harmony never merges — hand off to normal review.
+//! GitHub PR operations via `gh` (DESIGN Q11): push the worktree's branch, open a draft PR,
+//! read PR status/approval, and squash-merge once approved (on the move to Done).
 
 use anyhow::{anyhow, Result};
+use serde::Serialize;
 use std::process::Command;
 
 fn run(cmd: &str, args: &[&str], cwd: &str) -> Result<String> {
@@ -68,6 +69,58 @@ pub fn pr_checks_json(worktree: &str) -> Result<String> {
     Ok(stdout)
 }
 
+/// The branch's HEAD commit SHA — used to fingerprint "the current change-set" so `/review`
+/// isn't re-run when nothing has changed since the last review.
+pub fn head_sha(worktree: &str) -> Result<String> {
+    Ok(run("git", &["rev-parse", "HEAD"], worktree)?.trim().to_string())
+}
+
+/// PR status for the worktree's branch. `exists` is false when there is no PR (or `gh` can't
+/// answer) — that's a normal state, not an error, so this never returns `Err`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct PrStatus {
+    pub exists: bool,
+    /// GitHub `reviewDecision == "APPROVED"`.
+    pub approved: bool,
+    /// `OPEN` | `MERGED` | `CLOSED` (empty when no PR).
+    pub state: String,
+    pub is_draft: bool,
+    pub url: String,
+}
+
+/// Read the branch's PR status + approval via `gh pr view`. No PR / `gh` unavailable → a
+/// default (`exists: false`) status.
+pub fn pr_status(worktree: &str) -> PrStatus {
+    match run(
+        "gh",
+        &["pr", "view", "--json", "number,state,isDraft,url,reviewDecision"],
+        worktree,
+    ) {
+        Ok(json) => parse_pr_status(&json),
+        Err(_) => PrStatus::default(),
+    }
+}
+
+/// Parse `gh pr view --json …` output into a `PrStatus` (split out for testing).
+fn parse_pr_status(json: &str) -> PrStatus {
+    let v: serde_json::Value = serde_json::from_str(json).unwrap_or(serde_json::Value::Null);
+    let exists = v.get("number").map(|n| !n.is_null()).unwrap_or(false);
+    PrStatus {
+        exists,
+        approved: v.get("reviewDecision").and_then(|x| x.as_str()) == Some("APPROVED"),
+        state: v.get("state").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        is_draft: v.get("isDraft").and_then(|x| x.as_bool()).unwrap_or(false),
+        url: v.get("url").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+    }
+}
+
+/// Squash-merge the branch's PR and delete the remote branch (on the move to Done, once the PR
+/// is approved on GitHub). harmony only merges here — never mid-flow.
+pub fn merge_pr(worktree: &str) -> Result<()> {
+    run("gh", &["pr", "merge", "--squash", "--delete-branch"], worktree)?;
+    Ok(())
+}
+
 /// Open a draft PR; returns the PR URL (`gh` prints it to stdout).
 pub fn create_draft_pr(worktree: &str, title: &str, body: &str, branch: &str) -> Result<String> {
     let out = run(
@@ -84,4 +137,34 @@ pub fn create_draft_pr(worktree: &str, title: &str, body: &str, branch: &str) ->
         .find(|l| l.trim_start().starts_with("http"))
         .map(|l| l.trim().to_string())
         .ok_or_else(|| anyhow!("gh pr create did not return a PR URL: {}", out.trim()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_pr_status_approved() {
+        let s = parse_pr_status(
+            r#"{"number":12,"state":"OPEN","isDraft":false,"url":"https://x/pr/12","reviewDecision":"APPROVED"}"#,
+        );
+        assert!(s.exists && s.approved && !s.is_draft);
+        assert_eq!(s.state, "OPEN");
+        assert_eq!(s.url, "https://x/pr/12");
+    }
+
+    #[test]
+    fn parse_pr_status_unreviewed_draft() {
+        let s = parse_pr_status(
+            r#"{"number":3,"state":"OPEN","isDraft":true,"url":"u","reviewDecision":"REVIEW_REQUIRED"}"#,
+        );
+        assert!(s.exists && !s.approved && s.is_draft);
+    }
+
+    #[test]
+    fn parse_pr_status_no_pr() {
+        // `gh` prints an empty object / null fields when there's no PR.
+        assert_eq!(parse_pr_status("{}"), PrStatus::default());
+        assert_eq!(parse_pr_status(""), PrStatus::default());
+    }
 }

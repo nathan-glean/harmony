@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 
+use harmony_core::flow::{self, Action, Column, Ctx, Event};
 use harmony_core::models::{Repo, SessionView, Ticket, WorktreeView};
 use harmony_core::session::SessionManager;
 use harmony_core::store::Store;
@@ -237,8 +238,14 @@ async fn cleanup_ticket_worktrees(
     ticket_id: i64,
     force: bool,
 ) -> Result<(), String> {
+    cleanup_worktrees(&state, ticket_id, force).await
+}
+
+/// Remove a ticket's worktrees from disk + DB (the executor's `DeleteWorktree` and the
+/// `cleanup_ticket_worktrees` command both call this). Refuses on dirty unless `force`.
+async fn cleanup_worktrees(state: &AppState, ticket_id: i64, force: bool) -> Result<(), String> {
     if !force {
-        let n = ticket_uncommitted(&state, ticket_id).await;
+        let n = ticket_uncommitted(state, ticket_id).await;
         if n > 0 {
             return Err(format!("DIRTY: {n} uncommitted change(s) would be discarded"));
         }
@@ -469,6 +476,18 @@ async fn jira_detail(state: State<'_, AppState>, ticket_id: i64) -> Result<JiraD
 
 #[tauri::command]
 async fn open_pr(state: State<'_, AppState>, ticket_id: i64) -> Result<String, String> {
+    let url = open_pr_for(&state, ticket_id).await?;
+    state
+        .store
+        .set_ticket_status(ticket_id, harmony_core::status::IN_REVIEW)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(url)
+}
+
+/// Push the branch and open the draft PR (generated body, Jira writeback). Does NOT change the
+/// ticket column — the caller (the `open_pr` command, or the flow executor) owns the status.
+async fn open_pr_for(state: &AppState, ticket_id: i64) -> Result<String, String> {
     let ticket = state
         .store
         .get_ticket(ticket_id)
@@ -481,7 +500,6 @@ async fn open_pr(state: State<'_, AppState>, ticket_id: i64) -> Result<String, S
         .await
         .map_err(|e| e.to_string())?
         .ok_or("no worktree — start a session first")?;
-
     let repo = state
         .store
         .get_repo(wt.repo_id)
@@ -514,12 +532,6 @@ async fn open_pr(state: State<'_, AppState>, ticket_id: i64) -> Result<String, S
     })
     .await
     .map_err(|e| e.to_string())??;
-
-    state
-        .store
-        .set_ticket_status(ticket_id, harmony_core::status::IN_REVIEW)
-        .await
-        .map_err(|e| e.to_string())?;
 
     if let Some(key) = ticket.jira_key.as_deref() {
         let _ = harmony_core::jira::transition(key, "In Review").await;
@@ -839,6 +851,215 @@ fn resize(state: State<'_, AppState>, session_id: i64, cols: u16, rows: u16) -> 
     Ok(())
 }
 
+// ---- flow executor -------------------------------------------------------
+//
+// The single runtime path that turns `flow::decide` decisions into effects. Kept inline in
+// lib.rs (rather than a separate module) because it leans on this file's private session
+// plumbing — `AppState`, `wire_session`, the `sessions`/`stopping` maps, `HOOK_PORT`. User
+// drags call `transition_ticket`; system events (grill/work/review done) will call `apply_event`
+// from the hook→app channel in Phase 2.
+
+/// Gather the `flow::Ctx` facts for a ticket from the store + live sessions + git/gh.
+async fn build_ctx(state: &AppState, ticket: &Ticket) -> Ctx {
+    let session_live = {
+        let map = state.sessions.lock().unwrap();
+        map.values().any(|io| io.ticket_id == ticket.id)
+    };
+    let wt = state.store.primary_worktree_for_ticket(ticket.id).await.ok().flatten();
+    let has_worktree = wt.is_some();
+
+    // git/gh facts (blocking + network) — only meaningful once a worktree exists.
+    let (has_changes, review_current, pr) = if let Some(wt) = wt.as_ref() {
+        let path = wt.path.clone();
+        let repo_path = state.store.get_repo(wt.repo_id).await.ok().flatten().map(|r| r.path);
+        let reviewed = ticket.reviewed == 1;
+        let reviewed_sha = ticket.reviewed_sha.clone();
+        tokio::task::spawn_blocking(move || {
+            let base = repo_path
+                .as_deref()
+                .and_then(|rp| harmony_core::worktree::default_branch(rp).ok())
+                .unwrap_or_else(|| "main".into());
+            let has_changes = harmony_core::github::diff(&path, &base)
+                .map(|d| !d.trim().is_empty())
+                .unwrap_or(false);
+            let head = harmony_core::github::head_sha(&path).unwrap_or_default();
+            let review_current = reviewed && !head.is_empty() && head == reviewed_sha;
+            let pr = harmony_core::github::pr_status(&path);
+            (has_changes, review_current, pr)
+        })
+        .await
+        .unwrap_or((false, false, harmony_core::github::PrStatus::default()))
+    } else {
+        (false, false, harmony_core::github::PrStatus::default())
+    };
+
+    Ctx {
+        has_repo: ticket.repo_id.is_some(),
+        has_spec: ticket.grilled == 1,
+        drafting: ticket.drafting == 1,
+        planned: ticket.planned == 1,
+        session_live,
+        from: Column::from_status(&ticket.status).unwrap_or(Column::Todo),
+        has_worktree,
+        has_changes,
+        review_current,
+        reviewed: ticket.reviewed == 1,
+        pr_exists: pr.exists,
+        pr_approved: pr.approved,
+        is_jira: ticket.jira_key.is_some(),
+    }
+}
+
+/// Run one lifecycle `event` through `flow::decide` and execute the resulting actions, then
+/// persist the target column. A blocked decision returns its reason as `Err` (no state change).
+async fn apply_event(
+    app: &AppHandle,
+    state: &AppState,
+    ticket_id: i64,
+    event: Event,
+    force: bool,
+) -> Result<(), String> {
+    let ticket = state
+        .store
+        .get_ticket(ticket_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("no such ticket")?;
+    let ctx = build_ctx(state, &ticket).await;
+    let decision = flow::decide(event, &ctx);
+    if let Some(reason) = decision.blocked {
+        return Err(reason.to_string());
+    }
+    for action in &decision.actions {
+        run_action(app, state, &ticket, *action, force).await?;
+    }
+    let target = decision.target.as_status();
+    state.store.set_ticket_status(ticket_id, target).await.map_err(|e| e.to_string())?;
+    apply_jira_column(state, ticket_id, target).await;
+    let _ = app.emit("ticket-updated", ticket_id);
+    Ok(())
+}
+
+/// Perform a single `flow::Action`'s side effect.
+async fn run_action(
+    app: &AppHandle,
+    state: &AppState,
+    ticket: &Ticket,
+    action: Action,
+    force: bool,
+) -> Result<(), String> {
+    let id = ticket.id;
+    let mgr = || SessionManager::new(Arc::new(state.store.clone()), HOOK_PORT);
+    match action {
+        Action::StartGrill => {
+            let seed = jira_seed(ticket).await;
+            let handle = mgr().start_spec_session(id, seed).await.map_err(|e| e.to_string())?;
+            wire_session(app, state, handle, id)?;
+        }
+        // The paired `StartImplement` (via `SessionManager::start`) ensures the worktree; nothing
+        // extra to do here — making this idempotent and explicit in the action list.
+        Action::EnsureWorktree => {}
+        Action::StartImplement | Action::ResumeWork => {
+            // `start` itself chooses fresh plan-from-spec vs `--resume` from the `planned` flag.
+            let handle = mgr().start(id).await.map_err(|e| e.to_string())?;
+            wire_session(app, state, handle, id)?;
+        }
+        Action::StopSession => stop_ticket_sessions(state, id),
+        Action::RunReview => {
+            let handle = mgr().start_review(id).await.map_err(|e| e.to_string())?;
+            wire_session(app, state, handle, id)?;
+        }
+        Action::OpenPr => {
+            open_pr_for(state, id).await?;
+        }
+        Action::MergePr => {
+            let wt = state
+                .store
+                .primary_worktree_for_ticket(id)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or("no worktree to merge")?;
+            let path = wt.path.clone();
+            tokio::task::spawn_blocking(move || harmony_core::github::merge_pr(&path))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?;
+        }
+        Action::DeleteWorktree => {
+            cleanup_worktrees(state, id, force).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Kill every live session for a ticket (records the intentional stop so the wait-task doesn't
+/// flag it as a crash).
+fn stop_ticket_sessions(state: &AppState, ticket_id: i64) {
+    let mut map = state.sessions.lock().unwrap();
+    let ids: Vec<i64> = map
+        .iter()
+        .filter(|(_, io)| io.ticket_id == ticket_id)
+        .map(|(sid, _)| *sid)
+        .collect();
+    for sid in ids {
+        state.stopping.lock().unwrap().insert(sid);
+        if let Some(io) = map.get_mut(&sid) {
+            let _ = io.killer.kill();
+        }
+    }
+}
+
+/// Best-effort Jira description seed for a grill (same as `start_spec_session`).
+async fn jira_seed(ticket: &Ticket) -> Option<String> {
+    let key = ticket.jira_key.as_deref()?;
+    harmony_core::jira::get_issue(key)
+        .await
+        .ok()
+        .map(|i| i.description)
+        .filter(|d| !d.trim().is_empty())
+}
+
+/// Mirror a column onto the linked Jira issue (best-effort), reused by `apply_event` and the
+/// `jira_apply_column` command.
+async fn apply_jira_column(state: &AppState, ticket_id: i64, status: &str) {
+    let key = match state.store.get_ticket(ticket_id).await.ok().flatten().and_then(|t| t.jira_key) {
+        Some(k) => k,
+        None => return,
+    };
+    let candidates: &[&str] = match status {
+        "todo" => &["To Do", "Backlog", "Open"],
+        "working" => &["In Progress"],
+        "in_review" => &["In Review", "Code Review", "Review"],
+        "done" => &["Done", "Closed", "Resolved"],
+        _ => return,
+    };
+    let _ = harmony_core::jira::transition_to_any(&key, candidates).await;
+}
+
+/// User dragged a ticket to `status` — run the `Move` event through the flow executor. On a
+/// `DIRTY:` error the UI confirms then retries with `force=true`; a blocked move returns its reason.
+#[tauri::command]
+async fn transition_ticket(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ticket_id: i64,
+    status: String,
+    force: bool,
+) -> Result<(), String> {
+    let to = Column::from_status(&status).ok_or_else(|| format!("invalid status: {status}"))?;
+    // Best-effort: assign the default repo for a Jira ticket so the move isn't blocked when a
+    // mapping exists. If none, the flow's repo gate returns a clear "assign a repo first".
+    let _ = ensure_ticket_repo(&state, ticket_id, None).await;
+    apply_event(&app, &state, ticket_id, Event::Move(to), force).await
+}
+
+/// The Todo "build spec / grill me" button.
+#[tauri::command]
+async fn grill_ticket(app: AppHandle, state: State<'_, AppState>, ticket_id: i64) -> Result<(), String> {
+    let _ = ensure_ticket_repo(&state, ticket_id, None).await;
+    apply_event(&app, &state, ticket_id, Event::GrillRequested, false).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -895,6 +1116,8 @@ pub fn run() {
             set_spec_fields,
             set_ticket_status,
             jira_apply_column,
+            transition_ticket,
+            grill_ticket,
             delete_ticket,
             jira_env,
             install_acli,

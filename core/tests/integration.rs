@@ -363,6 +363,56 @@ fn worktree_path_flattens_branch_slashes() {
 }
 
 #[test]
+fn head_sha_and_has_changes() {
+    use harmony_core::github;
+    let dir = TempDir::new("headsha");
+    let repo = dir.path().join("repo");
+    init_git_repo(&repo);
+    let repo_str = repo.to_string_lossy().to_string();
+
+    let dest = dir.path().join("wt");
+    worktree::create(&repo_str, "main", "harmony/local-1-x", &dest).unwrap();
+    let wt = dest.to_string_lossy().to_string();
+
+    // Fresh worktree off main: a 40-char HEAD sha, no changes vs base.
+    let sha = github::head_sha(&wt).unwrap();
+    assert_eq!(sha.len(), 40, "rev-parse HEAD should be a full sha");
+    assert!(github::diff(&wt, "main").unwrap().trim().is_empty(), "no changes yet");
+
+    // Commit a change on the branch → diff vs base is non-empty and HEAD moves.
+    std::fs::write(dest.join("new.txt"), "hello").unwrap();
+    let run = |args: &[&str]| {
+        assert!(std::process::Command::new("git")
+            .arg("-C").arg(&dest).args(args).status().unwrap().success());
+    };
+    run(&["add", "."]);
+    run(&["commit", "-q", "-m", "change"]);
+    assert!(!github::diff(&wt, "main").unwrap().trim().is_empty(), "now has changes");
+    assert_ne!(github::head_sha(&wt).unwrap(), sha, "HEAD advanced after commit");
+}
+
+#[tokio::test]
+async fn reviewed_flag_persists() {
+    let dir = TempDir::new("reviewed");
+    let store = open_store(&dir).await;
+    let id = store.add_ticket(None, "local", "T", "", None).await.unwrap();
+
+    let t = store.get_ticket(id).await.unwrap().unwrap();
+    assert_eq!(t.reviewed, 0);
+    assert_eq!(t.reviewed_sha, "");
+
+    store.mark_reviewed(id, "abc123").await.unwrap();
+    let t = store.get_ticket(id).await.unwrap().unwrap();
+    assert_eq!(t.reviewed, 1);
+    assert_eq!(t.reviewed_sha, "abc123");
+
+    store.clear_reviewed(id).await.unwrap();
+    let t = store.get_ticket(id).await.unwrap().unwrap();
+    assert_eq!(t.reviewed, 0);
+    assert_eq!(t.reviewed_sha, "");
+}
+
+#[test]
 fn git_worktree_create_then_reuse() {
     let dir = TempDir::new("git");
     let repo = dir.path().join("repo");
@@ -613,6 +663,8 @@ fn sample_ticket() -> harmony_core::models::Ticket {
         acceptance_criteria: "".into(),
         relevant_paths: "".into(),
         constraints: "".into(),
+        reviewed: 0,
+        reviewed_sha: "".into(),
     }
 }
 

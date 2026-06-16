@@ -189,9 +189,52 @@ impl SessionManager {
         })
     }
 
+    /// Start a read-only `/review` session in the ticket's worktree: Claude reviews the branch's
+    /// changes against the spec and prints suggestions, then ends (the executor stops it on the
+    /// review session's Stop). Plan mode keeps it strictly read-only — it never edits.
+    pub async fn start_review(&self, ticket_id: i64) -> Result<SessionHandle> {
+        let ticket = self
+            .store
+            .get_ticket(ticket_id)
+            .await?
+            .ok_or_else(|| anyhow!("no such ticket #{ticket_id}"))?;
+        let repo_id = ticket
+            .repo_id
+            .ok_or_else(|| anyhow!("ticket #{ticket_id} has no repo assigned"))?;
+        let repo = self
+            .store
+            .get_repo(repo_id)
+            .await?
+            .ok_or_else(|| anyhow!("repo #{repo_id} missing"))?;
+
+        let wt = self.ensure_primary_worktree(&ticket, repo_id, &repo).await?;
+        crate::settings::inject_hooks(&wt.path, self.hook_port)?;
+
+        let prompt = render_review_prompt(&ticket);
+        let (master, child) = spawn_claude(&wt.path, &prompt, None, "plan")?;
+
+        let session_id = self.store.add_session(ticket_id, wt.id, &wt.path, "review").await?;
+        Ok(SessionHandle { session_id, master, child })
+    }
+
     pub async fn end_session(&self, session_id: i64) -> Result<()> {
         self.store.end_session(session_id).await
     }
+}
+
+/// Opening prompt for a `/review` session (pre-PR human-review sanity check): run the project's
+/// review skill over this branch's changes and surface concrete suggestions for the user to read
+/// before they open a PR. Read-only (plan mode).
+fn render_review_prompt(t: &Ticket) -> String {
+    format!(
+        "Run the `/review` skill on the changes this branch makes versus its base. Review against \
+         the ticket's intent below, and output a concise, prioritised list of concerns \
+         (correctness, edge cases, missing tests, scope creep) and any concrete fixes you'd \
+         suggest — this is a pre-PR sanity check for the human. Do not make any edits.\n\n\
+         # {}\n\n{}",
+        t.title,
+        crate::spec::compose_spec(t)
+    )
 }
 
 /// Render the ticket spec (body + structured fields) into Claude's opening prompt (DESIGN Q10).

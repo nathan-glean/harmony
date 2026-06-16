@@ -44,6 +44,12 @@ pub struct Ticket {
     pub acceptance_criteria: String,
     pub relevant_paths: String,
     pub constraints: String,
+    /// 0/1 — whether `/review` has run for this ticket at least once (drives the flow `reviewed`
+    /// fact / the "must review before PR" gate).
+    pub reviewed: i64,
+    /// The branch HEAD commit `/review` last ran against; compared to the current HEAD so review
+    /// isn't re-run when nothing changed (the flow `review_current` fact). Empty when never reviewed.
+    pub reviewed_sha: String,
 }
 
 /// An isolated git worktree for a ticket. Per-ticket and reused; `is_alternate`
