@@ -389,58 +389,24 @@ export function App() {
 
   // Drag-and-drop: move a ticket to a column (optimistic, then persist).
   // Into "In Progress" → auto-open a session; out of it → stop any live session.
+  // A column move is just a request to the backend flow executor: it decides (and may block or
+  // redirect), starts/stops sessions, runs /review, opens/merges PRs, and cleans up worktrees.
+  // The frontend only relays the request and re-renders. `withDirtyConfirm` handles the
+  // discard-uncommitted-work confirmation when a Done/cleanup would lose changes.
   const moveTicket = async (id: number, status: string) => {
-    if (status === "working") {
-      const t = tickets.find((x) => x.id === id);
-      // A ticket still being grilled has no finished spec yet — block it from starting work.
-      if (t?.drafting) {
-        flash("Still drafting the spec — finish the interview first");
-        return;
+    run("move", async () => {
+      try {
+        await withDirtyConfirm(
+          (force) => api.transitionTicket(id, status, force),
+          "This ticket's worktree"
+        );
+      } catch (e) {
+        // Blocked transition ("assign a repo first", "Done is terminal", "no changes to open a
+        // PR for", …) or a real error — surface it; the board stays as the backend left it.
+        flash(String(e));
       }
-      // Never grilled (e.g. a Jira-synced ticket): grill the spec first. When the spec is
-      // captured, `refresh` auto-continues into the work session (plan-tasks → execute).
-      if (t && !t.grilled) {
-        setTickets((prev) => prev.map((x) => (x.id === id ? { ...x, status } : x)));
-        if (selected?.id === id) setSelected((s) => (s ? { ...s, status } : s));
-        try {
-          await api.setStatus(id, status);
-          api.jiraApplyColumn(id, status).catch(() => {});
-          await api.startSpecSession(id, null);
-          setSelected({ ...t, status });
-          setView("board");
-          flash(`Grilling spec for #${id} before work…`);
-        } catch (e) {
-          flash(String(e));
-        }
-        await refresh();
-        return;
-      }
-    }
-    setTickets((prev) => prev.map((t) => (t.id === id ? { ...t, status } : t)));
-    if (selected?.id === id) setSelected((s) => (s ? { ...s, status } : s));
-    try {
-      // Leaving In Progress: stop the session first so its dying hooks can't
-      // re-stamp the status back to "working".
-      if (status !== "working" && liveSessions[id]) {
-        await api.stopSession(liveSessions[id]);
-      }
-      await api.setStatus(id, status);
-      // Mirror the move onto Jira (best-effort; backend skips non-Jira tickets and
-      // statuses with no Jira equivalent, and only transitions if the status exists).
-      api.jiraApplyColumn(id, status).catch(() => {});
-      if (status === "working" && !liveSessions[id]) {
-        const t = tickets.find((x) => x.id === id);
-        if (t) await openTerminal({ ...t, status });
-      }
-      // Done → tidy up: remove the worktree(s) (branch/PR are untouched). Confirm first if
-      // there are uncommitted changes that would be discarded.
-      if (status === "done") {
-        await withDirtyConfirm((force) => api.cleanupTicketWorktrees(id, force), "This ticket's worktree");
-      }
-    } catch (e) {
-      flash(String(e));
-    }
-    await refresh();
+      await refresh();
+    });
   };
 
   // The selected ticket, but kept fresh from the poll (so live todos/status update).
@@ -548,9 +514,9 @@ export function App() {
                 setNewTitle("");
                 setNewSpec("");
                 setNewRepo("");
-                // Kick off the grill/spec session, then open the ticket so the user can
-                // answer the interview in the live terminal / question card.
-                await api.startSpecSession(id, null);
+                // Kick off the grill via the flow executor, then open the ticket so the user
+                // can answer the interview in the live terminal / question card.
+                await api.grillTicket(id);
                 await refresh();
                 const t = await api.getTicket(id);
                 if (t) setSelected(t);
@@ -678,19 +644,27 @@ export function App() {
             )}
 
             <div className="actions">
-              {selected.jira_key && (
+              {selected.status === "todo" && !liveSessions[selected.id] && (
                 <button
-                  disabled={busy !== null || !!liveSessions[selected.id]}
-                  title="Interview to build the spec, seeded from the Jira description"
+                  disabled={busy !== null}
+                  title="Interview to build the ticket's spec"
                   onClick={() =>
                     run("grill", async () => {
-                      await api.startSpecSession(selected.id, null);
+                      try {
+                        await api.grillTicket(selected.id);
+                        flash(`Building spec for #${selected.id}…`);
+                      } catch (e) {
+                        flash(String(e));
+                      }
                       await refresh();
-                      flash(`Building spec for #${selected.id}…`);
                     })
                   }
                 >
-                  {busy === "grill" ? "Starting…" : "Build spec from Jira"}
+                  {busy === "grill"
+                    ? "Starting…"
+                    : selected.jira_key
+                    ? "Build spec from Jira"
+                    : "Build spec"}
                 </button>
               )}
               <button
@@ -735,10 +709,16 @@ export function App() {
               )}
               <button
                 disabled={busy !== null}
+                title="Move to PR — opens a draft PR (must have changes and have been reviewed)"
                 onClick={() =>
                   run("pr", async () => {
-                    const url = await api.openPr(selected.id);
-                    flash(`PR: ${url}`);
+                    // Go through the flow: blocks if there are no changes, redirects to Human
+                    // review if it hasn't been reviewed yet, else opens the draft PR.
+                    try {
+                      await api.transitionTicket(selected.id, "in_review", false);
+                    } catch (e) {
+                      flash(String(e));
+                    }
                     await refresh();
                   })
                 }

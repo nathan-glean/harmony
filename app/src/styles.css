@@ -281,3 +281,7 @@ button:disabled { opacity: 0.5; cursor: default; }
   margin-left: 6px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
   color: #e0af68; border: 1px solid #e0af68; border-radius: 6px; padding: 0 5px;
 }
+.card-norepo {
+  margin-left: 6px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+  color: #f7768e; border: 1px solid #f7768e; border-radius: 6px; padding: 0 5px;
+}

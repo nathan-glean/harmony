@@ -58,6 +58,11 @@ export function Board({
                   <div className="card-key">
                     {t.jira_key ?? <span className="local">local #{t.id}</span>}
                     {t.drafting ? <span className="card-drafting">drafting…</span> : null}
+                    {t.repo_id == null ? (
+                      <span className="card-norepo" title="Assign a repo before moving this ticket">
+                        ⚠ no repo
+                      </span>
+                    ) : null}
                   </div>
                   <div className="card-title">{t.title}</div>
                   {progress[t.id] && (

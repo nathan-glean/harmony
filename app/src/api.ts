@@ -41,6 +41,10 @@ export const api = {
     }),
   setStatus: (id: number, status: string) =>
     invoke<void>("set_ticket_status", { id, status }),
+  // Lifecycle transitions go through the backend flow state machine (executor).
+  transitionTicket: (id: number, status: string, force: boolean) =>
+    invoke<void>("transition_ticket", { ticketId: id, status, force }),
+  grillTicket: (id: number) => invoke<void>("grill_ticket", { ticketId: id }),
   jiraApplyColumn: (ticketId: number, status: string) =>
     invoke<void>("jira_apply_column", { ticketId, status }),
   deleteTicket: (id: number, force: boolean) =>
