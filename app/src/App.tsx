@@ -19,6 +19,7 @@ import { QuestionCard } from "./components/QuestionCard";
 import { TranscriptPane } from "./components/TranscriptPane";
 import { ProgressLine } from "./components/ProgressLine";
 import { TerminalView } from "./components/Terminal";
+import { SpecEditor } from "./components/SpecEditor";
 import { api } from "./api";
 import type { Ticket, Repo, SessionView, WorktreeView, PendingQuestion, SessionProgress, SessionExit, PrDone } from "./types";
 
@@ -30,17 +31,13 @@ export function App() {
   const [liveSessionIds, setLiveSessionIds] = useState<Set<number>>(new Set());
   // Tickets whose PR is being created in the background (show a loading indicator).
   const [openingPr, setOpeningPr] = useState<Set<number>>(new Set());
+  // Active tab in the ticket modal.
+  const [tab, setTab] = useState<"description" | "spec" | "diff" | "session">("spec");
   const [selected, setSelected] = useState<Ticket | null>(null);
-  const [spec, setSpec] = useState("");
-  // First-class spec fields, edited alongside the spec body.
-  const [acceptance, setAcceptance] = useState("");
-  const [paths, setPaths] = useState("");
-  const [constraints, setConstraints] = useState("");
   // Live terminals keyed by ticket id → session id (supports several at once).
   const [liveSessions, setLiveSessions] = useState<Record<number, number>>({});
   // Live in-session progress (last assistant message + current tool), keyed by ticket id.
   const [progress, setProgress] = useState<Record<number, SessionProgress>>({});
-  const detailRef = useRef<HTMLElement>(null);
   // Attention notifications: track prior session states to fire on entry into "waiting".
   const prevStates = useRef<Map<number, string>>(new Map());
   const seeded = useRef(false);
@@ -375,27 +372,22 @@ export function App() {
     };
   }, [refresh]);
 
-  // Click outside the open detail panel (on empty board space) closes it.
-  // Clicking another card switches instead; topbar/forms are left alone.
+  // Esc closes the ticket modal.
   useEffect(() => {
     if (!selected) return;
-    const onDown = (e: MouseEvent) => {
-      const t = e.target as HTMLElement;
-      if (detailRef.current?.contains(t)) return; // inside the panel
-      if (t.closest(".card")) return; // a card → let it switch selection
-      if (!t.closest(".main")) return; // outside the board area (topbar/forms)
-      setSelected(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setSelected(null);
     };
-    document.addEventListener("mousedown", onDown);
-    return () => document.removeEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
   }, [selected]);
 
-  // Keep the spec editor (body + first-class fields) in sync with the selected ticket.
+  // On opening a ticket (or switching to a different one), pick a sensible default tab: the live
+  // Session if one's running, else the Jira Description, else the Spec.
   useEffect(() => {
-    setSpec(selected?.spec ?? "");
-    setAcceptance(selected?.acceptance_criteria ?? "");
-    setPaths(selected?.relevant_paths ?? "");
-    setConstraints(selected?.constraints ?? "");
+    if (!selected) return;
+    setTab(liveSessions[selected.id] ? "session" : selected.jira_key ? "description" : "spec");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected?.id]);
 
   const flash = (m: string) => {
@@ -648,39 +640,93 @@ export function App() {
         />
 
         {selected && (
-          <aside className="detail" ref={detailRef}>
-            <div className="detail-head">
-              <span className="badge">{selected.status}</span>
-              <strong>{selected.jira_key ?? `local #${selected.id}`}</strong>
-              {selected.jira_key && (
-                <button
-                  className="jira-open"
-                  title="Open in Jira"
-                  onClick={() => api.openInJira(selected.id).catch((e) => flash(String(e)))}
-                >
-                  ↗ Jira
+          <div
+            className="modal-backdrop"
+            onMouseDown={(e) => {
+              if (e.target === e.currentTarget) setSelected(null);
+            }}
+          >
+            <div className="modal">
+              <div className="modal-head">
+                <span className="badge">{selected.status}</span>
+                <strong>{selected.jira_key ?? `local #${selected.id}`}</strong>
+                <span className="modal-title">{selected.title}</span>
+                {selected.jira_key && (
+                  <button
+                    className="jira-open"
+                    title="Open in Jira"
+                    onClick={() => api.openInJira(selected.id).catch((e) => flash(String(e)))}
+                  >
+                    ↗ Jira
+                  </button>
+                )}
+                <button className="close" title="Close (Esc)" onClick={() => setSelected(null)}>
+                  ×
                 </button>
-              )}
-              <button className="close" title="Close" onClick={() => setSelected(null)}>
-                ×
-              </button>
-            </div>
-            <h2>{selected.title}</h2>
+              </div>
 
-            {progress[selected.id] && (
-              <ProgressLine p={progress[selected.id]} className="detail-progress" />
-            )}
-
-            <div className="actions">
-              {selected.status === "todo" && !liveSessions[selected.id] && (
+              <div className="actions">
+                {selected.status === "todo" && !liveSessions[selected.id] && (
+                  <button
+                    disabled={busy !== null}
+                    title="Interview to build the ticket's spec"
+                    onClick={() =>
+                      run("grill", async () => {
+                        try {
+                          await api.grillTicket(selected.id);
+                          flash(`Building spec for #${selected.id}…`);
+                        } catch (e) {
+                          flash(String(e));
+                        }
+                        await refresh();
+                      })
+                    }
+                  >
+                    {busy === "grill"
+                      ? "Starting…"
+                      : selected.jira_key
+                      ? "Build spec from Jira"
+                      : "Build spec"}
+                  </button>
+                )}
+                <button
+                  disabled={busy !== null || !!liveSessions[selected.id]}
+                  title={liveSessions[selected.id] ? "Terminal is open in the Session tab" : "Open a live Claude terminal"}
+                  onClick={() =>
+                    run("start", async () => {
+                      await openTerminal(selected);
+                      setTab("session");
+                    })
+                  }
+                >
+                  {liveSessions[selected.id]
+                    ? "● Session live"
+                    : busy === "start"
+                    ? "Opening…"
+                    : "Open terminal"}
+                </button>
+                {liveSessions[selected.id] && (
+                  <button
+                    disabled={busy !== null}
+                    title="Kill the running Claude process"
+                    onClick={() =>
+                      run("stop", async () => {
+                        await api.stopSession(liveSessions[selected.id]);
+                      })
+                    }
+                  >
+                    {busy === "stop" ? "Stopping…" : "Stop session"}
+                  </button>
+                )}
                 <button
                   disabled={busy !== null}
-                  title="Interview to build the ticket's spec"
+                  title="Move to PR — opens a draft PR (must have changes and have been reviewed)"
                   onClick={() =>
-                    run("grill", async () => {
+                    run("pr", async () => {
+                      // Go through the flow: blocks if there are no changes, redirects to Human
+                      // review if it hasn't been reviewed yet, else opens the draft PR.
                       try {
-                        await api.grillTicket(selected.id);
-                        flash(`Building spec for #${selected.id}…`);
+                        await api.transitionTicket(selected.id, "in_review", false);
                       } catch (e) {
                         flash(String(e));
                       }
@@ -688,162 +734,117 @@ export function App() {
                     })
                   }
                 >
-                  {busy === "grill"
-                    ? "Starting…"
-                    : selected.jira_key
-                    ? "Build spec from Jira"
-                    : "Build spec"}
+                  Open PR
                 </button>
-              )}
-              <button
-                disabled={busy !== null}
-                onClick={() =>
-                  run("save", async () => {
-                    await api.setSpecFields(selected.id, {
-                      spec,
-                      acceptance_criteria: acceptance,
-                      relevant_paths: paths,
-                      constraints,
-                    });
-                    await refresh();
-                  })
-                }
-              >
-                Save spec
-              </button>
-              <button
-                disabled={busy !== null || !!liveSessions[selected.id]}
-                title={liveSessions[selected.id] ? "Terminal is open below" : "Open a live Claude terminal"}
-                onClick={() => run("start", async () => { await openTerminal(selected); })}
-              >
-                {liveSessions[selected.id]
-                  ? "● Session live"
-                  : busy === "start"
-                  ? "Opening…"
-                  : "Open terminal"}
-              </button>
-              {liveSessions[selected.id] && (
                 <button
-                  disabled={busy !== null}
-                  title="Kill the running Claude process"
-                  onClick={() =>
-                    run("stop", async () => {
-                      await api.stopSession(liveSessions[selected.id]);
-                    })
+                  className="danger"
+                  disabled={busy !== null || !!liveSessions[selected.id]}
+                  title={
+                    liveSessions[selected.id] ? "Finish the running session first" : "Delete this ticket"
                   }
+                  onClick={() => {
+                    const t = selected;
+                    run("delete", async () => {
+                      const ok = await confirm(
+                        `Delete "${t.title}"? Removes its worktree and harmony record` +
+                          (t.jira_key ? " (not the Jira issue — it'll return on next Sync)." : "."),
+                        { title: "Delete ticket", kind: "warning" }
+                      );
+                      if (!ok) return;
+                      const done = await withDirtyConfirm(
+                        (force) => api.deleteTicket(t.id, force),
+                        `"${t.title}"`
+                      );
+                      if (!done) return;
+                      setSelected(null);
+                      await refresh();
+                      flash("Ticket deleted");
+                    });
+                  }}
                 >
-                  {busy === "stop" ? "Stopping…" : "Stop session"}
+                  {busy === "delete" ? "Deleting…" : "Delete"}
                 </button>
+              </div>
+
+              <div className="tabs">
+                {selected.jira_key && (
+                  <button
+                    className={"tab" + (tab === "description" ? " active" : "")}
+                    onClick={() => setTab("description")}
+                  >
+                    Description
+                  </button>
+                )}
+                <button
+                  className={"tab" + (tab === "spec" ? " active" : "")}
+                  onClick={() => setTab("spec")}
+                >
+                  Spec
+                </button>
+                <button
+                  className={"tab" + (tab === "diff" ? " active" : "")}
+                  onClick={() => setTab("diff")}
+                >
+                  Diff
+                </button>
+                <button
+                  className={"tab" + (tab === "session" ? " active" : "")}
+                  onClick={() => {
+                    setTab("session");
+                    // The terminal may have mounted while hidden — nudge it to refit.
+                    setTimeout(() => window.dispatchEvent(new Event("resize")), 0);
+                  }}
+                >
+                  Session
+                  {pendingQuestion ? (
+                    <span className="tab-dot" title="Claude is waiting for an answer" />
+                  ) : null}
+                </button>
+              </div>
+
+              {selected.jira_key && (
+                <div className={"tabpanel" + (tab === "description" ? " active" : "")}>
+                  <JiraInfo key={selected.id} ticketId={selected.id} />
+                </div>
               )}
-              <button
-                disabled={busy !== null}
-                title="Move to PR — opens a draft PR (must have changes and have been reviewed)"
-                onClick={() =>
-                  run("pr", async () => {
-                    // Go through the flow: blocks if there are no changes, redirects to Human
-                    // review if it hasn't been reviewed yet, else opens the draft PR.
-                    try {
-                      await api.transitionTicket(selected.id, "in_review", false);
-                    } catch (e) {
-                      flash(String(e));
+
+              <div className={"tabpanel" + (tab === "spec" ? " active" : "")}>
+                <SpecEditor key={selected.id} ticket={liveTicket ?? selected} onSaved={refresh} />
+              </div>
+
+              <div className={"tabpanel" + (tab === "diff" ? " active" : "")}>
+                {worktrees.some((w) => w.ticket_id === selected.id) ? (
+                  <DiffPane key={selected.id} ticketId={selected.id} />
+                ) : (
+                  <p className="empty">No worktree yet — move the ticket to In Progress to start work and see a diff.</p>
+                )}
+              </div>
+
+              <div className={"tabpanel" + (tab === "session" ? " active" : "")}>
+                {progress[selected.id] && (
+                  <ProgressLine p={progress[selected.id]} className="detail-progress" />
+                )}
+                {pendingQuestion && (
+                  <QuestionCard
+                    pq={pendingQuestion}
+                    onAnswered={() =>
+                      setTickets((ts) =>
+                        ts.map((t) => (t.id === selected.id ? { ...t, pending_question: "" } : t))
+                      )
                     }
-                    await refresh();
-                  })
-                }
-              >
-                Open PR
-              </button>
-              <button
-                className="danger"
-                disabled={busy !== null || !!liveSessions[selected.id]}
-                title={
-                  liveSessions[selected.id] ? "Finish the running session first" : "Delete this ticket"
-                }
-                onClick={() => {
-                  const t = selected;
-                  run("delete", async () => {
-                    const ok = await confirm(
-                      `Delete "${t.title}"? Removes its worktree and harmony record` +
-                        (t.jira_key ? " (not the Jira issue — it'll return on next Sync)." : "."),
-                      { title: "Delete ticket", kind: "warning" }
-                    );
-                    if (!ok) return;
-                    const done = await withDirtyConfirm(
-                      (force) => api.deleteTicket(t.id, force),
-                      `"${t.title}"`
-                    );
-                    if (!done) return;
-                    setSelected(null);
-                    await refresh();
-                    flash("Ticket deleted");
-                  });
-                }}
-              >
-                {busy === "delete" ? "Deleting…" : "Delete"}
-              </button>
+                  />
+                )}
+                {liveTicket?.todos && <Tasks todosJson={liveTicket.todos} />}
+                <TranscriptPane ticketId={selected.id} />
+                {liveSessions[selected.id] && (
+                  <>
+                    <div className="term-head">Live terminal — type to steer Claude</div>
+                    <TerminalView sessionId={liveSessions[selected.id]} />
+                  </>
+                )}
+              </div>
             </div>
-
-            {pendingQuestion && (
-              <QuestionCard
-                pq={pendingQuestion}
-                onAnswered={() =>
-                  setTickets((ts) =>
-                    ts.map((t) =>
-                      t.id === selected.id ? { ...t, pending_question: "" } : t
-                    )
-                  )
-                }
-              />
-            )}
-
-            {selected.jira_key && <JiraInfo ticketId={selected.id} />}
-
-            <div className="spec-fields">
-              <label className="field-label">Spec</label>
-              <textarea
-                className="spec"
-                value={spec}
-                placeholder="Agent spec body (markdown) — Goal, Context… or Build spec from Jira…"
-                onChange={(e) => setSpec(e.target.value)}
-              />
-              <label className="field-label">Acceptance criteria</label>
-              <textarea
-                className="spec spec-sub"
-                value={acceptance}
-                placeholder="What must be true to call this done (one per line)…"
-                onChange={(e) => setAcceptance(e.target.value)}
-              />
-              <label className="field-label">Relevant paths</label>
-              <textarea
-                className="spec spec-sub"
-                value={paths}
-                placeholder="Files/dirs the agent should focus on (one per line)…"
-                onChange={(e) => setPaths(e.target.value)}
-              />
-              <label className="field-label">Constraints</label>
-              <textarea
-                className="spec spec-sub"
-                value={constraints}
-                placeholder="Boundaries / non-goals / must-nots…"
-                onChange={(e) => setConstraints(e.target.value)}
-              />
-            </div>
-
-            {liveTicket?.todos && <Tasks todosJson={liveTicket.todos} />}
-
-            <TranscriptPane ticketId={selected.id} />
-
-            {liveSessions[selected.id] && (
-              <>
-                <div className="term-head">Live terminal — type to steer Claude</div>
-                <TerminalView sessionId={liveSessions[selected.id]} />
-              </>
-            )}
-
-            {worktrees.some((w) => w.ticket_id === selected.id) && (
-              <DiffPane ticketId={selected.id} />
-            )}
-          </aside>
+          </div>
         )}
         </>
         )}

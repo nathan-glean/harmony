@@ -140,6 +140,24 @@ button:disabled { opacity: 0.5; cursor: default; }
   animation: harmony-spin 0.7s linear infinite;
 }
 @keyframes harmony-spin { to { transform: rotate(360deg); } }
+
+/* Ghost/skeleton placeholder shown while a panel loads for the first time. */
+.skeleton { display: flex; flex-direction: column; gap: 8px; }
+.skeleton-line {
+  height: 12px; border-radius: 6px;
+  background: linear-gradient(
+    90deg,
+    var(--panel2) 25%,
+    color-mix(in srgb, var(--panel2) 60%, var(--text)) 50%,
+    var(--panel2) 75%
+  );
+  background-size: 200% 100%;
+  animation: harmony-shimmer 1.2s ease-in-out infinite;
+}
+@keyframes harmony-shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
 .card-key { font-size: 11px; color: var(--accent); margin-bottom: 4px; }
 .card-key .local { color: var(--muted); }
 .card-title { font-size: 13px; }
@@ -161,17 +179,50 @@ button:disabled { opacity: 0.5; cursor: default; }
 }
 .detail-progress .progress-msg { flex: 1; min-width: 0; }
 
-.detail {
-  width: 560px; border-left: 1px solid var(--border); background: var(--panel);
-  padding: 16px; display: flex; flex-direction: column; gap: 12px;
-  min-height: 0; overflow-y: auto;
+/* Ticket detail modal */
+.modal-backdrop {
+  position: fixed; inset: 0; z-index: 50;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex; align-items: center; justify-content: center;
 }
-.detail-head { display: flex; align-items: center; gap: 10px; }
-.detail-head .jira-open { padding: 2px 8px; font-size: 12px; }
-.detail-head .close {
-  margin-left: auto; line-height: 1; padding: 2px 9px; font-size: 18px;
+.modal {
+  width: min(1100px, 92vw); height: 88vh;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+  display: flex; flex-direction: column; overflow: hidden;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
 }
-.detail h2 { margin: 0; font-size: 17px; }
+.modal-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 14px 16px; border-bottom: 1px solid var(--border);
+}
+.modal-head strong { font-size: 13px; color: var(--accent); }
+.modal-title {
+  flex: 1; min-width: 0; font-size: 15px; font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.modal-head .jira-open { padding: 2px 8px; font-size: 12px; }
+.modal-head .close { line-height: 1; padding: 2px 9px; font-size: 18px; }
+.modal .actions { padding: 10px 16px; border-bottom: 1px solid var(--border); }
+
+/* Tab strip + panels */
+.tabs { display: flex; gap: 2px; padding: 0 12px; border-bottom: 1px solid var(--border); }
+.tab {
+  background: transparent; border: none; border-bottom: 2px solid transparent;
+  border-radius: 0; color: var(--muted); padding: 10px 14px; font-size: 13px;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.tab:hover:not(:disabled) { color: var(--text); }
+.tab.active { color: var(--text); border-bottom-color: var(--accent); }
+.tab-dot { width: 7px; height: 7px; border-radius: 50%; background: #e0af68; }
+.tabpanel { display: none; }
+.tabpanel.active {
+  display: flex; flex-direction: column; gap: 12px;
+  flex: 1; min-height: 0; overflow: auto; padding: 16px;
+}
+.save-spec { align-self: flex-start; }
+.tabpanel .empty { color: var(--muted); font-size: 13px; }
+/* In the Session tab the live terminal grows to fill the remaining height. */
+.tabpanel .terminal { height: auto; flex: 1 1 auto; min-height: 280px; }
 .badge {
   background: var(--panel2); border: 1px solid var(--border); border-radius: 6px;
   padding: 2px 8px; font-size: 11px; text-transform: uppercase; color: var(--muted);
@@ -191,7 +242,24 @@ button:disabled { opacity: 0.5; cursor: default; }
   margin-top: 8px; color: var(--muted); font-size: 11px; text-transform: uppercase;
   letter-spacing: 0.04em;
 }
-.spec-fields .spec-sub { min-height: 64px; }
+
+/* WYSIWYG markdown editor (@mdxeditor/editor) blended into the dark theme. */
+.md-field { display: flex; flex-direction: column; gap: 4px; }
+.md-field .mdxeditor {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+  /* Map MDXEditor's design tokens onto the app theme. */
+  --basePageBg: var(--bg);
+  --baseBg: var(--panel2);
+  --baseBorder: var(--border);
+  --baseText: var(--text);
+  --accentBase: var(--accent);
+}
+.md-field .mdxeditor-toolbar { background: var(--panel2); border-radius: 0; }
+.md-field .md-content {
+  min-height: 120px; max-height: 420px; overflow: auto;
+  font-size: 13px; line-height: 1.6;
+}
+.md-field .md-content.tall { min-height: 280px; }
 
 .transcript-pane { display: flex; flex-direction: column; gap: 6px; }
 .transcript-toggle {

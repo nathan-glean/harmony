@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
+import { Skeleton } from "./Skeleton";
 
 function lineClass(l: string): string {
   if (l.startsWith("+++") || l.startsWith("---")) return "d-meta";
@@ -82,17 +83,21 @@ export function DiffPane({ ticketId }: { ticketId: number }) {
         </ul>
       )}
 
-      <pre className="diff">
-        {diff ? (
-          diff.split("\n").map((l, i) => (
-            <div key={i} className={lineClass(l)}>
-              {l || " "}
-            </div>
-          ))
-        ) : (
-          !loading && <span className="muted">No changes vs base branch.</span>
-        )}
-      </pre>
+      {loading && !diff ? (
+        <Skeleton lines={8} />
+      ) : (
+        <pre className="diff">
+          {diff ? (
+            diff.split("\n").map((l, i) => (
+              <div key={i} className={lineClass(l)}>
+                {l || " "}
+              </div>
+            ))
+          ) : (
+            <span className="muted">No changes vs base branch.</span>
+          )}
+        </pre>
+      )}
     </div>
   );
 }
