@@ -111,6 +111,9 @@ pub struct Ctx {
     pub session_live: bool,
     /// The ticket's column before this event.
     pub from: Column,
+    /// A worktree currently exists on disk for this ticket (gates `DeleteWorktree`; a resume
+    /// implies this is true).
+    pub has_worktree: bool,
     /// The worktree has code changes vs the base branch (something to review / PR).
     pub has_changes: bool,
     /// `/review` has already run against the current change-set (no new changes since).

@@ -80,7 +80,7 @@ fn move_pr_after_review_opens_pr() {
 fn move_done_with_approved_pr_merges_and_cleans_up() {
     let d = decide(
         Event::Move(Done),
-        &Ctx { from: Pr, reviewed: true, has_changes: true, pr_exists: true, pr_approved: true, ..base() },
+        &Ctx { from: Pr, reviewed: true, has_changes: true, has_worktree: true, pr_exists: true, pr_approved: true, ..base() },
     );
     assert_eq!(d.target, Done);
     assert_eq!(d.actions, vec![MergePr, DeleteWorktree]);
@@ -250,7 +250,7 @@ fn move_pr_when_pr_already_exists_is_idempotent() {
 
 #[test]
 fn move_done_without_pr_just_deletes_worktree() {
-    let d = decide(Event::Move(Done), &Ctx { from: HumanReview, reviewed: true, has_changes: true, ..base() });
+    let d = decide(Event::Move(Done), &Ctx { from: HumanReview, reviewed: true, has_changes: true, has_worktree: true, ..base() });
     assert_eq!(d.target, Done);
     assert!(has(&d.actions, DeleteWorktree));
     assert!(!has(&d.actions, MergePr));
@@ -260,7 +260,7 @@ fn move_done_without_pr_just_deletes_worktree() {
 fn move_done_with_unapproved_pr_does_not_merge() {
     let d = decide(
         Event::Move(Done),
-        &Ctx { from: Pr, reviewed: true, has_changes: true, pr_exists: true, pr_approved: false, ..base() },
+        &Ctx { from: Pr, reviewed: true, has_changes: true, has_worktree: true, pr_exists: true, pr_approved: false, ..base() },
     );
     assert_eq!(d.target, Done);
     assert!(has(&d.actions, DeleteWorktree));
@@ -271,7 +271,7 @@ fn move_done_with_unapproved_pr_does_not_merge() {
 fn move_done_from_in_progress_stops_session_and_cleans_up() {
     let d = decide(
         Event::Move(Done),
-        &Ctx { from: InProgress, session_live: true, has_spec: true, planned: true, ..base() },
+        &Ctx { from: InProgress, session_live: true, has_spec: true, planned: true, has_worktree: true, ..base() },
     );
     assert_eq!(d.target, Done);
     assert!(has(&d.actions, StopSession));
@@ -341,4 +341,216 @@ fn moving_to_the_same_column_is_a_noop() {
     );
     assert!(d.actions.is_empty(), "re-moving to the current column must not start a duplicate session");
     assert!(d.blocked.is_none());
+}
+
+// ===================================================================
+// Round 2: stale/out-of-order system events (race hardening)
+// ===================================================================
+
+#[test]
+fn work_finished_off_in_progress_is_ignored() {
+    // A stale WorkFinished arriving after the user already moved the ticket must not yank it.
+    for from in [Todo, HumanReview, Pr, Done] {
+        let d = decide(Event::WorkFinished, &Ctx { from, has_spec: true, planned: true, ..base() });
+        assert_eq!(d.target, from, "stale WorkFinished from {from:?} must not move the ticket");
+        assert!(d.actions.is_empty(), "stale WorkFinished from {from:?} must do nothing");
+    }
+}
+
+#[test]
+fn grill_finished_after_ticket_moved_on_only_stops() {
+    for from in [HumanReview, Pr, Done] {
+        let d = decide(Event::GrillFinished, &Ctx { from, has_spec: true, ..base() });
+        assert_eq!(d.target, from);
+        assert_eq!(d.actions, vec![StopSession], "from {from:?}: just stop, don't implement/move");
+    }
+}
+
+#[test]
+fn review_finished_off_human_review_only_stops() {
+    for from in [Todo, InProgress, Pr, Done] {
+        let d = decide(Event::ReviewFinished, &Ctx { from, session_live: true, ..base() });
+        assert_eq!(d.target, from);
+        assert!(!d.actions.iter().any(|a| *a != StopSession), "from {from:?}: only StopSession, no move");
+    }
+}
+
+#[test]
+fn work_finished_with_no_changes_moves_but_skips_review() {
+    let d = decide(
+        Event::WorkFinished,
+        &Ctx { from: InProgress, session_live: true, has_spec: true, planned: true, has_changes: false, ..base() },
+    );
+    assert_eq!(d.target, HumanReview);
+    assert!(has(&d.actions, StopSession));
+    assert!(!has(&d.actions, RunReview), "no changes => nothing to review");
+}
+
+// ===================================================================
+// Round 2: Done is terminal
+// ===================================================================
+
+#[test]
+fn done_is_terminal() {
+    for to in [Todo, InProgress, HumanReview, Pr] {
+        let d = decide(Event::Move(to), &Ctx { from: Done, has_spec: true, planned: true, ..base() });
+        assert!(d.blocked.is_some(), "moving Done -> {to:?} must be blocked (Done is terminal)");
+        assert_eq!(d.target, Done);
+        assert!(d.actions.is_empty());
+    }
+}
+
+// ===================================================================
+// Round 2: worktree-existence gating
+// ===================================================================
+
+#[test]
+fn move_done_with_worktree_deletes_it() {
+    let d = decide(
+        Event::Move(Done),
+        &Ctx { from: HumanReview, reviewed: true, has_changes: true, has_worktree: true, ..base() },
+    );
+    assert!(has(&d.actions, DeleteWorktree));
+}
+
+#[test]
+fn move_done_from_todo_with_no_worktree_deletes_nothing() {
+    let d = decide(Event::Move(Done), &Ctx { from: Todo, has_worktree: false, ..base() });
+    assert_eq!(d.target, Done);
+    assert!(!has(&d.actions, DeleteWorktree), "nothing built => nothing to delete");
+    assert!(!has(&d.actions, MergePr));
+}
+
+#[test]
+fn move_done_without_repo_is_allowed() {
+    // Repo-less ticket can still be abandoned to Done (no worktree, just a status change).
+    let d = decide(Event::Move(Done), &Ctx { from: Todo, has_repo: false, has_worktree: false, ..base() });
+    assert_eq!(d.target, Done);
+    assert!(d.blocked.is_none(), "Done is allowed without a repo");
+    assert!(d.actions.is_empty());
+}
+
+// ===================================================================
+// Round 2: grill guards (Todo-only)
+// ===================================================================
+
+#[test]
+fn grill_requested_without_repo_is_blocked() {
+    let d = decide(Event::GrillRequested, &Ctx { from: Todo, has_repo: false, ..base() });
+    assert!(d.blocked.is_some(), "grill needs a worktree, which needs a repo");
+}
+
+#[test]
+fn grill_requested_while_drafting_is_blocked() {
+    let d = decide(Event::GrillRequested, &Ctx { from: Todo, drafting: true, ..base() });
+    assert!(d.blocked.is_some(), "no second grill while one is running");
+}
+
+#[test]
+fn grill_requested_off_todo_is_blocked() {
+    for from in [InProgress, HumanReview, Pr, Done] {
+        let d = decide(Event::GrillRequested, &Ctx { from, has_spec: true, ..base() });
+        assert!(d.blocked.is_some(), "grill is Todo-only; from {from:?} must block");
+    }
+}
+
+// ===================================================================
+// Round 2: PR-stage edges
+// ===================================================================
+
+#[test]
+fn move_pr_with_no_changes_always_blocked() {
+    // Whether already reviewed or coming straight from Todo, an empty diff can't open a PR.
+    for from in [Todo, HumanReview] {
+        let reviewed = from == HumanReview;
+        let d = decide(Event::Move(Pr), &Ctx { from, reviewed, has_changes: false, ..base() });
+        assert!(d.blocked.is_some(), "from {from:?}: no changes => nothing to PR");
+        assert!(!has(&d.actions, OpenPr));
+    }
+}
+
+#[test]
+fn move_pr_while_review_session_live_stops_then_opens() {
+    let d = decide(
+        Event::Move(Pr),
+        &Ctx { from: HumanReview, reviewed: true, has_changes: true, session_live: true, ..base() },
+    );
+    assert_eq!(d.target, Pr);
+    assert_eq!(d.actions, vec![StopSession, OpenPr]);
+}
+
+#[test]
+fn move_pr_does_not_force_a_rereview() {
+    let d = decide(
+        Event::Move(Pr),
+        &Ctx { from: HumanReview, reviewed: true, has_changes: true, review_current: false, ..base() },
+    );
+    assert_eq!(d.target, Pr);
+    assert_eq!(d.actions, vec![OpenPr], "moving to PR opens it; it does not re-run /review");
+}
+
+// ===================================================================
+// Round 2: backward / demote moves
+// ===================================================================
+
+#[test]
+fn move_human_review_to_todo_stops_keeps_worktree() {
+    let d = decide(
+        Event::Move(Todo),
+        &Ctx { from: HumanReview, session_live: true, has_worktree: true, has_spec: true, planned: true, reviewed: true, ..base() },
+    );
+    assert_eq!(d.target, Todo);
+    assert!(has(&d.actions, StopSession));
+    assert!(!has(&d.actions, DeleteWorktree), "worktree kept for later");
+}
+
+#[test]
+fn move_pr_to_human_review_demotes_without_touching_pr() {
+    let d = decide(
+        Event::Move(HumanReview),
+        &Ctx { from: Pr, reviewed: true, has_changes: true, review_current: false, pr_exists: true, ..base() },
+    );
+    assert_eq!(d.target, HumanReview);
+    assert!(!has(&d.actions, OpenPr) && !has(&d.actions, MergePr), "PR left intact on demote");
+    assert!(has(&d.actions, RunReview), "new changes since review => re-review");
+}
+
+// ===================================================================
+// Round 2: generalized same-column no-op
+// ===================================================================
+
+#[test]
+fn same_column_move_is_noop_for_all_columns() {
+    for col in [Todo, InProgress, HumanReview, Pr, Done] {
+        let d = decide(
+            Event::Move(col),
+            &Ctx { from: col, has_spec: true, planned: true, reviewed: true, has_changes: true, has_worktree: true, ..base() },
+        );
+        assert!(d.actions.is_empty(), "{col:?} -> {col:?} must be a no-op (esp. no re-review)");
+        assert!(d.blocked.is_none());
+    }
+}
+
+// ===================================================================
+// Round 2: comment-addressing loop (end-to-end)
+// ===================================================================
+
+#[test]
+fn comment_addressing_loop() {
+    // 1) In human review, user moves back to In Progress to address comments → resume.
+    let resume = decide(
+        Event::Move(InProgress),
+        &Ctx { from: HumanReview, has_spec: true, planned: true, reviewed: true, has_worktree: true, has_changes: true, ..base() },
+    );
+    assert_eq!(resume.target, InProgress);
+    assert_eq!(resume.actions, vec![ResumeWork]);
+
+    // 2) Claude finishes the fixes (new changes since the last review) → back to review, re-run /review.
+    let back = decide(
+        Event::WorkFinished,
+        &Ctx { from: InProgress, session_live: true, has_spec: true, planned: true, reviewed: true,
+               has_worktree: true, has_changes: true, review_current: false, ..base() },
+    );
+    assert_eq!(back.target, HumanReview);
+    assert_eq!(back.actions, vec![StopSession, RunReview]);
 }
