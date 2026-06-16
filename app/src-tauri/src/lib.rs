@@ -1027,6 +1027,15 @@ async fn apply_event(
                 let _ = state.store.mark_reviewed(ticket_id, &sha).await;
             }
         }
+        // Capture the review prose (Claude's final assistant message) from the session
+        // transcript onto the ticket so it shows in the Review tab. Latest-only — overwrites.
+        if let Ok(Some(tp)) = state.store.latest_transcript_path_for_ticket(ticket_id).await {
+            if let Ok(Some(text)) =
+                tokio::task::spawn_blocking(move || harmony_core::session::last_assistant_message(&tp)).await
+            {
+                let _ = state.store.set_ticket_review_text(ticket_id, &text).await;
+            }
+        }
     }
     let target = decision.target.as_status();
     state.store.set_ticket_status(ticket_id, target).await.map_err(|e| e.to_string())?;
@@ -1191,6 +1200,13 @@ async fn grill_ticket(app: AppHandle, state: State<'_, AppState>, ticket_id: i64
     apply_event(&app, &state, ticket_id, Event::GrillRequested, false).await
 }
 
+/// The Review tab's "Request review" button: re-run `/review` on demand, even if HEAD hasn't
+/// changed since the last review.
+#[tauri::command]
+async fn request_review(app: AppHandle, state: State<'_, AppState>, ticket_id: i64) -> Result<(), String> {
+    apply_event(&app, &state, ticket_id, Event::ReviewRequested, false).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1273,6 +1289,7 @@ pub fn run() {
             jira_apply_column,
             transition_ticket,
             grill_ticket,
+            request_review,
             delete_ticket,
             jira_env,
             install_acli,

@@ -16,6 +16,7 @@ export type Ticket = {
   acceptance_criteria: string; // first-class spec field (markdown)
   relevant_paths: string; // first-class spec field (one path per line / markdown)
   constraints: string; // first-class spec field (markdown)
+  review_text: string; // latest `/review` prose (Claude's final message), "" when never reviewed
 };
 
 // Payload of the `pr-done` event: a background PR creation finished. `ok` false means it was

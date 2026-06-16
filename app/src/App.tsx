@@ -32,7 +32,7 @@ export function App() {
   // Tickets whose PR is being created in the background (show a loading indicator).
   const [openingPr, setOpeningPr] = useState<Set<number>>(new Set());
   // Active tab in the ticket modal.
-  const [tab, setTab] = useState<"description" | "spec" | "diff" | "session">("spec");
+  const [tab, setTab] = useState<"description" | "spec" | "diff" | "review" | "session">("spec");
   const [selected, setSelected] = useState<Ticket | null>(null);
   // Live terminals keyed by ticket id → session id (supports several at once).
   const [liveSessions, setLiveSessions] = useState<Record<number, number>>({});
@@ -788,6 +788,15 @@ export function App() {
                   Diff
                 </button>
                 <button
+                  className={"tab" + (tab === "review" ? " active" : "")}
+                  onClick={() => setTab("review")}
+                >
+                  Review
+                  {(liveTicket ?? selected).review_text ? (
+                    <span className="tab-dot" title="A review is available" />
+                  ) : null}
+                </button>
+                <button
                   className={"tab" + (tab === "session" ? " active" : "")}
                   onClick={() => {
                     setTab("session");
@@ -817,6 +826,41 @@ export function App() {
                   <DiffPane key={selected.id} ticketId={selected.id} />
                 ) : (
                   <p className="empty">No worktree yet — move the ticket to In Progress to start work and see a diff.</p>
+                )}
+              </div>
+
+              <div className={"tabpanel" + (tab === "review" ? " active" : "")}>
+                <div className="review-head">
+                  <button
+                    disabled={busy !== null || !!liveSessions[selected.id]}
+                    title={
+                      liveSessions[selected.id]
+                        ? "Finish the running session first"
+                        : "Re-run /review on the current changes"
+                    }
+                    onClick={() =>
+                      run("review", async () => {
+                        try {
+                          await api.requestReview(selected.id);
+                          flash(`Reviewing #${selected.id}…`);
+                          setTab("session");
+                        } catch (e) {
+                          flash(String(e));
+                        }
+                        await refresh();
+                      })
+                    }
+                  >
+                    {busy === "review" ? "Starting…" : "Request review"}
+                  </button>
+                </div>
+                {(liveTicket ?? selected).review_text ? (
+                  <pre className="review-text">{(liveTicket ?? selected).review_text}</pre>
+                ) : (
+                  <p className="empty">
+                    No review yet — press “Request review” (or move the ticket through review) to
+                    have Claude run <code>/review</code> and generate one.
+                  </p>
                 )}
               </div>
 

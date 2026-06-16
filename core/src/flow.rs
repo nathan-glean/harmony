@@ -58,6 +58,9 @@ pub enum Event {
     GrillFinished,
     /// The autonomous work session reported it has finished implementing.
     WorkFinished,
+    /// User asked to (re-)run `/review` on demand (the Review tab's "Request review" button).
+    /// Unlike the column-entry review, this ignores `review_current` so it always re-reviews.
+    ReviewRequested,
     /// The `/review` run completed.
     ReviewFinished,
 }
@@ -263,6 +266,21 @@ pub fn decide(event: Event, ctx: &Ctx) -> Decision {
                 actions.push(RunReview);
             }
             Decision { target: HumanReview, actions, blocked: None }
+        }
+
+        // User pressed "Request review": (re-)run `/review` in place, ignoring `review_current`
+        // so it re-reviews even when HEAD hasn't moved. Needs a repo and actual changes; stops a
+        // live session first. The card stays in its current column.
+        Event::ReviewRequested => {
+            if !ctx.has_repo {
+                Decision::blocked(ctx.from, "assign a repo first")
+            } else if !ctx.has_changes {
+                Decision::blocked(ctx.from, "no changes to review")
+            } else {
+                let mut actions = stop_if_live();
+                actions.push(RunReview);
+                Decision { target: ctx.from, actions, blocked: None }
+            }
         }
 
         // The /review run finished: stop its session; the ticket stays where it is.

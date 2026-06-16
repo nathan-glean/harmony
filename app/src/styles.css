@@ -273,6 +273,13 @@ button:disabled { opacity: 0.5; cursor: default; }
   font: 12px/1.5 Menlo, monospace; white-space: pre-wrap; color: var(--text);
 }
 
+.review-head { display: flex; justify-content: flex-end; margin-bottom: 8px; }
+.review-text {
+  margin: 0; overflow: auto; background: var(--bg);
+  border: 1px solid var(--border); border-radius: 8px; padding: 12px;
+  font: 13px/1.6 Menlo, monospace; white-space: pre-wrap; color: var(--text);
+}
+
 .term-head {
   font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
   color: var(--muted); margin-top: 4px;

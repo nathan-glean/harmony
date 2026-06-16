@@ -45,6 +45,7 @@ export const api = {
   transitionTicket: (id: number, status: string, force: boolean) =>
     invoke<void>("transition_ticket", { ticketId: id, status, force }),
   grillTicket: (id: number) => invoke<void>("grill_ticket", { ticketId: id }),
+  requestReview: (id: number) => invoke<void>("request_review", { ticketId: id }),
   jiraApplyColumn: (ticketId: number, status: string) =>
     invoke<void>("jira_apply_column", { ticketId, status }),
   deleteTicket: (id: number, force: boolean) =>

@@ -59,7 +59,8 @@ impl Store {
             relevant_paths TEXT NOT NULL DEFAULT '',
             constraints TEXT NOT NULL DEFAULT '',
             reviewed INTEGER NOT NULL DEFAULT 0,
-            reviewed_sha TEXT NOT NULL DEFAULT ''
+            reviewed_sha TEXT NOT NULL DEFAULT '',
+            review_text TEXT NOT NULL DEFAULT ''
         );
         UPDATE tickets SET status = 'todo' WHERE status IN ('available', 'ready');
         CREATE TABLE IF NOT EXISTS worktrees (
@@ -143,6 +144,9 @@ impl Store {
             .execute(&self.pool)
             .await;
         let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN reviewed_sha TEXT NOT NULL DEFAULT ''")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN review_text TEXT NOT NULL DEFAULT ''")
             .execute(&self.pool)
             .await;
         let _ = sqlx::query("ALTER TABLE diff_comments ADD COLUMN end_line INTEGER NOT NULL DEFAULT 0")
@@ -261,7 +265,7 @@ impl Store {
 
     pub async fn get_ticket(&self, id: i64) -> Result<Option<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text
              FROM tickets WHERE id = ?",
         )
         .bind(id)
@@ -271,7 +275,7 @@ impl Store {
 
     pub async fn list_tickets(&self) -> Result<Vec<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text
              FROM tickets ORDER BY id",
         )
         .fetch_all(&self.pool)
@@ -573,7 +577,7 @@ impl Store {
 
     pub async fn get_ticket_by_key(&self, key: &str) -> Result<Option<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text
              FROM tickets WHERE jira_key = ?",
         )
         .bind(key)
@@ -663,6 +667,17 @@ impl Store {
     /// Clear the reviewed flag/fingerprint (e.g. on reopen). Rarely needed but symmetric.
     pub async fn clear_reviewed(&self, id: i64) -> Result<()> {
         sqlx::query("UPDATE tickets SET reviewed = 0, reviewed_sha = '' WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Store the prose review `/review` produced (Claude's final assistant message). Latest-only —
+    /// overwrites the previous review. Surfaced in the ticket's Review tab.
+    pub async fn set_ticket_review_text(&self, id: i64, text: &str) -> Result<()> {
+        sqlx::query("UPDATE tickets SET review_text = ? WHERE id = ?")
+            .bind(text)
             .bind(id)
             .execute(&self.pool)
             .await?;

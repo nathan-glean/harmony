@@ -145,6 +145,7 @@ mod tests {
             constraints: fields.constraints,
             reviewed: 0,
             reviewed_sha: String::new(),
+            review_text: String::new(),
         }
     }
 
