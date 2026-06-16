@@ -1,0 +1,111 @@
+# https://taskfile.dev
+# Run `task` (or `task --list`) to see available tasks.
+version: "3"
+
+vars:
+  APP_DIR: app
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+    silent: true
+
+  # ---- Rust workspace (core CLI + Tauri backend) ----
+
+  build:
+    desc: Build the Rust workspace (debug)
+    cmds:
+      - cargo build --workspace
+
+  build:release:
+    desc: Build the Rust workspace (release)
+    cmds:
+      - cargo build --workspace --release
+
+  test:
+    desc: Run Rust workspace tests
+    cmds:
+      - cargo test --workspace
+
+  fmt:
+    desc: Format Rust code
+    cmds:
+      - cargo fmt --all
+
+  fmt:check:
+    desc: Check Rust formatting without writing changes
+    cmds:
+      - cargo fmt --all --check
+
+  lint:
+    desc: Lint with clippy (warnings as errors)
+    cmds:
+      - cargo clippy --workspace --all-targets -- -D warnings
+
+  check:
+    desc: Type-check the Rust workspace without producing binaries
+    cmds:
+      - cargo check --workspace --all-targets
+
+  run:
+    desc: 'Run the harmony CLI, e.g. `task run -- repo list`'
+    cmds:
+      - cargo run --bin harmony -- {{.CLI_ARGS}}
+
+  # ---- Frontend (Vite / React) ----
+
+  app:install:
+    desc: Install frontend npm dependencies
+    dir: "{{.APP_DIR}}"
+    cmds:
+      - npm install
+
+  app:dev:
+    desc: Start the Vite dev server
+    dir: "{{.APP_DIR}}"
+    cmds:
+      - npm run dev
+
+  app:build:
+    desc: Type-check and build the frontend bundle
+    dir: "{{.APP_DIR}}"
+    cmds:
+      - npm run build
+
+  app:typecheck:
+    desc: Type-check the frontend without emitting output
+    dir: "{{.APP_DIR}}"
+    cmds:
+      - npx tsc --noEmit
+
+  # ---- Tauri desktop app ----
+
+  tauri:dev:
+    desc: Run the Tauri desktop app in dev mode
+    dir: "{{.APP_DIR}}"
+    cmds:
+      - npm run tauri dev
+
+  tauri:build:
+    desc: Build the Tauri desktop app for distribution
+    dir: "{{.APP_DIR}}"
+    cmds:
+      - npm run tauri build
+
+  # ---- Aggregates ----
+
+  ci:
+    desc: Run formatting, lint, type-check, and tests (what CI should run)
+    cmds:
+      - task: fmt:check
+      - task: lint
+      - task: test
+      - task: app:typecheck
+
+  clean:
+    desc: Remove Rust and frontend build artifacts
+    cmds:
+      - cargo clean
+      - rm -rf {{.APP_DIR}}/dist {{.APP_DIR}}/node_modules
