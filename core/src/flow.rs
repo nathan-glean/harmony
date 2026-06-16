@@ -148,16 +148,135 @@ impl Decision {
     }
 }
 
-/// Decide what should happen for `event` given the ticket's `ctx`. Pure.
-///
-/// Unimplemented: the contract is pinned by `core/tests/flow.rs`.
-pub fn decide(_event: Event, _ctx: &Ctx) -> Decision {
-    todo!("implement the lifecycle state machine specified by core/tests/flow.rs")
+/// Decide what should happen for `event` given the ticket's `ctx`. Pure — the contract is
+/// pinned by `core/tests/flow.rs`.
+pub fn decide(event: Event, ctx: &Ctx) -> Decision {
+    use Action::*;
+    use Column::*;
+
+    // `[StopSession]` when a session is live, else nothing.
+    let stop_if_live = || -> Vec<Action> {
+        if ctx.session_live {
+            vec![StopSession]
+        } else {
+            vec![]
+        }
+    };
+    // Entering Human review: stop the work session (if any), then run `/review` only when there
+    // are changes we haven't already reviewed.
+    let enter_human_review = || -> Decision {
+        let mut actions = stop_if_live();
+        if ctx.has_changes && !ctx.review_current {
+            actions.push(RunReview);
+        }
+        Decision { target: HumanReview, actions, blocked: None }
+    };
+
+    match event {
+        Event::Move(to) => {
+            // Re-moving to the current column is a no-op (incl. Done → Done — handled before the
+            // terminal-Done guard so it isn't reported as blocked).
+            if to == ctx.from {
+                return Decision { target: ctx.from, actions: vec![], blocked: None };
+            }
+            // Done is terminal.
+            if ctx.from == Done {
+                return Decision::blocked(ctx.from, "Done is terminal");
+            }
+            // A repo is mandatory before any working stage (Done may abandon without one).
+            if !ctx.has_repo && matches!(to, InProgress | HumanReview | Pr) {
+                return Decision::blocked(ctx.from, "assign a repo first");
+            }
+            match to {
+                Todo => Decision { target: Todo, actions: stop_if_live(), blocked: None },
+                InProgress => {
+                    if ctx.drafting {
+                        Decision::blocked(ctx.from, "finish the interview first")
+                    } else if !ctx.has_spec {
+                        Decision { target: InProgress, actions: vec![StartGrill], blocked: None }
+                    } else if ctx.planned {
+                        Decision { target: InProgress, actions: vec![ResumeWork], blocked: None }
+                    } else {
+                        Decision { target: InProgress, actions: vec![EnsureWorktree, StartImplement], blocked: None }
+                    }
+                }
+                HumanReview => enter_human_review(),
+                Pr => {
+                    if !ctx.has_changes {
+                        Decision::blocked(ctx.from, "no changes to open a PR for")
+                    } else if !ctx.reviewed {
+                        // Must go through human review before a PR — redirect there.
+                        enter_human_review()
+                    } else {
+                        let mut actions = stop_if_live();
+                        if !ctx.pr_exists {
+                            actions.push(OpenPr);
+                        }
+                        Decision { target: Pr, actions, blocked: None }
+                    }
+                }
+                Done => {
+                    let mut actions = stop_if_live();
+                    if ctx.pr_exists && ctx.pr_approved {
+                        actions.push(MergePr);
+                    }
+                    if ctx.has_worktree {
+                        actions.push(DeleteWorktree);
+                    }
+                    Decision { target: Done, actions, blocked: None }
+                }
+            }
+        }
+
+        // Grill is Todo-only, needs a repo, and won't start a second concurrent grill.
+        Event::GrillRequested => {
+            if ctx.from != Todo {
+                Decision::blocked(ctx.from, "grill is only available in Todo")
+            } else if !ctx.has_repo {
+                Decision::blocked(ctx.from, "assign a repo first")
+            } else if ctx.drafting {
+                Decision::blocked(ctx.from, "already drafting a spec")
+            } else {
+                Decision { target: Todo, actions: vec![StartGrill], blocked: None }
+            }
+        }
+
+        // Spec captured. From In Progress (grill kicked off en route to work) → implement now;
+        // from Todo → just save and stay; arriving off either is a stale event → only stop.
+        Event::GrillFinished => {
+            let mut actions = vec![StopSession];
+            if ctx.from == InProgress {
+                actions.push(EnsureWorktree);
+                actions.push(StartImplement);
+            }
+            Decision { target: ctx.from, actions, blocked: None }
+        }
+
+        // Autonomous work done → move to Human review and review the changes. A WorkFinished
+        // arriving when the ticket is no longer In Progress is stale and ignored.
+        Event::WorkFinished => {
+            if ctx.from != InProgress {
+                return Decision { target: ctx.from, actions: vec![], blocked: None };
+            }
+            let mut actions = vec![StopSession];
+            if ctx.has_changes && !ctx.review_current {
+                actions.push(RunReview);
+            }
+            Decision { target: HumanReview, actions, blocked: None }
+        }
+
+        // The /review run finished: stop its session; the ticket stays where it is.
+        Event::ReviewFinished => {
+            Decision { target: ctx.from, actions: vec![StopSession], blocked: None }
+        }
+    }
 }
 
 /// Non-blocking warnings to surface for a ticket in its current state. Pure.
-///
-/// Unimplemented: the contract is pinned by `core/tests/flow.rs`.
-pub fn warnings(_ctx: &Ctx) -> Vec<Warning> {
-    todo!("implement the warning rules specified by core/tests/flow.rs")
+pub fn warnings(ctx: &Ctx) -> Vec<Warning> {
+    if ctx.has_repo {
+        vec![]
+    } else {
+        vec![Warning::NoRepo]
+    }
 }
