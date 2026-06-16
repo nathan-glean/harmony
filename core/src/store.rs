@@ -533,11 +533,13 @@ impl Store {
         .await?)
     }
 
-    /// Most recent Claude session id for a ticket, for `--resume`.
+    /// Most recent Claude session id for a ticket's **work** session, for `--resume`. Spec/grill
+    /// sessions are excluded: the work session must start fresh from the captured spec, never
+    /// resume (and continue) the grill interview's conversation.
     pub async fn latest_claude_session_id_for_ticket(&self, ticket_id: i64) -> Result<Option<String>> {
         Ok(sqlx::query_scalar::<_, String>(
             "SELECT claude_session_id FROM sessions
-             WHERE ticket_id = ? AND claude_session_id IS NOT NULL
+             WHERE ticket_id = ? AND claude_session_id IS NOT NULL AND kind = 'work'
              ORDER BY id DESC LIMIT 1",
         )
         .bind(ticket_id)

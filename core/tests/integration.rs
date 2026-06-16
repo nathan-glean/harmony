@@ -292,6 +292,30 @@ async fn tickets_with_open_session_excludes_spec_and_end_all() {
 }
 
 #[tokio::test]
+async fn resume_lookup_ignores_grill_session() {
+    // The work session must start fresh from the spec, never resume the grill's conversation.
+    let dir = TempDir::new("resumegrill");
+    let store = open_store(&dir).await;
+    let repo_id = store.add_repo("r", dir.path().to_str().unwrap(), None).await.unwrap();
+    let ticket_id = store.add_ticket(None, "local", "T", "", Some(repo_id)).await.unwrap();
+    let wt_id = store.add_worktree(ticket_id, repo_id, "b", "/tmp/w", false).await.unwrap();
+
+    // Only a grill (spec) session has run, and it learned a Claude session id.
+    let spec = store.add_session(ticket_id, 0, "/tmp/w", "spec").await.unwrap();
+    store.set_session_claude_id(spec, "grill-claude-id").await.unwrap();
+    // Resume lookup must NOT return the grill id → the first work session starts fresh.
+    assert!(store.latest_claude_session_id_for_ticket(ticket_id).await.unwrap().is_none());
+
+    // Once a work session exists, its id is the resume target.
+    let work = store.add_session(ticket_id, wt_id, "/tmp/w", "work").await.unwrap();
+    store.set_session_claude_id(work, "work-claude-id").await.unwrap();
+    assert_eq!(
+        store.latest_claude_session_id_for_ticket(ticket_id).await.unwrap().as_deref(),
+        Some("work-claude-id")
+    );
+}
+
+#[tokio::test]
 async fn settings_kv_upsert() {
     let dir = TempDir::new("kv");
     let store = open_store(&dir).await;
@@ -509,6 +533,63 @@ async fn hook_server_spec_session_captures_plan_without_moving_board() {
     assert_eq!(t.drafting, 0);
     assert_eq!(t.grilled, 1);
     assert_eq!(t.status, status::TODO, "spec session must not move the board column");
+}
+
+#[tokio::test]
+async fn hook_server_spec_session_captures_plan_file_write() {
+    // Current Claude Code plan mode writes the plan to ~/.claude/plans/*.md via the Write tool
+    // instead of carrying it in ExitPlanMode — the spec must be captured from that write.
+    let dir = TempDir::new("hookplanfile");
+    let store = Arc::new(open_store(&dir).await);
+    let repo_id = store.add_repo("r", dir.path().to_str().unwrap(), None).await.unwrap();
+    let ticket_id = store.add_ticket(None, "local", "Draft", "", Some(repo_id)).await.unwrap();
+    store.set_ticket_drafting(ticket_id, true).await.unwrap();
+    let cwd = dir.str();
+    store.add_session(ticket_id, 0, &cwd, "spec").await.unwrap();
+
+    let port = spawn_hooks(store.clone()).await;
+    let client = reqwest::Client::new();
+
+    let plan = "# Title\n\nBody.\n\n## Acceptance criteria\n- a\n\n## Constraints\nkeep small";
+    // A Write to a plan file → captured as the spec.
+    post(&client, port, "PreToolUse", &serde_json::json!({
+        "cwd": cwd,
+        "tool_name": "Write",
+        "tool_input": { "file_path": "/Users/x/.claude/plans/scoping-foo.md", "content": plan }
+    })).await;
+
+    let t = store.get_ticket(ticket_id).await.unwrap().unwrap();
+    assert_eq!(t.acceptance_criteria, "- a");
+    assert_eq!(t.constraints, "keep small");
+    assert!(t.spec.contains("Body."));
+    assert_eq!(t.drafting, 0);
+    assert_eq!(t.grilled, 1);
+    assert_eq!(t.status, status::TODO);
+}
+
+#[tokio::test]
+async fn hook_server_spec_session_ignores_non_plan_write() {
+    // A Write to some other file during the grill must NOT be mistaken for the spec.
+    let dir = TempDir::new("hooknonplan");
+    let store = Arc::new(open_store(&dir).await);
+    let repo_id = store.add_repo("r", dir.path().to_str().unwrap(), None).await.unwrap();
+    let ticket_id = store.add_ticket(None, "local", "Draft", "", Some(repo_id)).await.unwrap();
+    store.set_ticket_drafting(ticket_id, true).await.unwrap();
+    let cwd = dir.str();
+    store.add_session(ticket_id, 0, &cwd, "spec").await.unwrap();
+
+    let port = spawn_hooks(store.clone()).await;
+    let client = reqwest::Client::new();
+
+    post(&client, port, "PreToolUse", &serde_json::json!({
+        "cwd": cwd,
+        "tool_name": "Write",
+        "tool_input": { "file_path": "/repo/src/notes.txt", "content": "scratch" }
+    })).await;
+
+    let t = store.get_ticket(ticket_id).await.unwrap().unwrap();
+    assert_eq!(t.spec, "", "non-plan write must not be captured as the spec");
+    assert_eq!(t.drafting, 1, "still drafting — the grill hasn't produced a spec");
 }
 
 // ---- helpers -------------------------------------------------------------

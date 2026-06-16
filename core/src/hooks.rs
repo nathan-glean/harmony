@@ -157,21 +157,40 @@ async fn handle(
                 }
             }
 
-            // Grill/spec session: ExitPlanMode means the spec is ready. Capture the plan
-            // text as the ticket spec and clear `drafting` — the app then auto-stops it.
-            if sess.kind == "spec" && tool == Some("ExitPlanMode") && event == "PreToolUse" {
-                let plan = v
-                    .get("tool_input")
-                    .and_then(|ti| ti.get("plan"))
-                    .and_then(|p| p.as_str())
-                    .map(|s| s.to_string())
-                    .or_else(|| {
+            // Grill/spec session: the finished spec arrives one of two ways depending on the
+            // Claude Code version's plan mode —
+            //   * older: an `ExitPlanMode` call carrying the plan in `tool_input.plan`;
+            //   * current: the plan is written to a plan file (`~/.claude/plans/*.md`) via the
+            //     `Write` tool, so `ExitPlanMode` never fires with the text.
+            // Capture the plan from whichever fired, split it into the first-class fields, and
+            // clear `drafting` (the app then auto-stops the grill).
+            if sess.kind == "spec" && event == "PreToolUse" {
+                let plan = match tool {
+                    Some("ExitPlanMode") => v
+                        .get("tool_input")
+                        .and_then(|ti| ti.get("plan"))
+                        .and_then(|p| p.as_str())
+                        .map(|s| s.to_string())
                         // Fallback if the field name differs: serialise the whole input.
-                        v.get("tool_input").map(|ti| ti.to_string())
-                    });
+                        .or_else(|| v.get("tool_input").map(|ti| ti.to_string())),
+                    Some("Write") => {
+                        let ti = v.get("tool_input");
+                        let path = ti
+                            .and_then(|t| t.get("file_path"))
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("");
+                        // Only the plan file is the spec — not some other file the grill writes.
+                        if path.contains("/.claude/plans/") {
+                            ti.and_then(|t| t.get("content"))
+                                .and_then(|x| x.as_str())
+                                .map(|s| s.to_string())
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
                 if let Some(plan) = plan {
-                    // Split the produced spec into the first-class fields (best-effort; the
-                    // body keeps anything not under a recognized heading).
                     let f = crate::spec::parse_spec(&plan);
                     let _ = store
                         .set_ticket_spec_fields(

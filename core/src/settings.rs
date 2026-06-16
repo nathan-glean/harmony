@@ -71,3 +71,95 @@ pub fn inject_hooks(worktree_path: &str, port: u16) -> Result<()> {
     std::fs::write(&file, serde_json::to_string_pretty(&root)?)?;
     Ok(())
 }
+
+/// Remove harmony's previously-injected hooks from `<dir>/.claude/settings.local.json`,
+/// preserving every other setting. Used to clean a repo root that an earlier version polluted
+/// (the grill now runs in an isolated scratch dir, never the repo). No-op when the file or our
+/// hooks are absent.
+pub fn remove_hooks(dir: &str, port: u16) -> Result<()> {
+    let file = Path::new(dir).join(".claude").join("settings.local.json");
+    let bytes = match std::fs::read(&file) {
+        Ok(b) => b,
+        Err(_) => return Ok(()),
+    };
+    let mut root: Value = serde_json::from_slice(&bytes).unwrap_or_else(|_| json!({}));
+    let needle = format!("127.0.0.1:{port}/hook");
+    let mut changed = false;
+
+    if let Some(obj) = root.as_object_mut() {
+        let mut hooks_now_empty = false;
+        if let Some(hooks) = obj.get_mut("hooks").and_then(|h| h.as_object_mut()) {
+            let events: Vec<String> = hooks.keys().cloned().collect();
+            for event in events {
+                if let Some(arr) = hooks.get_mut(&event).and_then(|a| a.as_array_mut()) {
+                    let before = arr.len();
+                    arr.retain(|e| !serde_json::to_string(e).unwrap_or_default().contains(&needle));
+                    if arr.len() != before {
+                        changed = true;
+                    }
+                    if arr.is_empty() {
+                        hooks.remove(&event);
+                    }
+                }
+            }
+            hooks_now_empty = hooks.is_empty();
+        }
+        if hooks_now_empty {
+            obj.remove("hooks");
+        }
+    }
+
+    if changed {
+        std::fs::write(&file, serde_json::to_string_pretty(&root)?)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static N: AtomicU32 = AtomicU32::new(0);
+
+    fn temp_dir() -> std::path::PathBuf {
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let p = std::env::temp_dir().join(format!("harmony-settings-test-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn remove_hooks_strips_ours_and_keeps_others() {
+        let dir = temp_dir();
+        // A pre-existing user setting + a foreign hook that must survive.
+        let claude = dir.join(".claude");
+        std::fs::create_dir_all(&claude).unwrap();
+        std::fs::write(
+            claude.join("settings.local.json"),
+            r#"{"model":"opus","hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"echo hi"}]}]}}"#,
+        )
+        .unwrap();
+
+        inject_hooks(dir.to_str().unwrap(), 8787).unwrap();
+        // Sanity: our hooks are present after inject.
+        let after_inject = std::fs::read_to_string(claude.join("settings.local.json")).unwrap();
+        assert!(after_inject.contains("127.0.0.1:8787/hook"));
+
+        remove_hooks(dir.to_str().unwrap(), 8787).unwrap();
+        let cleaned = std::fs::read_to_string(claude.join("settings.local.json")).unwrap();
+        // Ours gone, the foreign hook + unrelated key preserved.
+        assert!(!cleaned.contains("127.0.0.1"));
+        assert!(cleaned.contains("echo hi"));
+        assert!(cleaned.contains("\"model\""));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remove_hooks_absent_file_is_noop() {
+        let dir = temp_dir();
+        assert!(remove_hooks(dir.to_str().unwrap(), 8787).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

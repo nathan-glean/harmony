@@ -701,19 +701,17 @@ export function App() {
             <div className="actions">
               {selected.jira_key && (
                 <button
-                  disabled={busy !== null}
+                  disabled={busy !== null || !!liveSessions[selected.id]}
+                  title="Interview to build the spec, seeded from the Jira description"
                   onClick={() =>
-                    run("draft", async () => {
-                      const f = await api.draftTicket(selected.id);
-                      setSpec(f.spec);
-                      setAcceptance(f.acceptance_criteria);
-                      setPaths(f.relevant_paths);
-                      setConstraints(f.constraints);
+                    run("grill", async () => {
+                      await api.startSpecSession(selected.id, null);
                       await refresh();
+                      flash(`Building spec for #${selected.id}…`);
                     })
                   }
                 >
-                  {busy === "draft" ? "Drafting…" : "Draft from Jira"}
+                  {busy === "grill" ? "Starting…" : "Build spec from Jira"}
                 </button>
               )}
               <button
@@ -818,7 +816,7 @@ export function App() {
               <textarea
                 className="spec"
                 value={spec}
-                placeholder="Agent spec body (markdown) — Goal, Context… or Draft from Jira…"
+                placeholder="Agent spec body (markdown) — Goal, Context… or Build spec from Jira…"
                 onChange={(e) => setSpec(e.target.value)}
               />
               <label className="field-label">Acceptance criteria</label>

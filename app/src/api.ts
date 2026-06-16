@@ -49,7 +49,6 @@ export const api = {
   installAcli: () => invoke<string>("install_acli"),
   jiraLogout: () => invoke<void>("jira_logout"),
   jiraSync: () => invoke<number>("jira_sync"),
-  draftTicket: (id: number) => invoke<SpecFields>("draft_ticket", { id }),
   jiraDetail: (ticketId: number) =>
     invoke<{ description: string; comments: { author: string; created: string; body: string }[] }>(
       "jira_detail",

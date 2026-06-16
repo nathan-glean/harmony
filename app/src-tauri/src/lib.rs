@@ -465,43 +465,6 @@ async fn jira_detail(state: State<'_, AppState>, ticket_id: i64) -> Result<JiraD
     Ok(JiraDetail { description: issue.description, comments })
 }
 
-#[tauri::command]
-async fn draft_ticket(
-    state: State<'_, AppState>,
-    id: i64,
-) -> Result<harmony_core::spec::SpecFields, String> {
-    let ticket = state
-        .store
-        .get_ticket(id)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or("no such ticket")?;
-    let key = ticket.jira_key.clone().ok_or("ticket is not linked to Jira")?;
-    let issue = harmony_core::jira::get_issue(&key).await.map_err(|e| e.to_string())?;
-    // Repo-aware when we can resolve a repo (assigned, else the default for the project key):
-    // Claude scans it read-only for real paths. None → pure text draft.
-    let repo_path: Option<String> = if let Some(rid) = ticket.repo_id {
-        state.store.get_repo(rid).await.map_err(|e| e.to_string())?.map(|r| r.path)
-    } else {
-        let proj = key.split('-').next().unwrap_or("");
-        state.store.default_repo_for_key(proj).await.map_err(|e| e.to_string())?.map(|r| r.path)
-    };
-    let spec = tokio::task::spawn_blocking(move || {
-        harmony_core::draft::draft_spec(&issue.summary, &issue.description, repo_path.as_deref())
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())?;
-    // Split the drafted markdown into the first-class fields and persist them independently.
-    let f = harmony_core::spec::parse_spec(&spec);
-    state
-        .store
-        .set_ticket_spec_fields(id, &f.spec, &f.acceptance_criteria, &f.relevant_paths, &f.constraints)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(f)
-}
-
 // ---- pull request --------------------------------------------------------
 
 #[tauri::command]
@@ -688,8 +651,21 @@ async fn start_spec_session(
     repo: Option<String>,
 ) -> Result<i64, String> {
     ensure_ticket_repo(&state, ticket_id, repo).await?;
+    // Seed the grill with the Jira description for Jira-linked tickets (best-effort: a fetch
+    // failure just starts the interview unseeded, never aborts it).
+    let seed = match state.store.get_ticket(ticket_id).await.ok().flatten() {
+        Some(t) => match t.jira_key.as_deref() {
+            Some(key) => harmony_core::jira::get_issue(key)
+                .await
+                .ok()
+                .map(|i| i.description)
+                .filter(|d| !d.trim().is_empty()),
+            None => None,
+        },
+        None => None,
+    };
     let mgr = SessionManager::new(Arc::new(state.store.clone()), HOOK_PORT);
-    let handle = mgr.start_spec_session(ticket_id).await.map_err(|e| e.to_string())?;
+    let handle = mgr.start_spec_session(ticket_id, seed).await.map_err(|e| e.to_string())?;
     wire_session(&app, &state, handle, ticket_id)
 }
 
@@ -926,7 +902,6 @@ pub fn run() {
             jira_sync,
             jira_detail,
             open_in_jira,
-            draft_ticket,
             open_pr,
             start_session,
             start_spec_session,

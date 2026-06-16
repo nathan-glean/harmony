@@ -11,7 +11,7 @@ use anyhow::{anyhow, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde_json::Value;
 
-use crate::models::Ticket;
+use crate::models::{Repo, Ticket, Worktree};
 use crate::store::Store;
 use crate::worktree;
 
@@ -31,6 +31,46 @@ impl SessionManager {
         Self { store, hook_port }
     }
 
+    /// The ticket's primary worktree, creating it (off the repo's default branch) if absent.
+    /// If recording the new worktree in the DB fails, the on-disk worktree is rolled back so we
+    /// never leave a half-created worktree (a directory with no row that breaks the next
+    /// `git worktree add`).
+    async fn ensure_primary_worktree(
+        &self,
+        ticket: &Ticket,
+        repo_id: i64,
+        repo: &Repo,
+    ) -> Result<Worktree> {
+        if let Some(w) = self.store.primary_worktree_for_ticket(ticket.id).await? {
+            return Ok(w);
+        }
+        let branch = worktree::branch_name(ticket);
+        let dest = worktree::worktree_path(&repo.name, &branch);
+        let base = worktree::default_branch(&repo.path)?;
+        worktree::create(&repo.path, &base, &branch, &dest)?;
+        let canon = std::fs::canonicalize(&dest)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| dest.to_string_lossy().to_string());
+        let recorded = async {
+            let id = self
+                .store
+                .add_worktree(ticket.id, repo_id, &branch, &canon, false)
+                .await?;
+            self.store
+                .get_worktree(id)
+                .await?
+                .ok_or_else(|| anyhow!("worktree insert failed"))
+        }
+        .await;
+        match recorded {
+            Ok(w) => Ok(w),
+            Err(e) => {
+                let _ = worktree::remove(&repo.path, &dest);
+                Err(e)
+            }
+        }
+    }
+
     /// Create/reuse the ticket's worktree, inject hooks, then spawn (or resume) Claude.
     pub async fn start(&self, ticket_id: i64) -> Result<SessionHandle> {
         let ticket = self
@@ -47,51 +87,22 @@ impl SessionManager {
             .await?
             .ok_or_else(|| anyhow!("repo #{repo_id} missing"))?;
 
-        let wt = match self.store.primary_worktree_for_ticket(ticket_id).await? {
-            Some(w) => w,
-            None => {
-                let branch = worktree::branch_name(&ticket);
-                let dest = worktree::worktree_path(&repo.name, &branch);
-                let base = worktree::default_branch(&repo.path)?;
-                worktree::create(&repo.path, &base, &branch, &dest)?;
-                let canon = std::fs::canonicalize(&dest)
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|_| dest.to_string_lossy().to_string());
-                // The git worktree now exists on disk. If recording it in the DB fails, roll
-                // back the on-disk worktree so we don't leave a half-created worktree (no row,
-                // but a directory that makes the next `git worktree add` fail). Restores the
-                // "no row, no dir" invariant so a retry is clean.
-                let recorded = async {
-                    let id = self
-                        .store
-                        .add_worktree(ticket_id, repo_id, &branch, &canon, false)
-                        .await?;
-                    self.store
-                        .get_worktree(id)
-                        .await?
-                        .ok_or_else(|| anyhow!("worktree insert failed"))
-                }
-                .await;
-                match recorded {
-                    Ok(w) => w,
-                    Err(e) => {
-                        let _ = worktree::remove(&repo.path, &dest);
-                        return Err(e);
-                    }
-                }
-            }
-        };
+        let wt = self.ensure_primary_worktree(&ticket, repo_id, &repo).await?;
 
         crate::settings::inject_hooks(&wt.path, self.hook_port)?;
 
-        let resume = self
-            .store
-            .latest_claude_session_id_for_ticket(ticket_id)
-            .await?;
-        // The very first session for a ticket runs in plan mode to build the task list
-        // before any work. Only once: never on resume, and never again after re-entering
-        // In Progress (gated by the persisted `planned` flag, set right after launch).
-        let do_plan = resume.is_none() && ticket.planned == 0;
+        // The very first work session for a ticket runs in plan mode to build the task list
+        // from the spec, and ALWAYS starts fresh — never `--resume`. Resuming here would
+        // continue an earlier conversation (in particular the grill/spec interview, which
+        // shares this worktree's cwd) instead of implementing the spec. Only after that
+        // one-time plan run (persisted via `planned`) do later sessions resume the work
+        // conversation to continue where they left off.
+        let do_plan = ticket.planned == 0;
+        let resume = if do_plan {
+            None
+        } else {
+            self.store.latest_claude_session_id_for_ticket(ticket_id).await?
+        };
         // Configured permission mode (DESIGN Q1: autonomy). Defaults to `auto`; the initial
         // plan run forces `plan` regardless.
         let configured_mode = self
@@ -128,11 +139,20 @@ impl SessionManager {
         })
     }
 
-    /// Start a worktree-less "spec" session: runs an interactive grill interview in plan
-    /// mode directly in the repo root to produce the ticket's spec, before any work begins.
-    /// No worktree/branch is created; the ticket is flagged `drafting` until the spec is
-    /// captured (on ExitPlanMode, by the hook server). Does not move the ticket off Todo.
-    pub async fn start_spec_session(&self, ticket_id: i64) -> Result<SessionHandle> {
+    /// Start a worktree-less "spec" session: runs an interactive grill interview in plan mode
+    /// to produce the ticket's spec, before any work begins. No worktree/branch is created; the
+    /// ticket is flagged `drafting` until the spec is captured (on ExitPlanMode, by the hook
+    /// server). Does not move the ticket off Todo. `seed` is optional opening context for the
+    /// interview (e.g. a Jira ticket's description), woven into the grill prompt but never
+    /// persisted — the captured spec comes from the grill.
+    ///
+    /// The grill runs in the ticket's **git worktree** (created/reused via
+    /// `ensure_primary_worktree`), NOT the repo root. The worktree is a unique per-ticket
+    /// directory, so its `cwd` can't be confused with another `claude` session in the same repo,
+    /// and it inherits the repo's trust (an empty non-git scratch dir would hit Claude's
+    /// interactive trust gate and never start). Plan mode keeps it read-only — it explores the
+    /// checkout but makes no commits — and the later work session reuses the same worktree.
+    pub async fn start_spec_session(&self, ticket_id: i64, seed: Option<String>) -> Result<SessionHandle> {
         let ticket = self
             .store
             .get_ticket(ticket_id)
@@ -147,17 +167,19 @@ impl SessionManager {
             .await?
             .ok_or_else(|| anyhow!("repo #{repo_id} missing"))?;
 
-        let cwd = std::fs::canonicalize(&repo.path)
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| repo.path.clone());
-        crate::settings::inject_hooks(&cwd, self.hook_port)?;
+        let wt = self.ensure_primary_worktree(&ticket, repo_id, &repo).await?;
+        crate::settings::inject_hooks(&wt.path, self.hook_port)?;
+        // Self-heal: an earlier version injected harmony's hooks into the repo root — remove
+        // them so the user's own `claude` sessions in that repo stop reporting to harmony.
+        let _ = crate::settings::remove_hooks(&repo.path, self.hook_port);
 
-        let prompt = render_grill_prompt(&ticket);
-        // Plan mode keeps the grill read-only — safe to run in the repo root itself.
-        let (master, child) = spawn_claude(&cwd, &prompt, None, "plan")?;
+        let prompt = render_grill_prompt(&ticket, seed.as_deref());
+        // Plan mode keeps the grill read-only — safe to run in the ticket's worktree.
+        let (master, child) = spawn_claude(&wt.path, &prompt, None, "plan")?;
 
-        // worktree_id = 0: no worktree row for a spec session (correlation is by cwd).
-        let session_id = self.store.add_session(ticket_id, 0, &cwd, "spec").await?;
+        // worktree_id = 0: the spec session stays worktree-less in the DB (kept out of the
+        // Sessions view); correlation is by cwd, which is now the unique worktree path.
+        let session_id = self.store.add_session(ticket_id, 0, &wt.path, "spec").await?;
         self.store.set_ticket_drafting(ticket_id, true).await?;
 
         Ok(SessionHandle {
@@ -202,12 +224,23 @@ fn render_plan_prompt(t: &Ticket) -> String {
 /// `grill-me` interview (the skill isn't installed in target repos) and ends by asking
 /// Claude to write the finished spec as its plan and present it via ExitPlanMode — which the
 /// hook server captures onto the ticket. Launched with `--permission-mode plan` (read-only).
-fn render_grill_prompt(t: &Ticket) -> String {
-    let composed = crate::spec::compose_spec(t);
-    let seed = if composed.trim().is_empty() {
+fn render_grill_prompt(t: &Ticket, seed: Option<&str>) -> String {
+    // Opening context = the ticket's existing spec/fields plus any transient seed (e.g. a Jira
+    // description), whichever are present.
+    let mut idea = crate::spec::compose_spec(t);
+    if let Some(s) = seed {
+        let s = s.trim();
+        if !s.is_empty() {
+            if !idea.trim().is_empty() {
+                idea.push_str("\n\n");
+            }
+            idea.push_str(s);
+        }
+    }
+    let seed = if idea.trim().is_empty() {
         format!("We're scoping a new task: {}", t.title)
     } else {
-        format!("We're scoping a new task — \"{}\".\n\nInitial idea:\n{}", t.title, composed)
+        format!("We're scoping a new task — \"{}\".\n\nInitial idea / context:\n{}", t.title, idea)
     };
     format!(
         "{seed}\n\n\

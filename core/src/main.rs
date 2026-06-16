@@ -72,8 +72,6 @@ enum Cmd {
         #[command(subcommand)]
         cmd: JiraCmd,
     },
-    /// Draft a ticket's spec from its linked Jira issue (one-shot `claude -p`)
-    Draft { ticket_id: i64 },
     /// Push the ticket's branch and open a draft PR (+ optional Jira writeback)
     Pr {
         ticket_id: i64,
@@ -284,58 +282,11 @@ async fn main() -> Result<()> {
                 println!("synced {} issue(s): {new} new, {upd} updated", issues.len());
             }
         },
-        Cmd::Draft { ticket_id } => {
-            let ticket = store
-                .get_ticket(ticket_id)
-                .await?
-                .ok_or_else(|| anyhow!("no such ticket #{ticket_id}"))?;
-            let key = ticket
-                .jira_key
-                .clone()
-                .ok_or_else(|| anyhow!("ticket #{ticket_id} is not linked to a Jira issue"))?;
-            let issue = harmony_core::jira::get_issue(&key).await?;
-            // Repo-aware when we can resolve a repo: Claude scans it (read-only) for real paths.
-            let repo_path = ticket_repo_path(&store, &ticket).await;
-            let aware = if repo_path.is_some() { " (repo-aware)" } else { "" };
-            println!("[draft] generating spec from {key} via `claude -p`{aware} …");
-            let spec = harmony_core::draft::draft_spec(
-                &issue.summary,
-                &issue.description,
-                repo_path.as_deref(),
-            )?;
-            let f = harmony_core::spec::parse_spec(&spec);
-            store
-                .set_ticket_spec_fields(
-                    ticket_id,
-                    &f.spec,
-                    &f.acceptance_criteria,
-                    &f.relevant_paths,
-                    &f.constraints,
-                )
-                .await?;
-            println!("\n--- drafted spec for #{ticket_id} ({key}) ---\n{spec}");
-        }
         Cmd::Pr { ticket_id, title, no_writeback, no_summary } => {
             pr_flow(&store, ticket_id, title, !no_writeback, !no_summary).await?;
         }
     }
     Ok(())
-}
-
-/// Repo filesystem path for a ticket: its assigned repo, else the default repo for its Jira
-/// project key. `None` when neither is set (so a draft stays a pure text transform).
-async fn ticket_repo_path(store: &Store, ticket: &harmony_core::models::Ticket) -> Option<String> {
-    if let Some(rid) = ticket.repo_id {
-        if let Ok(Some(r)) = store.get_repo(rid).await {
-            return Some(r.path);
-        }
-    }
-    let key = ticket.jira_key.as_deref()?;
-    let proj = key.split('-').next()?;
-    match store.default_repo_for_key(proj).await {
-        Ok(Some(r)) => Some(r.path),
-        _ => None,
-    }
 }
 
 /// A reference to the originating Jira issue for the PR body — a browse URL when the connected

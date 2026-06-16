@@ -1,9 +1,5 @@
-//! `claude -p` text helpers (DESIGN Q10/Q11):
-//!   - `draft_spec`: expand a terse Jira issue into a first-pass agent spec. Repo-aware when a
-//!     repo path is given (runs in the repo, read-only `--permission-mode plan`, so it cites
-//!     real file paths); otherwise a pure text transform in a temp dir.
-//!   - `pr_summary`: summarize a branch diff into a PR description, conforming to the repo's
-//!     pull-request template when one exists.
+//! `claude -p` PR helper: `pr_summary` summarizes a branch diff into a PR description,
+//! conforming to the repo's pull-request template when one exists.
 //!
 //! Note: `claude -p` counts against separate Agent-SDK usage credits (Phase 0 finding).
 
@@ -14,50 +10,6 @@ use anyhow::Result;
 
 /// Max diff bytes piped to `claude` for a PR summary — keep the call fast and within context.
 const MAX_DIFF_BYTES: usize = 60 * 1024;
-
-/// Expand a Jira issue into an editable agent spec. When `repo_path` is `Some`, Claude runs in
-/// the repo (read-only plan mode) and is told to cite real paths; when `None` it's a pure text
-/// transform (best-guess paths).
-pub fn draft_spec(summary: &str, description: &str, repo_path: Option<&str>) -> Result<String> {
-    let desc = if description.trim().is_empty() {
-        "(no description provided)"
-    } else {
-        description
-    };
-    let paths_instruction = if repo_path.is_some() {
-        "`## Relevant paths` — explore THIS repository (read-only) and list the real, existing \
-         file paths most relevant to the work"
-    } else {
-        "`## Relevant paths` (best-guess file paths)"
-    };
-    let prompt = format!(
-        "You are drafting an implementation spec for a coding agent from a Jira ticket.\n\n\
-         Jira summary: {summary}\n\nJira description:\n{desc}\n\n\
-         Write a concise, actionable spec in markdown. Start with a short body (a `## Goal` and \
-         `## Context`), then include these exact section headings so the fields can be parsed \
-         out: `## Acceptance criteria`, {paths_instruction}, and `## Constraints`. Output ONLY \
-         the spec markdown, no preamble."
-    );
-
-    let mut cmd = Command::new("claude");
-    cmd.arg("-p").arg(&prompt);
-    match repo_path {
-        // In-repo scan: read-only plan mode lets Claude grep/read but never edit.
-        Some(path) => {
-            cmd.current_dir(path).arg("--permission-mode").arg("plan");
-        }
-        None => {
-            cmd.current_dir(std::env::temp_dir());
-        }
-    }
-    let out = cmd
-        .output()
-        .map_err(|e| crate::cmd_err::spawn_error("claude", &e))?;
-    if !out.status.success() {
-        return Err(crate::cmd_err::classify("claude", &String::from_utf8_lossy(&out.stderr)));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-}
 
 /// Summarize a branch diff into a PR description. Runs in the worktree under read-only plan mode
 /// so Claude can discover the repo's PR template(s) and conform to the most relevant one; the
