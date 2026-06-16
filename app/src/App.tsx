@@ -41,7 +41,6 @@ export function App() {
   const detailRef = useRef<HTMLElement>(null);
   // Attention notifications: track prior session states to fire on entry into "waiting".
   const prevStates = useRef<Map<number, string>>(new Map());
-  const prevDrafting = useRef<Map<number, number>>(new Map());
   const seeded = useRef(false);
   const lastAttention = useRef<number | null>(null);
   const autoSyncing = useRef(false);
@@ -88,28 +87,8 @@ export function App() {
       prevStates.current = next;
       seeded.current = true;
 
-      // Grill finished: when a ticket's `drafting` flips 1 → 0 (spec captured by the
-      // ExitPlanMode hook), auto-stop the grill session. If the ticket is already in
-      // In Progress (grilled on entry), auto-continue into the work session
-      // (plan-tasks → execute); a new-ticket grill (status "todo") just stops.
-      const liveByTicket = new Map(live.map(([tid, sid]) => [tid, sid]));
-      for (const t of tks) {
-        const was = prevDrafting.current.get(t.id);
-        if (was === 1 && t.drafting === 0) {
-          const sid = liveByTicket.get(t.id);
-          if (sid != null) api.stopSession(sid).catch(() => {});
-          if (t.status === "working") {
-            api
-              .startSession(t.id, null)
-              .then((workSid) => setLiveSessions((m) => ({ ...m, [t.id]: workSid })))
-              .catch((e) => flash(String(e)));
-            flash(`Spec ready — starting work on #${t.id}`);
-          } else {
-            flash(`Spec ready for #${t.id}`);
-          }
-        }
-      }
-      prevDrafting.current = new Map(tks.map((t) => [t.id, t.drafting]));
+      // (Grill→work handoff is now owned by the backend flow executor via the hook event bus —
+      // the frontend no longer auto-stops the grill or auto-starts work on the drafting flip.)
     } catch (e) {
       console.error(e);
     }

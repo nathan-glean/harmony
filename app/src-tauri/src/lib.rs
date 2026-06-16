@@ -933,6 +933,18 @@ async fn apply_event(
     for action in &decision.actions {
         run_action(app, state, &ticket, *action, force).await?;
     }
+    // After a review completes, fingerprint the reviewed HEAD so `/review` isn't re-run until
+    // the branch changes again (`flow::Ctx.review_current`).
+    if event == Event::ReviewFinished {
+        if let Ok(Some(wt)) = state.store.primary_worktree_for_ticket(ticket_id).await {
+            let path = wt.path.clone();
+            if let Ok(Ok(sha)) =
+                tokio::task::spawn_blocking(move || harmony_core::github::head_sha(&path)).await
+            {
+                let _ = state.store.mark_reviewed(ticket_id, &sha).await;
+            }
+        }
+    }
     let target = decision.target.as_status();
     state.store.set_ticket_status(ticket_id, target).await.map_err(|e| e.to_string())?;
     apply_jira_column(state, ticket_id, target).await;
@@ -1077,13 +1089,33 @@ pub fn run() {
                 // Sessions don't survive a process restart (PTYs are our children), so
                 // any still-open session in the DB is a zombie — mark it ended.
                 let _ = store.end_all_open_sessions().await;
-                // Run the hook server in-process (same one the CLI uses).
-                let _ = harmony_core::hooks::spawn_server(Arc::new(store.clone()), HOOK_PORT).await;
+                // Hook server → executor channel: the hook raises domain events (grill/work/
+                // review done); the consumer task below runs them through the flow executor.
+                let (tx, mut rx) =
+                    tokio::sync::mpsc::unbounded_channel::<harmony_core::hooks::SystemEvent>();
+                let _ =
+                    harmony_core::hooks::spawn_server(Arc::new(store.clone()), HOOK_PORT, Some(tx)).await;
                 handle.manage(AppState {
                     store,
                     sessions: Arc::new(Mutex::new(HashMap::new())),
                     reattach: Mutex::new(reattach),
                     stopping: Arc::new(Mutex::new(HashSet::new())),
+                });
+                // Consume system events and drive the flow executor (auto-advance).
+                let ev_handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    use harmony_core::hooks::SystemEvent;
+                    while let Some(ev) = rx.recv().await {
+                        let (ticket_id, event) = match ev {
+                            SystemEvent::GrillFinished { ticket_id } => (ticket_id, Event::GrillFinished),
+                            SystemEvent::WorkFinished { ticket_id } => (ticket_id, Event::WorkFinished),
+                            SystemEvent::ReviewFinished { ticket_id } => (ticket_id, Event::ReviewFinished),
+                        };
+                        let state = ev_handle.state::<AppState>();
+                        if let Err(e) = apply_event(&ev_handle, &state, ticket_id, event, false).await {
+                            eprintln!("[flow] {event:?} for #{ticket_id} failed: {e}");
+                        }
+                    }
                 });
             });
             Ok(())

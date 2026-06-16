@@ -15,8 +15,29 @@ use axum::{
     Json, Router,
 };
 use serde_json::{json, Value};
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::store::Store;
+
+/// Domain events the hook server raises for the app's flow executor to act on (auto-advance).
+/// Absent in headless/CLI mode (no executor) — see `HookCtx::events`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemEvent {
+    /// A spec/grill session captured its spec.
+    GrillFinished { ticket_id: i64 },
+    /// A work session finished its turn with no pending question (Claude is "done").
+    WorkFinished { ticket_id: i64 },
+    /// A `/review` session finished.
+    ReviewFinished { ticket_id: i64 },
+}
+
+/// Shared state for the hook router: the store, plus an optional channel to the app executor.
+/// When `events` is `None` (CLI), the hook keeps its legacy direct ticket-status writes.
+#[derive(Clone)]
+struct HookCtx {
+    store: Arc<Store>,
+    events: Option<UnboundedSender<SystemEvent>>,
+}
 
 /// Append a hook event to `~/.harmony/harmony.log`. We must NOT print hook events to
 /// stdout while a session's terminal is bridged there — it corrupts the Claude TUI.
@@ -32,16 +53,21 @@ fn log_event(line: &str) {
     }
 }
 
-fn router(store: Arc<Store>) -> Router {
+fn router(ctx: HookCtx) -> Router {
     Router::new()
         .route("/hook/:event", post(handle))
-        .with_state(store)
+        .with_state(ctx)
 }
 
-/// Bind + spawn the server as a background task (used when also running a session).
-pub async fn spawn_server(store: Arc<Store>, port: u16) -> anyhow::Result<()> {
+/// Bind + spawn the server as a background task (used when also running a session). `events` is
+/// the app executor's channel (`None` for the headless CLI).
+pub async fn spawn_server(
+    store: Arc<Store>,
+    port: u16,
+    events: Option<UnboundedSender<SystemEvent>>,
+) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
-    let app = router(store);
+    let app = router(HookCtx { store, events });
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
@@ -49,18 +75,23 @@ pub async fn spawn_server(store: Arc<Store>, port: u16) -> anyhow::Result<()> {
 }
 
 /// Bind + serve forever (the `harmony serve` debug command).
-pub async fn serve_forever(store: Arc<Store>, port: u16) -> anyhow::Result<()> {
+pub async fn serve_forever(
+    store: Arc<Store>,
+    port: u16,
+    events: Option<UnboundedSender<SystemEvent>>,
+) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
     println!("[harmony] hook server on http://127.0.0.1:{port}");
-    axum::serve(listener, router(store)).await?;
+    axum::serve(listener, router(HookCtx { store, events })).await?;
     Ok(())
 }
 
 async fn handle(
     Path(event): Path<String>,
-    State(store): State<Arc<Store>>,
+    State(ctx): State<HookCtx>,
     body: Bytes,
 ) -> Json<Value> {
+    let store = &ctx.store;
     let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     let cwd = v.get("cwd").and_then(|x| x.as_str()).unwrap_or("");
     let claude_id = v.get("session_id").and_then(|x| x.as_str());
@@ -84,11 +115,43 @@ async fn handle(
                 "Stop" | "Notification" => ("waiting", crate::status::WAITING),
                 _ => ("working", crate::status::WORKING),
             };
+            // Always update the session's own state (drives live-progress in the UI).
             let _ = store.set_session_state(sess.id, session_state, tool).await;
-            // A spec/grill session must not drag its draft ticket onto the board
-            // (it stays a Todo draft); only work sessions drive ticket status.
-            if sess.kind == "work" {
-                let _ = store.set_ticket_status(sess.ticket_id, ticket_status).await;
+
+            match &ctx.events {
+                // App mode: the flow executor owns ticket status + advancement. Emit a domain
+                // event on the relevant Stop; never write ticket status here.
+                Some(tx) => {
+                    if event == "Stop" {
+                        match sess.kind.as_str() {
+                            // Work done = a Stop with no pending question (a pending question
+                            // means Claude is waiting on the user → stay In Progress).
+                            "work" => {
+                                let pending = store
+                                    .get_ticket(sess.ticket_id)
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                    .map(|t| !t.pending_question.trim().is_empty())
+                                    .unwrap_or(false);
+                                if !pending {
+                                    let _ = tx.send(SystemEvent::WorkFinished { ticket_id: sess.ticket_id });
+                                }
+                            }
+                            "review" => {
+                                let _ = tx.send(SystemEvent::ReviewFinished { ticket_id: sess.ticket_id });
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                // Headless/CLI mode (no executor): keep the legacy direct ticket-status write so
+                // the CLI's board state still advances on Stop/working.
+                None => {
+                    if sess.kind == "work" {
+                        let _ = store.set_ticket_status(sess.ticket_id, ticket_status).await;
+                    }
+                }
             }
 
             // Claude's task list (TodoWrite) → mirror onto the ticket as a checklist.
@@ -203,6 +266,11 @@ async fn handle(
                         .await;
                     let _ = store.set_ticket_drafting(sess.ticket_id, false).await;
                     let _ = store.mark_ticket_grilled(sess.ticket_id).await;
+                    // Tell the executor the spec is ready (it stops the grill and, if the ticket
+                    // is In Progress, starts the implement session).
+                    if let Some(tx) = &ctx.events {
+                        let _ = tx.send(SystemEvent::GrillFinished { ticket_id: sess.ticket_id });
+                    }
                 }
             }
 

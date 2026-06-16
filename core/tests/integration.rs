@@ -642,6 +642,101 @@ async fn hook_server_spec_session_ignores_non_plan_write() {
     assert_eq!(t.drafting, 1, "still drafting — the grill hasn't produced a spec");
 }
 
+// =====================================================================
+// 4. Hook → executor system events (Phase 2 event bus)
+// =====================================================================
+
+/// Seed a ticket + worktree + a live session of `kind`, returning (store, ticket_id, cwd).
+async fn seed_session(dir: &TempDir, kind: &str) -> (Arc<Store>, i64, String) {
+    let store = Arc::new(open_store(dir).await);
+    let repo_id = store.add_repo("r", dir.path().to_str().unwrap(), None).await.unwrap();
+    let ticket_id = store.add_ticket(None, "local", "T", "", Some(repo_id)).await.unwrap();
+    let cwd = dir.str();
+    let wt_id = store.add_worktree(ticket_id, repo_id, "b", &cwd, false).await.unwrap();
+    let _ = store.add_session(ticket_id, wt_id, &cwd, kind).await.unwrap();
+    (store, ticket_id, cwd)
+}
+
+#[tokio::test]
+async fn hook_emits_work_finished_on_stop_without_question() {
+    let dir = TempDir::new("evwork");
+    let (store, ticket_id, cwd) = seed_session(&dir, "work").await;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<hooks::SystemEvent>();
+    let port = spawn_hooks_with(store.clone(), Some(tx)).await;
+    let client = reqwest::Client::new();
+
+    post(&client, port, "Stop", &serde_json::json!({ "cwd": cwd })).await;
+
+    let ev = rx.recv().await.expect("a system event");
+    assert_eq!(ev, hooks::SystemEvent::WorkFinished { ticket_id });
+    // App mode must NOT write ticket status directly (the executor owns it).
+    assert_eq!(store.get_ticket(ticket_id).await.unwrap().unwrap().status, status::TODO);
+}
+
+#[tokio::test]
+async fn hook_suppresses_work_finished_when_question_pending() {
+    let dir = TempDir::new("evq");
+    let (store, ticket_id, cwd) = seed_session(&dir, "work").await;
+    store.set_ticket_question(ticket_id, r#"{"session_id":1,"questions":[]}"#).await.unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<hooks::SystemEvent>();
+    let port = spawn_hooks_with(store.clone(), Some(tx)).await;
+    let client = reqwest::Client::new();
+
+    post(&client, port, "Stop", &serde_json::json!({ "cwd": cwd })).await;
+
+    // Give the handler a moment; assert no event was emitted (Claude is waiting on the user).
+    assert!(rx.try_recv().is_err(), "a pending question must suppress WorkFinished");
+}
+
+#[tokio::test]
+async fn hook_emits_review_finished_on_review_stop() {
+    let dir = TempDir::new("evreview");
+    let (store, ticket_id, cwd) = seed_session(&dir, "review").await;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<hooks::SystemEvent>();
+    let port = spawn_hooks_with(store.clone(), Some(tx)).await;
+    let client = reqwest::Client::new();
+
+    post(&client, port, "Stop", &serde_json::json!({ "cwd": cwd })).await;
+
+    assert_eq!(rx.recv().await.unwrap(), hooks::SystemEvent::ReviewFinished { ticket_id });
+}
+
+#[tokio::test]
+async fn hook_emits_grill_finished_on_spec_capture() {
+    let dir = TempDir::new("evgrill");
+    let store = Arc::new(open_store(&dir).await);
+    let repo_id = store.add_repo("r", dir.path().to_str().unwrap(), None).await.unwrap();
+    let ticket_id = store.add_ticket(None, "local", "T", "", Some(repo_id)).await.unwrap();
+    store.set_ticket_drafting(ticket_id, true).await.unwrap();
+    let cwd = dir.str();
+    store.add_session(ticket_id, 0, &cwd, "spec").await.unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<hooks::SystemEvent>();
+    let port = spawn_hooks_with(store.clone(), Some(tx)).await;
+    let client = reqwest::Client::new();
+
+    post(&client, port, "PreToolUse", &serde_json::json!({
+        "cwd": cwd,
+        "tool_name": "Write",
+        "tool_input": { "file_path": "/x/.claude/plans/foo.md", "content": "# S\n\n## Constraints\nx" }
+    })).await;
+
+    assert_eq!(rx.recv().await.unwrap(), hooks::SystemEvent::GrillFinished { ticket_id });
+    // Spec still captured as before.
+    assert_eq!(store.get_ticket(ticket_id).await.unwrap().unwrap().drafting, 0);
+}
+
+#[tokio::test]
+async fn hook_cli_mode_still_writes_status() {
+    // events=None (CLI): the hook keeps the legacy direct ticket-status write on a work Stop.
+    let dir = TempDir::new("evcli");
+    let (store, ticket_id, cwd) = seed_session(&dir, "work").await;
+    let port = spawn_hooks(store.clone()).await; // None
+    let client = reqwest::Client::new();
+
+    post(&client, port, "Stop", &serde_json::json!({ "cwd": cwd })).await;
+    assert_eq!(store.get_ticket(ticket_id).await.unwrap().unwrap().status, status::WAITING);
+}
+
 // ---- helpers -------------------------------------------------------------
 
 fn sample_ticket() -> harmony_core::models::Ticket {
@@ -695,13 +790,21 @@ fn branch_exists(repo: &str, branch: &str) -> bool {
         .success()
 }
 
-/// Bind the hook server on a free ephemeral port and return it.
+/// Bind the hook server on a free ephemeral port (no executor channel) and return it.
 async fn spawn_hooks(store: Arc<Store>) -> u16 {
+    spawn_hooks_with(store, None).await
+}
+
+/// Bind the hook server with an optional system-event channel (app mode) and return the port.
+async fn spawn_hooks_with(
+    store: Arc<Store>,
+    events: Option<tokio::sync::mpsc::UnboundedSender<hooks::SystemEvent>>,
+) -> u16 {
     let port = {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         l.local_addr().unwrap().port()
     };
-    hooks::spawn_server(store, port).await.unwrap();
+    hooks::spawn_server(store, port, events).await.unwrap();
     port
 }
 

@@ -213,7 +213,7 @@ async fn main() -> Result<()> {
             }
         },
         Cmd::Serve { port } => {
-            hooks::serve_forever(store, port).await?;
+            hooks::serve_forever(store, port, None).await?;
         }
         Cmd::Sessions { clear_ended } => {
             if clear_ended {
@@ -402,7 +402,7 @@ async fn start_flow(
         store.set_ticket_repo(ticket_id, repo_id).await?;
     }
 
-    hooks::spawn_server(store.clone(), port).await?;
+    hooks::spawn_server(store.clone(), port, None).await?;
     println!("[harmony] hook server on http://127.0.0.1:{port}");
 
     let mgr = SessionManager::new(store.clone(), port);
