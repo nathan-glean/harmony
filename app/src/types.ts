@@ -18,6 +18,10 @@ export type Ticket = {
   constraints: string; // first-class spec field (markdown)
 };
 
+// Payload of the `pr-done` event: a background PR creation finished. `ok` false means it was
+// reverted to Human Review and `error` should be surfaced.
+export type PrDone = { ticket_id: number; ok: boolean; error: string | null };
+
 // The structured spec, as composed/parsed on the backend (matches harmony_core::spec::SpecFields).
 export type SpecFields = {
   spec: string;

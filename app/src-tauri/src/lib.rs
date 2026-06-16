@@ -54,6 +54,15 @@ struct SessionExit {
     code: i32,
 }
 
+/// Emitted when a background PR-creation finishes. `ok` false means it failed and the ticket was
+/// moved back to Human Review; `error` carries the reason for a toast.
+#[derive(Clone, Serialize)]
+struct PrDone {
+    ticket_id: i64,
+    ok: bool,
+    error: Option<String>,
+}
+
 // ---- board / ticket commands --------------------------------------------
 
 #[tauri::command]
@@ -476,7 +485,7 @@ async fn jira_detail(state: State<'_, AppState>, ticket_id: i64) -> Result<JiraD
 
 #[tauri::command]
 async fn open_pr(state: State<'_, AppState>, ticket_id: i64) -> Result<String, String> {
-    let url = open_pr_for(&state, ticket_id).await?;
+    let url = open_pr_for(&state.store, ticket_id).await?;
     state
         .store
         .set_ticket_status(ticket_id, harmony_core::status::IN_REVIEW)
@@ -487,21 +496,19 @@ async fn open_pr(state: State<'_, AppState>, ticket_id: i64) -> Result<String, S
 
 /// Push the branch and open the draft PR (generated body, Jira writeback). Does NOT change the
 /// ticket column — the caller (the `open_pr` command, or the flow executor) owns the status.
-async fn open_pr_for(state: &AppState, ticket_id: i64) -> Result<String, String> {
-    let ticket = state
-        .store
+/// Takes `&Store` (not `&AppState`) so the executor can run it in a spawned background task.
+async fn open_pr_for(store: &Store, ticket_id: i64) -> Result<String, String> {
+    let ticket = store
         .get_ticket(ticket_id)
         .await
         .map_err(|e| e.to_string())?
         .ok_or("no such ticket")?;
-    let wt = state
-        .store
+    let wt = store
         .primary_worktree_for_ticket(ticket_id)
         .await
         .map_err(|e| e.to_string())?
         .ok_or("no worktree — start a session first")?;
-    let repo = state
-        .store
+    let repo = store
         .get_repo(wt.repo_id)
         .await
         .map_err(|e| e.to_string())?
@@ -947,7 +954,14 @@ async fn apply_event(
             let _ = tokio::task::spawn_blocking(move || harmony_core::github::commit_all(&path, &msg)).await;
         }
     }
+    // `OpenPr` is slow (Claude-generated body + push + gh create) — run it in the background so
+    // the card moves to the PR column immediately with a loading indicator. Every other action
+    // runs synchronously here.
+    let opening_pr = decision.actions.contains(&Action::OpenPr);
     for action in &decision.actions {
+        if *action == Action::OpenPr {
+            continue;
+        }
         run_action(app, state, &ticket, *action, force).await?;
     }
     // After a review completes, fingerprint the reviewed HEAD so `/review` isn't re-run until
@@ -966,6 +980,33 @@ async fn apply_event(
     state.store.set_ticket_status(ticket_id, target).await.map_err(|e| e.to_string())?;
     apply_jira_column(state, ticket_id, target).await;
     let _ = app.emit("ticket-updated", ticket_id);
+
+    // Background PR creation: the card is already in the PR column; signal a loading indicator,
+    // create the PR off-thread, and revert to Human Review if it fails.
+    if opening_pr {
+        let _ = app.emit("pr-opening", ticket_id);
+        let store = state.store.clone();
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            match open_pr_for(&store, ticket_id).await {
+                Ok(_url) => {
+                    let _ = app.emit("pr-done", PrDone { ticket_id, ok: true, error: None });
+                }
+                Err(e) => {
+                    // Only revert if the user hasn't since moved the ticket elsewhere.
+                    if let Ok(Some(t)) = store.get_ticket(ticket_id).await {
+                        if t.status == harmony_core::status::IN_REVIEW {
+                            let _ = store
+                                .set_ticket_status(ticket_id, harmony_core::status::WAITING)
+                                .await;
+                        }
+                    }
+                    let _ = app.emit("pr-done", PrDone { ticket_id, ok: false, error: Some(e) });
+                    let _ = app.emit("ticket-updated", ticket_id);
+                }
+            }
+        });
+    }
     Ok(())
 }
 
@@ -998,9 +1039,9 @@ async fn run_action(
             let handle = mgr().start_review(id).await.map_err(|e| e.to_string())?;
             wire_session(app, state, handle, id)?;
         }
-        Action::OpenPr => {
-            open_pr_for(state, id).await?;
-        }
+        // `OpenPr` is handled asynchronously by `apply_event` (so the card moves immediately with
+        // a loading indicator); it's intentionally a no-op here in the synchronous action loop.
+        Action::OpenPr => {}
         Action::MergePr => {
             let wt = state
                 .store

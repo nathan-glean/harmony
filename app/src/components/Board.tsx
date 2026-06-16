@@ -7,12 +7,14 @@ export function Board({
   tickets,
   selectedId,
   progress,
+  openingPr,
   onSelect,
   onMove,
 }: {
   tickets: Ticket[];
   selectedId: number | null;
   progress: Record<number, SessionProgress>;
+  openingPr: Set<number>;
   onSelect: (t: Ticket) => void;
   onMove: (id: number, status: string) => void;
 }) {
@@ -47,7 +49,11 @@ export function Board({
               {items.map((t) => (
                 <button
                   key={t.id}
-                  className={"card" + (t.id === selectedId ? " selected" : "")}
+                  className={
+                    "card" +
+                    (t.id === selectedId ? " selected" : "") +
+                    (openingPr.has(t.id) ? " card-busy" : "")
+                  }
                   draggable
                   onDragStart={(e) => {
                     e.dataTransfer.setData("text/plain", String(t.id));
@@ -67,6 +73,12 @@ export function Board({
                   <div className="card-title">{t.title}</div>
                   {progress[t.id] && (
                     <ProgressLine p={progress[t.id]} className="card-progress" />
+                  )}
+                  {openingPr.has(t.id) && (
+                    <div className="card-loading">
+                      <span className="spinner" />
+                      Opening PR…
+                    </div>
                   )}
                 </button>
               ))}

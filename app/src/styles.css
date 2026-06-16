@@ -121,9 +121,25 @@ button:disabled { opacity: 0.5; cursor: default; }
 
 .card {
   text-align: left; width: 100%; background: var(--panel); border: 1px solid var(--border);
-  border-radius: 8px; padding: 10px; display: block;
+  border-radius: 8px; padding: 10px; display: block; position: relative;
 }
 .card.selected { border-color: var(--accent); }
+.card.card-busy { border-color: var(--accent); }
+/* "Opening PR…" overlay shown while a PR is created in the background. */
+.card-loading {
+  position: absolute; inset: 0; border-radius: 8px;
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  background: color-mix(in srgb, var(--panel) 80%, transparent);
+  backdrop-filter: blur(1px);
+  font-size: 12px; color: var(--accent); font-weight: 600; letter-spacing: 0.3px;
+}
+.spinner {
+  width: 16px; height: 16px; border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  border-top-color: var(--accent);
+  animation: harmony-spin 0.7s linear infinite;
+}
+@keyframes harmony-spin { to { transform: rotate(360deg); } }
 .card-key { font-size: 11px; color: var(--accent); margin-bottom: 4px; }
 .card-key .local { color: var(--muted); }
 .card-title { font-size: 13px; }

@@ -20,7 +20,7 @@ import { TranscriptPane } from "./components/TranscriptPane";
 import { ProgressLine } from "./components/ProgressLine";
 import { TerminalView } from "./components/Terminal";
 import { api } from "./api";
-import type { Ticket, Repo, SessionView, WorktreeView, PendingQuestion, SessionProgress, SessionExit } from "./types";
+import type { Ticket, Repo, SessionView, WorktreeView, PendingQuestion, SessionProgress, SessionExit, PrDone } from "./types";
 
 export function App() {
   const [view, setView] = useState<"board" | "sessions" | "worktrees" | "settings">("board");
@@ -28,6 +28,8 @@ export function App() {
   const [sessions, setSessions] = useState<SessionView[]>([]);
   const [worktrees, setWorktrees] = useState<WorktreeView[]>([]);
   const [liveSessionIds, setLiveSessionIds] = useState<Set<number>>(new Set());
+  // Tickets whose PR is being created in the background (show a loading indicator).
+  const [openingPr, setOpeningPr] = useState<Set<number>>(new Set());
   const [selected, setSelected] = useState<Ticket | null>(null);
   const [spec, setSpec] = useState("");
   // First-class spec fields, edited alongside the spec body.
@@ -348,6 +350,31 @@ export function App() {
     };
   }, [refresh]);
 
+  // Background PR creation: show a loading indicator on the card while it's opening, and revert
+  // (backend already moved it back to Human Review) + toast on failure.
+  useEffect(() => {
+    const unOpening = listen<number>("pr-opening", (e) => {
+      const id = e.payload;
+      setOpeningPr((s) => new Set(s).add(id));
+      // Optimistically jump the card to the PR column (the backend already set it).
+      setTickets((ts) => ts.map((t) => (t.id === id ? { ...t, status: "in_review" } : t)));
+    });
+    const unDone = listen<PrDone>("pr-done", (e) => {
+      const { ticket_id, ok, error } = e.payload;
+      setOpeningPr((s) => {
+        const next = new Set(s);
+        next.delete(ticket_id);
+        return next;
+      });
+      if (!ok) flash(error ?? `Opening the PR for #${ticket_id} failed`);
+      refresh();
+    });
+    return () => {
+      unOpening.then((u) => u());
+      unDone.then((u) => u());
+    };
+  }, [refresh]);
+
   // Click outside the open detail panel (on empty board space) closes it.
   // Clicking another card switches instead; topbar/forms are left alone.
   useEffect(() => {
@@ -615,6 +642,7 @@ export function App() {
           tickets={tickets}
           selectedId={selected?.id ?? null}
           progress={progress}
+          openingPr={openingPr}
           onSelect={setSelected}
           onMove={moveTicket}
         />
