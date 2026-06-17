@@ -274,10 +274,18 @@ button:disabled { opacity: 0.5; cursor: default; }
 }
 
 .review-head { display: flex; justify-content: flex-end; margin-bottom: 8px; }
-.review-text {
-  margin: 0; overflow: auto; background: var(--bg);
-  border: 1px solid var(--border); border-radius: 8px; padding: 12px;
-  font: 13px/1.6 Menlo, monospace; white-space: pre-wrap; color: var(--text);
+.review-text .mdxeditor {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+  /* Map MDXEditor's design tokens onto the app theme (mirrors .md-field). */
+  --basePageBg: var(--bg);
+  --baseBg: var(--panel2);
+  --baseBorder: var(--border);
+  --baseText: var(--text);
+  --accentBase: var(--accent);
+}
+.review-text .md-content {
+  max-height: 480px; overflow: auto; padding: 4px 14px;
+  font-size: 13px; line-height: 1.6;
 }
 
 .term-head {
@@ -416,17 +424,33 @@ button:disabled { opacity: 0.5; cursor: default; }
 .comment-composer-actions { display: flex; gap: 6px; }
 .comment-composer-actions .primary { color: var(--accent); border-color: var(--accent); }
 
-/* Prism token colors (dark, Catppuccin-ish) */
-.diff .token.comment, .diff .token.prolog, .diff .token.doctype, .diff .token.cdata { color: var(--muted); font-style: italic; }
-.diff .token.punctuation { color: #9aa5ce; }
-.diff .token.keyword, .diff .token.boolean, .diff .token.tag, .diff .token.atrule { color: #bb9af7; }
-.diff .token.string, .diff .token.char, .diff .token.attr-value, .diff .token.regex { color: #9ece6a; }
-.diff .token.number, .diff .token.constant, .diff .token.symbol { color: #ff9e64; }
-.diff .token.function, .diff .token.class-name, .diff .token.builtin { color: #7aa2f7; }
-.diff .token.operator, .diff .token.entity, .diff .token.url { color: #89ddff; }
-.diff .token.property, .diff .token.attr-name, .diff .token.variable { color: #e0af68; }
-.diff .token.deleted { color: #f7768e; }
-.diff .token.inserted { color: #9ece6a; }
+/* Prism token colors (dark, Catppuccin-ish) — shared by the diff viewer and the review markdown. */
+.diff .token.comment, .diff .token.prolog, .diff .token.doctype, .diff .token.cdata,
+.review-text .token.comment, .review-text .token.prolog, .review-text .token.doctype, .review-text .token.cdata { color: var(--muted); font-style: italic; }
+.diff .token.punctuation, .review-text .token.punctuation { color: #9aa5ce; }
+.diff .token.keyword, .diff .token.boolean, .diff .token.tag, .diff .token.atrule,
+.review-text .token.keyword, .review-text .token.boolean, .review-text .token.tag, .review-text .token.atrule { color: #bb9af7; }
+.diff .token.string, .diff .token.char, .diff .token.attr-value, .diff .token.regex,
+.review-text .token.string, .review-text .token.char, .review-text .token.attr-value, .review-text .token.regex { color: #9ece6a; }
+.diff .token.number, .diff .token.constant, .diff .token.symbol,
+.review-text .token.number, .review-text .token.constant, .review-text .token.symbol { color: #ff9e64; }
+.diff .token.function, .diff .token.class-name, .diff .token.builtin,
+.review-text .token.function, .review-text .token.class-name, .review-text .token.builtin { color: #7aa2f7; }
+.diff .token.operator, .diff .token.entity, .diff .token.url,
+.review-text .token.operator, .review-text .token.entity, .review-text .token.url { color: #89ddff; }
+.diff .token.property, .diff .token.attr-name, .diff .token.variable,
+.review-text .token.property, .review-text .token.attr-name, .review-text .token.variable { color: #e0af68; }
+.diff .token.deleted, .review-text .token.deleted { color: #f7768e; }
+.diff .token.inserted, .review-text .token.inserted { color: #9ece6a; }
+
+/* Review code blocks: dark, rounded, horizontally scrollable. */
+.review-text pre.cb {
+  margin: 8px 0; padding: 10px 12px; overflow-x: auto;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+}
+.review-text pre.cb code {
+  font: 12px/1.5 Menlo, monospace; color: var(--text); background: none; white-space: pre;
+}
 
 .toast {
   position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);

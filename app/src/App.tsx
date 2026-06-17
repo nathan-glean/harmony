@@ -20,6 +20,7 @@ import { TranscriptPane } from "./components/TranscriptPane";
 import { ProgressLine } from "./components/ProgressLine";
 import { TerminalView } from "./components/Terminal";
 import { SpecEditor } from "./components/SpecEditor";
+import { MarkdownView } from "./components/MarkdownView";
 import { api } from "./api";
 import type { Ticket, Repo, SessionView, WorktreeView, PendingQuestion, SessionProgress, SessionExit, PrDone } from "./types";
 
@@ -855,7 +856,9 @@ export function App() {
                   </button>
                 </div>
                 {(liveTicket ?? selected).review_text ? (
-                  <pre className="review-text">{(liveTicket ?? selected).review_text}</pre>
+                  <div className="review-text">
+                    <MarkdownView markdown={(liveTicket ?? selected).review_text} />
+                  </div>
                 ) : (
                   <p className="empty">
                     No review yet — press “Request review” (or move the ticket through review) to
