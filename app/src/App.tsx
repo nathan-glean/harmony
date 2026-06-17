@@ -21,6 +21,7 @@ import { ProgressLine } from "./components/ProgressLine";
 import { TerminalView } from "./components/Terminal";
 import { SpecEditor } from "./components/SpecEditor";
 import { MarkdownView } from "./components/MarkdownView";
+import { ProofPane } from "./components/ProofPane";
 import { api } from "./api";
 import type { Ticket, Repo, SessionView, WorktreeView, PendingQuestion, SessionProgress, SessionExit, PrDone } from "./types";
 
@@ -33,7 +34,7 @@ export function App() {
   // Tickets whose PR is being created in the background (show a loading indicator).
   const [openingPr, setOpeningPr] = useState<Set<number>>(new Set());
   // Active tab in the ticket modal.
-  const [tab, setTab] = useState<"description" | "spec" | "diff" | "review" | "session">("spec");
+  const [tab, setTab] = useState<"description" | "spec" | "proof" | "review" | "diff" | "session">("spec");
   const [selected, setSelected] = useState<Ticket | null>(null);
   // Live terminals keyed by ticket id → session id (supports several at once).
   const [liveSessions, setLiveSessions] = useState<Record<number, number>>({});
@@ -783,10 +784,10 @@ export function App() {
                   Spec
                 </button>
                 <button
-                  className={"tab" + (tab === "diff" ? " active" : "")}
-                  onClick={() => setTab("diff")}
+                  className={"tab" + (tab === "proof" ? " active" : "")}
+                  onClick={() => setTab("proof")}
                 >
-                  Diff
+                  Proof
                 </button>
                 <button
                   className={"tab" + (tab === "review" ? " active" : "")}
@@ -796,6 +797,12 @@ export function App() {
                   {(liveTicket ?? selected).review_text ? (
                     <span className="tab-dot" title="A review is available" />
                   ) : null}
+                </button>
+                <button
+                  className={"tab" + (tab === "diff" ? " active" : "")}
+                  onClick={() => setTab("diff")}
+                >
+                  Diff
                 </button>
                 <button
                   className={"tab" + (tab === "session" ? " active" : "")}
@@ -822,12 +829,8 @@ export function App() {
                 <SpecEditor key={selected.id} ticket={liveTicket ?? selected} onSaved={refresh} />
               </div>
 
-              <div className={"tabpanel" + (tab === "diff" ? " active" : "")}>
-                {worktrees.some((w) => w.ticket_id === selected.id) ? (
-                  <DiffPane key={selected.id} ticketId={selected.id} />
-                ) : (
-                  <p className="empty">No worktree yet — move the ticket to In Progress to start work and see a diff.</p>
-                )}
+              <div className={"tabpanel" + (tab === "proof" ? " active" : "")}>
+                <ProofPane key={selected.id} ticketId={selected.id} />
               </div>
 
               <div className={"tabpanel" + (tab === "review" ? " active" : "")}>
@@ -864,6 +867,14 @@ export function App() {
                     No review yet — press “Request review” (or move the ticket through review) to
                     have Claude run <code>/review</code> and generate one.
                   </p>
+                )}
+              </div>
+
+              <div className={"tabpanel" + (tab === "diff" ? " active" : "")}>
+                {worktrees.some((w) => w.ticket_id === selected.id) ? (
+                  <DiffPane key={selected.id} ticketId={selected.id} />
+                ) : (
+                  <p className="empty">No worktree yet — move the ticket to In Progress to start work and see a diff.</p>
                 )}
               </div>
 

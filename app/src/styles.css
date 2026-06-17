@@ -322,7 +322,7 @@ button:disabled { opacity: 0.5; cursor: default; }
 .jc-head { font-size: 12px; margin-bottom: 4px; }
 .jc-body { font-size: 13px; white-space: pre-wrap; }
 
-.diffpane { display: flex; flex-direction: column; gap: 8px; }
+.diffpane, .proofpane { display: flex; flex-direction: column; gap: 8px; }
 .diffpane-head {
   display: flex; align-items: center; justify-content: space-between;
   font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted);
