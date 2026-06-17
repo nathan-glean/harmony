@@ -288,6 +288,7 @@ button:disabled { opacity: 0.5; cursor: default; }
   font-size: 13px; line-height: 1.6;
 }
 
+.session-start { display: flex; justify-content: center; padding: 16px 0; }
 .term-head {
   font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
   color: var(--muted); margin-top: 4px;

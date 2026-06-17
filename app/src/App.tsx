@@ -883,11 +883,26 @@ export function App() {
                 )}
                 {liveTicket?.todos && <Tasks todosJson={liveTicket.todos} />}
                 <TranscriptPane ticketId={selected.id} />
-                {liveSessions[selected.id] && (
+                {liveSessions[selected.id] ? (
                   <>
                     <div className="term-head">Live terminal — type to steer Claude</div>
                     <TerminalView sessionId={liveSessions[selected.id]} />
                   </>
+                ) : (
+                  <div className="session-start">
+                    <button
+                      disabled={busy !== null}
+                      title="Start a live Claude session in this ticket's worktree"
+                      onClick={() =>
+                        run("start", async () => {
+                          await openTerminal(selected);
+                          setTab("session");
+                        })
+                      }
+                    >
+                      {busy === "start" ? "Starting…" : "Start Claude"}
+                    </button>
+                  </div>
                 )}
               </div>
             </div>
