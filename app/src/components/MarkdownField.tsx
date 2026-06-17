@@ -9,6 +9,7 @@ import {
   markdownShortcutPlugin,
   codeBlockPlugin,
   codeMirrorPlugin,
+  tablePlugin,
   toolbarPlugin,
   UndoRedo,
   BoldItalicUnderlineToggles,
@@ -16,6 +17,7 @@ import {
   BlockTypeSelect,
   CreateLink,
   CodeToggle,
+  InsertTable,
 } from "@mdxeditor/editor";
 import "@mdxeditor/editor/style.css";
 
@@ -57,6 +59,8 @@ export function MarkdownField({
           codeMirrorPlugin({
             codeBlockLanguages: { "": "Plain text", text: "Plain text", ts: "TypeScript", js: "JavaScript", rust: "Rust", py: "Python", sql: "SQL", sh: "Shell", json: "JSON" },
           }),
+          // Render and round-trip GitHub-flavoured markdown tables.
+          tablePlugin(),
           markdownShortcutPlugin(),
           toolbarPlugin({
             toolbarContents: () => (
@@ -67,6 +71,7 @@ export function MarkdownField({
                 <ListsToggle />
                 <BlockTypeSelect />
                 <CreateLink />
+                <InsertTable />
               </>
             ),
           }),
