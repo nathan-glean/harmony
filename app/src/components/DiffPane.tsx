@@ -122,6 +122,24 @@ function checkClass(c: any): string {
   return "";
 }
 
+// One-line summary of CI check states for the collapsed checks header, e.g. "3 passed · 1 failed".
+function checksSummary(checks: any[]): string {
+  const counts = { ok: 0, bad: 0, pending: 0, other: 0 };
+  for (const c of checks) {
+    const k = checkClass(c);
+    if (k === "ok") counts.ok++;
+    else if (k === "bad") counts.bad++;
+    else if (k === "pending") counts.pending++;
+    else counts.other++;
+  }
+  const parts: string[] = [];
+  if (counts.ok) parts.push(`${counts.ok} passed`);
+  if (counts.bad) parts.push(`${counts.bad} failed`);
+  if (counts.pending) parts.push(`${counts.pending} pending`);
+  if (counts.other) parts.push(`${counts.other} other`);
+  return `(${parts.join(" · ") || `${checks.length}`})`;
+}
+
 // A pending comment over a (possibly multi-line) range. `anchorKey` is the change key of the
 // range's last line — where the composer/comment widget renders, GitHub-style.
 type Composing = {
@@ -155,6 +173,7 @@ export function DiffPane({ ticketId }: { ticketId: number }) {
   const [diff, setDiff] = useState("");
   const [pr, setPr] = useState<any | null>(null);
   const [checks, setChecks] = useState<any[]>([]);
+  const [checksOpen, setChecksOpen] = useState(false);
   const [comments, setComments] = useState<DiffComment[]>([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -349,20 +368,31 @@ export function DiffPane({ ticketId }: { ticketId: number }) {
       )}
 
       {checks.length > 0 && (
-        <ul className="checks">
-          {checks.map((c, i) => (
-            <li key={i} className={"chk " + checkClass(c)}>
-              <span className="chk-dot" />
-              {c.link ? (
-                <a href={c.link} target="_blank" rel="noreferrer">
-                  {c.name}
-                </a>
-              ) : (
-                c.name
-              )}
-            </li>
-          ))}
-        </ul>
+        <div className="checks-block">
+          <button
+            className="checks-toggle"
+            aria-expanded={checksOpen}
+            onClick={() => setChecksOpen((o) => !o)}
+          >
+            {checksOpen ? "▾" : "▸"} CI checks {checksSummary(checks)}
+          </button>
+          {checksOpen && (
+            <ul className="checks">
+              {checks.map((c, i) => (
+                <li key={i} className={"chk " + checkClass(c)}>
+                  <span className="chk-dot" />
+                  {c.link ? (
+                    <a href={c.link} target="_blank" rel="noreferrer">
+                      {c.name}
+                    </a>
+                  ) : (
+                    c.name
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       )}
 
       {loading && !diff ? (
