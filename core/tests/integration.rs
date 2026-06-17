@@ -760,6 +760,7 @@ fn sample_ticket() -> harmony_core::models::Ticket {
         constraints: "".into(),
         reviewed: 0,
         reviewed_sha: "".into(),
+        review_text: "".into(),
     }
 }
 

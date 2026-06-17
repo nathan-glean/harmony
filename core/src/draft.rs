@@ -31,7 +31,10 @@ pub fn pr_summary(worktree: &str, diff: &str, ticket_ref: Option<&str>) -> Resul
          there is no template, write a concise description: one short paragraph of what changed \
          and why, then a bulleted list of the notable changes.{reference}\n\n\
          Base the description on what the diff actually changes. Output ONLY the final PR \
-         description markdown, with no preamble."
+         description markdown itself — no preamble, no explanation, no sign-off. Do NOT wrap the \
+         description in a code block or fenced block (no ``` fences around the whole output). \
+         Begin your response directly with the first line of the description (the template's \
+         first line, or the first heading)."
     );
 
     let mut child = Command::new("claude")
@@ -55,7 +58,52 @@ pub fn pr_summary(worktree: &str, diff: &str, ticket_ref: Option<&str>) -> Resul
     if !out.status.success() {
         return Err(crate::cmd_err::classify("claude", &String::from_utf8_lossy(&out.stderr)));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    Ok(sanitize_pr_description(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// Clean up `claude -p`'s output into the bare PR description: trim, and — when the model ignores
+/// the prompt and wraps the whole description in a fenced block (often preceded by a reasoning
+/// sentence) — drop the preamble and unwrap the fence. A description that merely *contains* code
+/// blocks is left untouched (see `unwrap_wrapping_fence`).
+fn sanitize_pr_description(raw: &str) -> String {
+    let text = raw.trim();
+    unwrap_wrapping_fence(text).unwrap_or_else(|| text.to_string()).trim().to_string()
+}
+
+/// If `text` is a single fenced block wrapping the entire description (optionally preceded by a
+/// preamble), return its inner content; otherwise `None`. Conservative on purpose: only unwraps
+/// a clear whole-document wrapper, never a description that legitimately contains code blocks.
+fn unwrap_wrapping_fence(text: &str) -> Option<String> {
+    let is_fence = |l: &str| {
+        let t = l.trim_start();
+        t.starts_with("```") || t.starts_with("~~~")
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    let fence_idxs: Vec<usize> = lines.iter().enumerate().filter(|(_, l)| is_fence(l)).map(|(i, _)| i).collect();
+    if fence_idxs.len() < 2 {
+        return None;
+    }
+    let open = *fence_idxs.first().unwrap();
+    let close = *fence_idxs.last().unwrap();
+    if open >= close {
+        return None;
+    }
+    // The wrapper must close at the end of the output (only blank lines may follow).
+    if lines[close + 1..].iter().any(|l| !l.trim().is_empty()) {
+        return None;
+    }
+    // Opener language label, e.g. "```markdown" → "markdown".
+    let lang = lines[open].trim_start().trim_start_matches(['`', '~']).trim().to_lowercase();
+    let first_nonblank = lines.iter().position(|l| !l.trim().is_empty());
+
+    // (a) explicit whole-doc wrapper (```markdown / ```md), preamble allowed; or
+    // (b) a bare ``` block wrapping everything, no inner fences and no preamble.
+    let is_wrapper = matches!(lang.as_str(), "markdown" | "md")
+        || (lang.is_empty() && fence_idxs.len() == 2 && first_nonblank == Some(open));
+    if !is_wrapper {
+        return None;
+    }
+    Some(lines[open + 1..close].join("\n"))
 }
 
 /// Cap a diff to `max` bytes on a line boundary, appending a truncation marker when cut. Keeps
@@ -86,5 +134,143 @@ mod tests {
         assert!(out.starts_with("aaaa\nbbbb\n"));
         assert!(!out.contains("cccc"));
         assert!(out.contains("(diff truncated)"));
+    }
+
+    #[test]
+    fn sanitize_strips_preamble_and_markdown_fence() {
+        let raw = "I'll fill out the Analytics template, which fits these changes.\n\n\
+                   ```markdown\n## Description\n\nModels the quiz events.\n\n- item one\n```\n";
+        let out = sanitize_pr_description(raw);
+        assert_eq!(out, "## Description\n\nModels the quiz events.\n\n- item one");
+        assert!(!out.contains("I'll fill out"));
+        assert!(!out.contains("```"));
+    }
+
+    #[test]
+    fn sanitize_unwraps_bare_fence_wrapping_whole_output() {
+        let raw = "```\n## Title\n\nbody text\n```";
+        assert_eq!(sanitize_pr_description(raw), "## Title\n\nbody text");
+    }
+
+    #[test]
+    fn sanitize_keeps_description_with_inner_code_block() {
+        // A legitimate description that merely contains a code block must be left intact.
+        let raw = "## Description\n\nRuns this query:\n\n```sql\nSELECT 1;\n```\n\nDone.";
+        assert_eq!(sanitize_pr_description(raw), raw);
+    }
+
+    #[test]
+    fn sanitize_leaves_clean_description_unchanged() {
+        let raw = "## Description\n\nA plain description with no fences.";
+        assert_eq!(sanitize_pr_description(&format!("  {raw}  \n")), raw);
+    }
+
+    // ---- should unwrap (whole-document wrappers) ----
+
+    #[test]
+    fn sanitize_unwraps_md_language_label() {
+        let raw = "```md\n## Title\n\nbody\n```";
+        assert_eq!(sanitize_pr_description(raw), "## Title\n\nbody");
+    }
+
+    #[test]
+    fn sanitize_unwraps_case_insensitive_language() {
+        for label in ["Markdown", "MARKDOWN", "Md"] {
+            let raw = format!("```{label}\n## Title\n\nbody\n```");
+            assert_eq!(sanitize_pr_description(&raw), "## Title\n\nbody", "label={label}");
+        }
+    }
+
+    #[test]
+    fn sanitize_unwraps_markdown_fence_without_preamble() {
+        let raw = "```markdown\n## Title\n\nbody text\n```";
+        assert_eq!(sanitize_pr_description(raw), "## Title\n\nbody text");
+    }
+
+    #[test]
+    fn sanitize_unwraps_tilde_fence_wrapper() {
+        let raw = "~~~markdown\n## Title\n\nbody\n~~~";
+        assert_eq!(sanitize_pr_description(raw), "## Title\n\nbody");
+    }
+
+    #[test]
+    fn sanitize_allows_trailing_blank_lines_after_close() {
+        let raw = "```markdown\n## Title\n\nbody\n```\n\n   \n\n";
+        assert_eq!(sanitize_pr_description(raw), "## Title\n\nbody");
+    }
+
+    #[test]
+    fn sanitize_preserves_inner_code_block_inside_markdown_wrapper() {
+        // The outer ```markdown wrapper is removed, but an inner ```sql block stays intact.
+        let raw = "I'll write the description.\n\n\
+                   ```markdown\n## Description\n\nRuns:\n\n```sql\nSELECT 1;\n```\n\nDone.\n```";
+        let out = sanitize_pr_description(raw);
+        assert_eq!(out, "## Description\n\nRuns:\n\n```sql\nSELECT 1;\n```\n\nDone.");
+        assert!(out.contains("```sql"));
+        assert!(!out.contains("I'll write"));
+    }
+
+    // ---- should NOT unwrap (conservative guards) ----
+
+    #[test]
+    fn sanitize_does_not_unwrap_bare_fence_with_preamble() {
+        // A bare ``` fence with leading prose is ambiguous (could be legit content) — left as-is.
+        let raw = "Here is the migration:\n\n```\nSELECT 1;\n```";
+        assert_eq!(sanitize_pr_description(raw), raw);
+    }
+
+    #[test]
+    fn sanitize_keeps_content_when_text_follows_closing_fence() {
+        // Non-blank content after the closing fence means it isn't a whole-document wrapper.
+        let raw = "```markdown\n## Title\n\nbody\n```\n\nTrailing note outside the fence.";
+        assert_eq!(sanitize_pr_description(raw), raw);
+    }
+
+    #[test]
+    fn sanitize_keeps_unterminated_single_fence() {
+        let raw = "```markdown\n## Title\n\nbody with no closing fence";
+        assert_eq!(sanitize_pr_description(raw), raw);
+    }
+
+    #[test]
+    fn sanitize_keeps_two_separate_code_blocks() {
+        let raw = "## Steps\n\nFirst:\n\n```sql\nSELECT 1;\n```\n\nThen:\n\n```sql\nSELECT 2;\n```\n\nEnd.";
+        assert_eq!(sanitize_pr_description(raw), raw);
+    }
+
+    #[test]
+    fn sanitize_keeps_inline_code_not_a_fence() {
+        // Lines starting with a single/double backtick are inline code, not a ``` fence.
+        let raw = "`foo` is the new flag.\n\n``bar`` too.";
+        assert_eq!(sanitize_pr_description(raw), raw);
+    }
+
+    // ---- misc / robustness ----
+
+    #[test]
+    fn sanitize_handles_empty_and_whitespace_only() {
+        assert_eq!(sanitize_pr_description(""), "");
+        assert_eq!(sanitize_pr_description("   \n\n  \t\n"), "");
+    }
+
+    #[test]
+    fn sanitize_strips_realistic_full_description() {
+        let raw = "I'll fill out the Analytics template, which fits these dbt modelling changes.\n\n\
+                   ```markdown\n\
+                   <!-- template:analytics -->\n\
+                   [![Jira: DNA-1801](https://example/badge)](https://example/browse/DNA-1801)\n\n\
+                   ## Description & motivation\n\n\
+                   Models the Written Answer Quiz elastic events.\n\n\
+                   ## Type of change\n\n\
+                   - New model\n\n\
+                   ## To-do before merge\n\n\
+                   - [ ] Run new models locally\n\
+                   ```";
+        let out = sanitize_pr_description(raw);
+        assert!(out.starts_with("<!-- template:analytics -->"), "got: {out:?}");
+        assert!(out.contains("## Description & motivation"));
+        assert!(out.contains("- [ ] Run new models locally"));
+        assert!(!out.contains("I'll fill out"));
+        assert!(!out.contains("```"));
     }
 }
