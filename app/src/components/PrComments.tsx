@@ -30,11 +30,14 @@ function timeAgo(iso: string): string {
 }
 
 /** Read-only list of the GitHub PR's comments (conversation, review summaries, inline). Shown in
- * the Review tab below Claude's /review output. */
-export function PrComments({ ticketId }: { ticketId: number }) {
+ * the Review tab below Claude's /review output. Each can be "flagged for Claude" — a local note
+ * (target `pr_comment`) added to the feedback queue. */
+export function PrComments({ ticketId, onCommentAdded }: { ticketId: number; onCommentAdded: () => void }) {
   const [comments, setComments] = useState<PrComment[]>([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [flagging, setFlagging] = useState<number | null>(null);
+  const [note, setNote] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -51,6 +54,20 @@ export function PrComments({ ticketId }: { ticketId: number }) {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Add a local "pr_comment"-target note for Claude, anchored to this PR comment.
+  const flagForClaude = async (c: PrComment) => {
+    const snippet = c.body.trim().replace(/\s+/g, " ").slice(0, 100);
+    const anchor = `${c.author || "unknown"}: "${snippet}"`;
+    try {
+      await api.addComment(ticketId, "pr_comment", anchor, note);
+      setFlagging(null);
+      setNote("");
+      onCommentAdded();
+    } catch (e) {
+      setErr(String(e));
+    }
+  };
 
   return (
     <div className="pr-comments">
@@ -91,6 +108,30 @@ export function PrComments({ ticketId }: { ticketId: number }) {
               <div className="comment-body">{c.body}</div>
             ) : (
               <div className="comment-body muted">(no description)</div>
+            )}
+            <div className="comment-actions">
+              {flagging === i ? null : (
+                <button onClick={() => { setFlagging(i); setNote(""); }}>Flag for Claude</button>
+              )}
+            </div>
+            {flagging === i && (
+              <div className="comment-composer">
+                <textarea
+                  placeholder={`Note for Claude about ${c.author || "this"}'s comment…`}
+                  value={note}
+                  onChange={(e) => setNote(e.target.value)}
+                />
+                <div className="comment-composer-actions">
+                  <button
+                    className="primary"
+                    disabled={!note.trim()}
+                    onClick={() => flagForClaude(c)}
+                  >
+                    Add to feedback
+                  </button>
+                  <button onClick={() => setFlagging(null)}>Cancel</button>
+                </div>
+              </div>
             )}
           </div>
         ))

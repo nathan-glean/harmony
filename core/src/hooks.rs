@@ -31,6 +31,8 @@ pub enum SystemEvent {
     ReviewFinished { ticket_id: i64 },
     /// An autonomous CI-fix session finished (commit + push its changes to re-trigger CI).
     FixFinished { ticket_id: i64 },
+    /// A feedback-addressing session finished (commit + push so the PR reflects the changes).
+    AddressFinished { ticket_id: i64 },
 }
 
 /// Shared state for the hook router: the store, plus an optional channel to the app executor.
@@ -52,6 +54,31 @@ fn log_event(line: &str) {
     }
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         let _ = writeln!(f, "{line}");
+    }
+}
+
+/// Extract a plan/spec document from a `PreToolUse` payload: an `ExitPlanMode` call's `plan`
+/// field (older Claude Code), or the content of a `Write` to a `~/.claude/plans/*.md` file
+/// (current Claude Code). `None` for any other tool / non-plan write.
+fn extract_plan(v: &Value, tool: Option<&str>) -> Option<String> {
+    match tool {
+        Some("ExitPlanMode") => v
+            .get("tool_input")
+            .and_then(|ti| ti.get("plan"))
+            .and_then(|p| p.as_str())
+            .map(|s| s.to_string())
+            // Fallback if the field name differs: serialise the whole input.
+            .or_else(|| v.get("tool_input").map(|ti| ti.to_string())),
+        Some("Write") => {
+            let ti = v.get("tool_input");
+            let path = ti.and_then(|t| t.get("file_path")).and_then(|x| x.as_str()).unwrap_or("");
+            if path.contains("/.claude/plans/") {
+                ti.and_then(|t| t.get("content")).and_then(|x| x.as_str()).map(|s| s.to_string())
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
 }
 
@@ -146,6 +173,9 @@ async fn handle(
                             "fix" => {
                                 let _ = tx.send(SystemEvent::FixFinished { ticket_id: sess.ticket_id });
                             }
+                            "address" => {
+                                let _ = tx.send(SystemEvent::AddressFinished { ticket_id: sess.ticket_id });
+                            }
                             _ => {}
                         }
                     }
@@ -233,32 +263,7 @@ async fn handle(
             // Capture the plan from whichever fired, split it into the first-class fields, and
             // clear `drafting` (the app then auto-stops the grill).
             if sess.kind == "spec" && event == "PreToolUse" {
-                let plan = match tool {
-                    Some("ExitPlanMode") => v
-                        .get("tool_input")
-                        .and_then(|ti| ti.get("plan"))
-                        .and_then(|p| p.as_str())
-                        .map(|s| s.to_string())
-                        // Fallback if the field name differs: serialise the whole input.
-                        .or_else(|| v.get("tool_input").map(|ti| ti.to_string())),
-                    Some("Write") => {
-                        let ti = v.get("tool_input");
-                        let path = ti
-                            .and_then(|t| t.get("file_path"))
-                            .and_then(|x| x.as_str())
-                            .unwrap_or("");
-                        // Only the plan file is the spec — not some other file the grill writes.
-                        if path.contains("/.claude/plans/") {
-                            ti.and_then(|t| t.get("content"))
-                                .and_then(|x| x.as_str())
-                                .map(|s| s.to_string())
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None,
-                };
-                if let Some(plan) = plan {
+                if let Some(plan) = extract_plan(&v, tool) {
                     let f = crate::spec::parse_spec(&plan);
                     let _ = store
                         .set_ticket_spec_fields(
@@ -276,6 +281,16 @@ async fn handle(
                     if let Some(tx) = &ctx.events {
                         let _ = tx.send(SystemEvent::GrillFinished { ticket_id: sess.ticket_id });
                     }
+                }
+            }
+
+            // Address session: a plan-file write / ExitPlanMode means feedback contradicted the
+            // spec, so Claude proposed a revised spec. Store it as a *proposed* spec for the user
+            // to accept/reject in the Spec tab — never overwrite the live spec here (propose &
+            // confirm). The session keeps running to implement the non-contradicting feedback.
+            if sess.kind == "address" && event == "PreToolUse" {
+                if let Some(plan) = extract_plan(&v, tool) {
+                    let _ = store.set_ticket_proposed_spec(sess.ticket_id, &plan).await;
                 }
             }
 

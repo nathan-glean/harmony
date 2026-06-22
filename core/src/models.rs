@@ -61,6 +61,10 @@ pub struct Ticket {
     pub ci_fix_attempts: i64,
     /// JSON of the latest `crate::ci::CiTriage` (verdict + reason + failing checks), for the UI.
     pub ci_triage: String,
+    /// A spec update Claude proposed while addressing feedback that contradicted the spec
+    /// (propose & confirm). Markdown of the full revised spec; empty when none pending. The user
+    /// accepts (→ live spec fields) or rejects it in the Spec tab.
+    pub proposed_spec: String,
 }
 
 /// An isolated git worktree for a ticket. Per-ticket and reused; `is_alternate`
@@ -94,10 +98,12 @@ pub struct Session {
     pub kind: String,
 }
 
-/// A reviewer comment left on a specific diff line, for a ticket. Surfaced in the diff
-/// pane (GitHub-style inline cards) and, while `status == "open"`, injected into Claude's
-/// next resume prompt so it can address the feedback. `side` is which gutter the comment
-/// anchors to ("new" for added/context on the new file, "old" for the original).
+/// A reviewer comment left for a ticket. Surfaced in the review surfaces and, while
+/// `status == "open"`, injected into Claude's next feedback/resume prompt so it can address it.
+/// `target` selects the surface: `diff` (anchored to `file_path`/`line`/`side`, GitHub-style
+/// inline card), `general` (a free-form note/suggestion), `review` (on Claude's `/review`), or
+/// `pr_comment` (on a GitHub PR comment). For non-diff targets `anchor` carries the context (the
+/// quoted snippet, or `author: "snippet"` for a PR comment) and the diff fields are empty/zero.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct DiffComment {
     pub id: i64,
@@ -109,6 +115,8 @@ pub struct DiffComment {
     pub body: String,
     pub status: String, // "open" | "sent" | "resolved"
     pub created_at: i64,
+    pub target: String, // "general" | "diff" | "review" | "pr_comment"
+    pub anchor: String, // context for non-diff targets (quoted snippet / PR author+snippet)
 }
 
 /// A worktree enriched with its ticket + repo info, for the Worktrees view.

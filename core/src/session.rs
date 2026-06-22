@@ -115,7 +115,7 @@ impl SessionManager {
             if pending.is_empty() {
                 "Continue where you left off.".to_string()
             } else {
-                render_review_comments_prompt(&pending)
+                render_feedback_prompt(&pending, &ticket)
             }
         } else {
             render_implement_prompt(&ticket)
@@ -251,6 +251,43 @@ impl SessionManager {
         Ok(SessionHandle { session_id, master, child })
     }
 
+    /// Start an autonomous session to address review feedback (comments from any surface) and
+    /// improve the PR. Resumes the worktree's Claude (so it keeps context), `bypassPermissions`,
+    /// with all open comments folded into the prompt + the spec reconcile instruction. Marks the
+    /// folded comments sent. Errors when there's no pending feedback. Session `kind = "address"`.
+    pub async fn start_address(&self, ticket_id: i64) -> Result<SessionHandle> {
+        let ticket = self
+            .store
+            .get_ticket(ticket_id)
+            .await?
+            .ok_or_else(|| anyhow!("no such ticket #{ticket_id}"))?;
+        let repo_id = ticket
+            .repo_id
+            .ok_or_else(|| anyhow!("ticket #{ticket_id} has no repo assigned"))?;
+        let repo = self
+            .store
+            .get_repo(repo_id)
+            .await?
+            .ok_or_else(|| anyhow!("repo #{repo_id} missing"))?;
+
+        let pending = self.store.pending_diff_comments_for_ticket(ticket_id).await?;
+        if pending.is_empty() {
+            return Err(anyhow!("no pending feedback to address"));
+        }
+
+        let wt = self.ensure_primary_worktree(&ticket, repo_id, &repo).await?;
+        crate::settings::inject_hooks(&wt.path, self.hook_port)?;
+
+        let resume = self.store.latest_claude_session_id_for_ticket(ticket_id).await?;
+        let prompt = render_feedback_prompt(&pending, &ticket);
+        let (master, child) = spawn_claude(&wt.path, &prompt, resume.as_deref(), "bypassPermissions")?;
+        self.store.mark_diff_comments_sent(ticket_id).await?;
+
+        let session_id = self.store.add_session(ticket_id, wt.id, &wt.path, "address").await?;
+        self.store.set_ticket_status(ticket_id, crate::status::WORKING).await?;
+        Ok(SessionHandle { session_id, master, child })
+    }
+
     pub async fn end_session(&self, session_id: i64) -> Result<()> {
         self.store.end_session(session_id).await
     }
@@ -271,22 +308,71 @@ fn render_review_prompt(t: &Ticket) -> String {
     )
 }
 
-/// Opening prompt for a resume that carries reviewer feedback: the user left inline comments
-/// on the diff (anchored to file:line) and wants them addressed. Each comment is rendered as a
-/// bullet so Claude can locate and act on it, then summarize what changed.
-fn render_review_comments_prompt(comments: &[DiffComment]) -> String {
+/// Opening prompt for addressing reviewer feedback. Comments may come from several surfaces
+/// (general notes, diff lines, Claude's own `/review`, GitHub PR comments); they're grouped by
+/// surface so Claude can locate and act on each, then summarize. The agreed spec is appended with
+/// a reconcile instruction: feedback that contradicts the spec must be surfaced as a *proposed*
+/// spec update (written to a plan file, captured as `proposed_spec`), not silently implemented.
+fn render_feedback_prompt(comments: &[DiffComment], t: &Ticket) -> String {
     let mut out = String::from(
-        "The reviewer left comments on your changes. Address each one, making the necessary code \
-         edits, then briefly summarize what you changed per comment. Comments are anchored to \
-         `file:line`:\n\n",
+        "The reviewer left feedback on this PR. Address each item below — make the necessary code \
+         edits — then briefly summarize what you changed per item.\n\n",
     );
+    let (mut general, mut diff, mut review, mut pr) = (vec![], vec![], vec![], vec![]);
     for c in comments {
-        let loc = if c.end_line > c.line {
-            format!("{}:{}-{}", c.file_path, c.line, c.end_line)
-        } else {
-            format!("{}:{}", c.file_path, c.line)
-        };
-        out.push_str(&format!("- `{}` ({}): {}\n", loc, c.side, c.body.trim()));
+        let body = c.body.trim().to_string();
+        let anchor = c.anchor.trim();
+        match c.target.as_str() {
+            "diff" => {
+                let loc = if c.end_line > c.line {
+                    format!("{}:{}-{}", c.file_path, c.line, c.end_line)
+                } else {
+                    format!("{}:{}", c.file_path, c.line)
+                };
+                diff.push(format!("`{}` ({}): {}", loc, c.side, body));
+            }
+            "review" => review.push(if anchor.is_empty() {
+                body
+            } else {
+                format!("re: \"{anchor}\": {body}")
+            }),
+            "pr_comment" => pr.push(if anchor.is_empty() {
+                body
+            } else {
+                format!("{anchor} — {body}")
+            }),
+            // "general" and any unknown target
+            _ => general.push(body),
+        }
+    }
+    let mut group = |title: &str, items: &[String]| {
+        if !items.is_empty() {
+            out.push_str(title);
+            out.push('\n');
+            for i in items {
+                out.push_str(&format!("- {i}\n"));
+            }
+            out.push('\n');
+        }
+    };
+    group("General comments:", &general);
+    group("On the diff:", &diff);
+    group("On your review:", &review);
+    group("On GitHub PR comments:", &pr);
+
+    let spec = crate::spec::compose_spec(t);
+    if !spec.trim().is_empty() {
+        out.push_str(
+            "---\nThe agreed spec is below. If any feedback contradicts it, do NOT silently \
+             diverge — it may mean our agreed direction has changed. For any such item, write the \
+             full revised spec (with the exact sections `## Acceptance criteria`, \
+             `## Relevant paths`, `## Constraints`) to a file under `.claude/plans/`, and clearly \
+             note which feedback contradicted which part of the spec and why. Do not implement a \
+             spec-contradicting change until the spec update is accepted; implement all \
+             non-contradicting feedback now.\n\n# Spec\n",
+        );
+        out.push_str(&spec);
+        out.push('\n');
     }
     out
 }
@@ -599,4 +685,92 @@ fn spawn_claude(
     let child = pair.slave.spawn_command(cmd)?;
     drop(pair.slave);
     Ok((pair.master, child))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dc(target: &str, anchor: &str, file: &str, line: i64, body: &str) -> DiffComment {
+        DiffComment {
+            id: 0,
+            ticket_id: 1,
+            file_path: file.into(),
+            line,
+            end_line: line,
+            side: "new".into(),
+            body: body.into(),
+            status: "open".into(),
+            created_at: 0,
+            target: target.into(),
+            anchor: anchor.into(),
+        }
+    }
+
+    fn ticket(acceptance: &str) -> Ticket {
+        Ticket {
+            id: 1,
+            jira_key: None,
+            source: "local".into(),
+            title: "T".into(),
+            spec: "Goal: do the thing.".into(),
+            status: crate::status::WAITING.into(),
+            repo_id: Some(1),
+            created_at: 0,
+            updated_at: 0,
+            todos: String::new(),
+            pending_question: String::new(),
+            planned: 1,
+            drafting: 0,
+            grilled: 1,
+            acceptance_criteria: acceptance.into(),
+            relevant_paths: String::new(),
+            constraints: String::new(),
+            reviewed: 0,
+            reviewed_sha: String::new(),
+            review_text: String::new(),
+            ci_triaged_sha: String::new(),
+            ci_fix_attempts: 0,
+            ci_triage: String::new(),
+            proposed_spec: String::new(),
+        }
+    }
+
+    #[test]
+    fn feedback_prompt_groups_by_surface() {
+        let comments = vec![
+            dc("general", "", "", 0, "rename the module"),
+            dc("diff", "", "src/x.rs", 42, "off by one"),
+            dc("review", "the funnel is wrong", "", 0, "disagree, see below"),
+            dc("pr_comment", "alice: \"nit: naming\"", "", 0, "ignore this one"),
+        ];
+        let out = render_feedback_prompt(&comments, &ticket(""));
+        assert!(out.contains("General comments:"));
+        assert!(out.contains("- rename the module"));
+        assert!(out.contains("On the diff:"));
+        assert!(out.contains("`src/x.rs:42` (new): off by one"));
+        assert!(out.contains("On your review:"));
+        assert!(out.contains("re: \"the funnel is wrong\": disagree"));
+        assert!(out.contains("On GitHub PR comments:"));
+        assert!(out.contains("alice: \"nit: naming\" — ignore this one"));
+    }
+
+    #[test]
+    fn feedback_prompt_includes_spec_reconcile_block() {
+        let out = render_feedback_prompt(&[dc("general", "", "", 0, "x")], &ticket("Must support CSV export."));
+        assert!(out.contains("# Spec"));
+        assert!(out.contains("Must support CSV export."));
+        assert!(out.contains("do NOT silently"));
+        assert!(out.contains("## Acceptance criteria"));
+    }
+
+    #[test]
+    fn feedback_prompt_omits_spec_block_when_empty() {
+        // A ticket whose composed spec is empty → no spec/reconcile block.
+        let mut t = ticket("");
+        t.spec = String::new();
+        let out = render_feedback_prompt(&[dc("general", "", "", 0, "x")], &t);
+        assert!(!out.contains("# Spec"));
+        assert!(!out.contains("do NOT silently"));
+    }
 }

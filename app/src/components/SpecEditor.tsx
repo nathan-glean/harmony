@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { MarkdownField } from "./MarkdownField";
+import { MarkdownView } from "./MarkdownView";
 import { api } from "../api";
 import type { Ticket } from "../types";
 
@@ -27,8 +28,47 @@ export function SpecEditor({ ticket, onSaved }: { ticket: Ticket; onSaved: () =>
     }
   };
 
+  const [specBusy, setSpecBusy] = useState(false);
+  const acceptProposed = async () => {
+    setSpecBusy(true);
+    try {
+      await api.acceptProposedSpec(ticket.id);
+      onSaved();
+    } finally {
+      setSpecBusy(false);
+    }
+  };
+  const rejectProposed = async () => {
+    setSpecBusy(true);
+    try {
+      await api.rejectProposedSpec(ticket.id);
+      onSaved();
+    } finally {
+      setSpecBusy(false);
+    }
+  };
+
   return (
     <div className="spec-fields">
+      {ticket.proposed_spec?.trim() && (
+        <div className="proposed-spec">
+          <div className="proposed-spec-head">
+            <strong>Claude proposed a spec update</strong>
+            <span className="muted">from review feedback that contradicted the current spec</span>
+            <div className="proposed-spec-actions">
+              <button className="primary" disabled={specBusy} onClick={acceptProposed}>
+                {specBusy ? "…" : "Accept"}
+              </button>
+              <button disabled={specBusy} onClick={rejectProposed}>
+                Reject
+              </button>
+            </div>
+          </div>
+          <div className="review-text proposed-spec-body">
+            <MarkdownView markdown={ticket.proposed_spec} />
+          </div>
+        </div>
+      )}
       <MarkdownField
         label="Spec"
         value={spec}

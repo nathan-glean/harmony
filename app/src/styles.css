@@ -423,6 +423,25 @@ button:disabled { opacity: 0.5; cursor: default; }
 }
 .diff-file .diff-line:hover .add-comment-btn { opacity: 1; }
 
+/* Review feedback hub + proposed-spec banner */
+.review-feedback { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+/* Floating "comment on highlighted review text" button (positioned at the selection). */
+.review-comment-btn {
+  z-index: 50; font-size: 12px; padding: 4px 10px; border-radius: 6px;
+  background: var(--accent); color: #0b0e14; border: 0; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+}
+.review-anchor-quote {
+  font-size: 12px; color: var(--muted); border-left: 2px solid var(--accent);
+  padding: 2px 8px; margin-bottom: 6px; font-style: italic;
+  max-height: 60px; overflow: auto; white-space: pre-wrap;
+}
+.review-hint { font-size: 12px; align-self: center; }
+.proposed-spec { border: 1px solid var(--accent); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; display: flex; flex-direction: column; gap: 8px; }
+.proposed-spec-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
+.proposed-spec-actions { margin-left: auto; display: flex; gap: 6px; }
+.proposed-spec-actions .primary { color: var(--accent); border-color: var(--accent); }
+.proposed-spec-body { max-height: 320px; overflow: auto; }
+
 /* PR comments (Review tab) — reuses .comment-card/.comment-* below */
 .pr-comments { display: flex; flex-direction: column; gap: 8px; margin-top: 16px; }
 .pr-comments-head { display: flex; align-items: center; justify-content: space-between; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); }

@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Ticket, Repo, SessionView, WorktreeView, SessionProgress, SpecFields, DiffComment, PrComment } from "./types";
+import type { Ticket, Repo, SessionView, WorktreeView, SessionProgress, SpecFields, DiffComment, PrComment, CommentTarget } from "./types";
 
 // Tauri converts camelCase JS arg keys to snake_case Rust params.
 export const api = {
@@ -78,9 +78,34 @@ export const api = {
     endLine: number,
     side: "new" | "old",
     body: string
-  ) => invoke<number>("add_diff_comment", { ticketId, filePath, line, endLine, side, body }),
+  ) =>
+    invoke<number>("add_diff_comment", {
+      ticketId,
+      target: "diff",
+      anchor: "",
+      filePath,
+      line,
+      endLine,
+      side,
+      body,
+    }),
+  // General / on-review / on-PR-comment feedback (no diff anchor).
+  addComment: (ticketId: number, target: CommentTarget, anchor: string, body: string) =>
+    invoke<number>("add_diff_comment", {
+      ticketId,
+      target,
+      anchor,
+      filePath: "",
+      line: 0,
+      endLine: 0,
+      side: "new",
+      body,
+    }),
   deleteDiffComment: (id: number) => invoke<void>("delete_diff_comment", { id }),
   resolveDiffComment: (id: number) => invoke<void>("resolve_diff_comment", { id }),
+  addressFeedback: (ticketId: number) => invoke<number>("address_feedback", { ticketId }),
+  acceptProposedSpec: (ticketId: number) => invoke<void>("accept_proposed_spec", { ticketId }),
+  rejectProposedSpec: (ticketId: number) => invoke<void>("reject_proposed_spec", { ticketId }),
   startSession: (ticketId: number, repo: string | null) =>
     invoke<number>("start_session", { ticketId, repo }),
   startSpecSession: (ticketId: number, repo: string | null) =>

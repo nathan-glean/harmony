@@ -149,6 +149,7 @@ mod tests {
             ci_triaged_sha: String::new(),
             ci_fix_attempts: 0,
             ci_triage: String::new(),
+            proposed_spec: String::new(),
         }
     }
 

@@ -20,6 +20,7 @@ export type Ticket = {
   ci_triaged_sha: string; // HEAD sha the last CI triage ran against ("" when never)
   ci_fix_attempts: number; // auto CI-fix attempts made for this PR (capped)
   ci_triage: string; // JSON of the latest CiTriage, "" when none
+  proposed_spec: string; // markdown of a spec update Claude proposed (propose & confirm), "" when none
 };
 
 // A GitHub PR comment normalized for display (matches harmony_core::github::PrComment).
@@ -127,8 +128,11 @@ export type SessionProgress = {
   tool: string | null;
 };
 
-// A reviewer comment left on a diff line (matches harmony_core::models::DiffComment).
-// `status`: "open" (will be sent to Claude on next resume), "sent", or "resolved".
+// A reviewer comment for a ticket (matches harmony_core::models::DiffComment).
+// `status`: "open" (will be sent to Claude on next "send feedback"), "sent", or "resolved".
+// `target`: which surface — "diff" (file:line), "general", "review" (on Claude's /review),
+// or "pr_comment" (on a GitHub PR comment). `anchor` carries context for non-diff targets.
+export type CommentTarget = "general" | "diff" | "review" | "pr_comment";
 export type DiffComment = {
   id: number;
   ticket_id: number;
@@ -139,6 +143,8 @@ export type DiffComment = {
   body: string;
   status: "open" | "sent" | "resolved";
   created_at: number;
+  target: CommentTarget;
+  anchor: string;
 };
 
 export const COLUMNS = ["todo", "working", "waiting", "in_review", "done"] as const;

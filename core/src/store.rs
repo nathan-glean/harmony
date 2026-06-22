@@ -63,7 +63,8 @@ impl Store {
             review_text TEXT NOT NULL DEFAULT '',
             ci_triaged_sha TEXT NOT NULL DEFAULT '',
             ci_fix_attempts INTEGER NOT NULL DEFAULT 0,
-            ci_triage TEXT NOT NULL DEFAULT ''
+            ci_triage TEXT NOT NULL DEFAULT '',
+            proposed_spec TEXT NOT NULL DEFAULT ''
         );
         UPDATE tickets SET status = 'todo' WHERE status IN ('available', 'ready');
         CREATE TABLE IF NOT EXISTS worktrees (
@@ -100,7 +101,9 @@ impl Store {
             side TEXT NOT NULL DEFAULT 'new',
             body TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'open',
-            created_at INTEGER NOT NULL
+            created_at INTEGER NOT NULL,
+            target TEXT NOT NULL DEFAULT 'diff',
+            anchor TEXT NOT NULL DEFAULT ''
         );
         "#;
         for stmt in DDL.split(';') {
@@ -162,6 +165,15 @@ impl Store {
             .execute(&self.pool)
             .await;
         let _ = sqlx::query("ALTER TABLE diff_comments ADD COLUMN end_line INTEGER NOT NULL DEFAULT 0")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE diff_comments ADD COLUMN target TEXT NOT NULL DEFAULT 'diff'")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE diff_comments ADD COLUMN anchor TEXT NOT NULL DEFAULT ''")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN proposed_spec TEXT NOT NULL DEFAULT ''")
             .execute(&self.pool)
             .await;
         Ok(())
@@ -277,7 +289,7 @@ impl Store {
 
     pub async fn get_ticket(&self, id: i64) -> Result<Option<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec
              FROM tickets WHERE id = ?",
         )
         .bind(id)
@@ -287,7 +299,7 @@ impl Store {
 
     pub async fn list_tickets(&self) -> Result<Vec<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec
              FROM tickets ORDER BY id",
         )
         .fetch_all(&self.pool)
@@ -589,7 +601,7 @@ impl Store {
 
     pub async fn get_ticket_by_key(&self, key: &str) -> Result<Option<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec
              FROM tickets WHERE jira_key = ?",
         )
         .bind(key)
@@ -773,6 +785,18 @@ impl Store {
         Ok(())
     }
 
+    /// Store a spec update Claude proposed while addressing feedback (propose & confirm). NOT the
+    /// live spec — the user accepts it (→ `set_ticket_spec_fields`) or rejects it (→ clear) in the
+    /// Spec tab. Empty when there's no pending proposal.
+    pub async fn set_ticket_proposed_spec(&self, id: i64, proposed: &str) -> Result<()> {
+        sqlx::query("UPDATE tickets SET proposed_spec = ? WHERE id = ?")
+            .bind(proposed)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     // ---- settings kv -----------------------------------------------------
 
     pub async fn set_setting(&self, key: &str, value: &str) -> Result<()> {
@@ -808,9 +832,15 @@ impl Store {
         .await?)
     }
 
+    /// Add a review comment. `target` is one of `general`|`diff`|`review`|`pr_comment`; for diff
+    /// comments `file_path`/`line`/`end_line`/`side` anchor it, for the others `anchor` carries the
+    /// context (the quoted review snippet, or `author: "snippet"` for a PR comment).
+    #[allow(clippy::too_many_arguments)]
     pub async fn add_diff_comment(
         &self,
         ticket_id: i64,
+        target: &str,
+        anchor: &str,
         file_path: &str,
         line: i64,
         end_line: i64,
@@ -818,10 +848,12 @@ impl Store {
         body: &str,
     ) -> Result<i64> {
         let r = sqlx::query(
-            "INSERT INTO diff_comments (ticket_id, file_path, line, end_line, side, body, status, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, 'open', ?)",
+            "INSERT INTO diff_comments (ticket_id, target, anchor, file_path, line, end_line, side, body, status, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)",
         )
         .bind(ticket_id)
+        .bind(target)
+        .bind(anchor)
         .bind(file_path)
         .bind(line)
         .bind(end_line)

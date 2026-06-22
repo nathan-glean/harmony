@@ -711,6 +711,31 @@ async fn on_ci_fix_finished(app: &AppHandle, state: &AppState, ticket_id: i64) {
     let _ = app.emit("ticket-updated", ticket_id);
 }
 
+/// `AddressFinished`: commit the feedback-addressing session's changes; push only when a PR
+/// already exists (so we don't create a remote branch pre-PR). Restore the ticket's review column
+/// (PR column if a PR exists, else Human Review).
+async fn on_address_finished(app: &AppHandle, state: &AppState, ticket_id: i64) {
+    let mut pr_exists = false;
+    if let Ok(Some(ticket)) = state.store.get_ticket(ticket_id).await {
+        if let Ok(Some(wt)) = state.store.primary_worktree_for_ticket(ticket_id).await {
+            let (path, branch, msg) = (wt.path.clone(), wt.branch.clone(), commit_message(&ticket));
+            pr_exists = tokio::task::spawn_blocking(move || {
+                let committed = harmony_core::github::commit_all(&path, &msg).unwrap_or(false);
+                let exists = harmony_core::github::pr_status(&path).exists;
+                if committed && exists {
+                    let _ = harmony_core::github::push_branch(&path, &branch);
+                }
+                exists
+            })
+            .await
+            .unwrap_or(false);
+        }
+    }
+    let status = if pr_exists { harmony_core::status::IN_REVIEW } else { harmony_core::status::WAITING };
+    let _ = state.store.set_ticket_status(ticket_id, status).await;
+    let _ = app.emit("ticket-updated", ticket_id);
+}
+
 /// Manual "Fix CI" button: triage now and fix regardless of the auto gates.
 #[tauri::command]
 async fn request_ci_fix(app: AppHandle, state: State<'_, AppState>, ticket_id: i64) -> Result<String, String> {
@@ -828,6 +853,8 @@ async fn list_diff_comments(
 async fn add_diff_comment(
     state: State<'_, AppState>,
     ticket_id: i64,
+    target: String,
+    anchor: String,
     file_path: String,
     line: i64,
     end_line: i64,
@@ -836,9 +863,46 @@ async fn add_diff_comment(
 ) -> Result<i64, String> {
     state
         .store
-        .add_diff_comment(ticket_id, &file_path, line, end_line, &side, &body)
+        .add_diff_comment(ticket_id, &target, &anchor, &file_path, line, end_line, &side, &body)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Send all open review comments (any surface) to Claude: spawn an autonomous "address" session
+/// that folds them into its prompt, addresses them, and (on finish) commits + pushes.
+#[tauri::command]
+async fn address_feedback(app: AppHandle, state: State<'_, AppState>, ticket_id: i64) -> Result<i64, String> {
+    let mgr = SessionManager::new(Arc::new(state.store.clone()), HOOK_PORT);
+    let handle = mgr.start_address(ticket_id).await.map_err(|e| e.to_string())?;
+    wire_session(&app, &state, handle, ticket_id)
+}
+
+/// Accept Claude's proposed spec update: parse it into the first-class fields, write it as the
+/// live spec, and clear the proposal.
+#[tauri::command]
+async fn accept_proposed_spec(state: State<'_, AppState>, ticket_id: i64) -> Result<(), String> {
+    let ticket = state
+        .store
+        .get_ticket(ticket_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("no such ticket")?;
+    if ticket.proposed_spec.trim().is_empty() {
+        return Err("no proposed spec to accept".into());
+    }
+    let f = harmony_core::spec::parse_spec(&ticket.proposed_spec);
+    state
+        .store
+        .set_ticket_spec_fields(ticket_id, &f.spec, &f.acceptance_criteria, &f.relevant_paths, &f.constraints)
+        .await
+        .map_err(|e| e.to_string())?;
+    state.store.set_ticket_proposed_spec(ticket_id, "").await.map_err(|e| e.to_string())
+}
+
+/// Reject Claude's proposed spec update (discard it; the live spec is unchanged).
+#[tauri::command]
+async fn reject_proposed_spec(state: State<'_, AppState>, ticket_id: i64) -> Result<(), String> {
+    state.store.set_ticket_proposed_spec(ticket_id, "").await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1447,6 +1511,13 @@ pub fn run() {
                                 on_ci_fix_finished(&ev_handle, &state, ticket_id).await;
                                 None
                             }
+                            // A feedback-addressing session finished: commit (+ push if a PR
+                            // exists) so the change is reflected; keep the ticket in its column.
+                            SystemEvent::AddressFinished { ticket_id } => {
+                                let state = ev_handle.state::<AppState>();
+                                on_address_finished(&ev_handle, &state, ticket_id).await;
+                                None
+                            }
                         };
                         if let Some((ticket_id, event)) = event {
                             let state = ev_handle.state::<AppState>();
@@ -1509,6 +1580,9 @@ pub fn run() {
             request_ci_fix,
             get_ci_autofix,
             set_ci_autofix,
+            address_feedback,
+            accept_proposed_spec,
+            reject_proposed_spec,
             delete_ticket,
             jira_env,
             install_acli,

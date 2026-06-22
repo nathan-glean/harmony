@@ -20,9 +20,9 @@ import { TranscriptPane } from "./components/TranscriptPane";
 import { ProgressLine } from "./components/ProgressLine";
 import { TerminalView } from "./components/Terminal";
 import { SpecEditor } from "./components/SpecEditor";
-import { MarkdownView } from "./components/MarkdownView";
 import { ProofPane } from "./components/ProofPane";
 import { PrComments } from "./components/PrComments";
+import { ReviewFeedback } from "./components/ReviewFeedback";
 import { api } from "./api";
 import type { Ticket, Repo, SessionView, WorktreeView, PendingQuestion, SessionProgress, SessionExit, PrDone } from "./types";
 
@@ -36,6 +36,8 @@ export function App() {
   const [openingPr, setOpeningPr] = useState<Set<number>>(new Set());
   // Active tab in the ticket modal.
   const [tab, setTab] = useState<"description" | "spec" | "proof" | "review" | "diff" | "session">("spec");
+  // Bumped whenever review feedback is added/sent, so the feedback list reloads across components.
+  const [fbVersion, setFbVersion] = useState(0);
   const [selected, setSelected] = useState<Ticket | null>(null);
   // Live terminals keyed by ticket id → session id (supports several at once).
   const [liveSessions, setLiveSessions] = useState<Record<number, number>>({});
@@ -859,17 +861,18 @@ export function App() {
                     {busy === "review" ? "Starting…" : "Request review"}
                   </button>
                 </div>
-                {(liveTicket ?? selected).review_text ? (
-                  <div className="review-text">
-                    <MarkdownView markdown={(liveTicket ?? selected).review_text} />
-                  </div>
-                ) : (
-                  <p className="empty">
-                    No review yet — press “Request review” (or move the ticket through review) to
-                    have Claude run <code>/review</code> and generate one.
-                  </p>
-                )}
-                <PrComments key={selected.id} ticketId={selected.id} />
+                <ReviewFeedback
+                  key={selected.id}
+                  ticketId={selected.id}
+                  reviewText={(liveTicket ?? selected).review_text}
+                  version={fbVersion}
+                  onChanged={() => setFbVersion((v) => v + 1)}
+                />
+                <PrComments
+                  key={`pr-${selected.id}`}
+                  ticketId={selected.id}
+                  onCommentAdded={() => setFbVersion((v) => v + 1)}
+                />
               </div>
 
               <div className={"tabpanel" + (tab === "diff" ? " active" : "")}>

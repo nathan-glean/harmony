@@ -293,7 +293,7 @@ export function DiffPane({ ticketId }: { ticketId: number }) {
     setSending(true);
     setErr(null);
     try {
-      await api.startSession(ticketId, null);
+      await api.addressFeedback(ticketId);
       loadComments(); // open → sent
     } catch (e) {
       setErr(String(e));

@@ -764,6 +764,7 @@ fn sample_ticket() -> harmony_core::models::Ticket {
         ci_triaged_sha: "".into(),
         ci_fix_attempts: 0,
         ci_triage: "".into(),
+        proposed_spec: "".into(),
     }
 }
 
