@@ -19,6 +19,10 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 const HOOK_PORT: u16 = 8787;
+/// How often the background poller checks PR-stage tickets' CI.
+const CI_POLL_SECS: u64 = 60;
+/// Max automatic CI-fix attempts per PR before we stop and leave it for a human (anti-loop).
+const MAX_CI_FIX_ATTEMPTS: i64 = 3;
 
 /// Live PTY handles for an active session.
 struct SessionIo {
@@ -553,6 +557,178 @@ async fn open_pr_for(store: &Store, ticket_id: i64) -> Result<String, String> {
         let _ = harmony_core::jira::add_comment(key, &format!("PR opened by harmony: {url}")).await;
     }
     Ok(url)
+}
+
+// ---- CI monitoring / auto-fix --------------------------------------------
+
+/// True if a live session is attached for this ticket (don't triage / spawn fixes mid-session).
+fn has_live_session(state: &AppState, ticket_id: i64) -> bool {
+    state.sessions.lock().unwrap().values().any(|io| io.ticket_id == ticket_id)
+}
+
+/// Auto-fix kill-switch (default on — the user opted into auto-fix). `"off"` → suggest-only.
+async fn ci_autofix_enabled(state: &AppState) -> bool {
+    state
+        .store
+        .get_setting("ci_autofix")
+        .await
+        .ok()
+        .flatten()
+        .map(|v| v != "off")
+        .unwrap_or(true)
+}
+
+/// One poll pass: triage CI for every PR-stage ticket (skipping those with a live session).
+async fn poll_ci_once(app: &AppHandle, state: &AppState) {
+    let tickets = match state.store.list_tickets().await {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    for ticket in tickets {
+        if ticket.status != harmony_core::status::IN_REVIEW || has_live_session(state, ticket.id) {
+            continue;
+        }
+        let _ = triage_and_maybe_fix(app, state, ticket.id, false).await;
+    }
+}
+
+/// Triage a ticket's PR CI and, when actionable (or `manual`), spawn an autonomous fix session.
+/// Persists the triage on the ticket for the UI. `manual` bypasses the idempotency fingerprint,
+/// the kill-switch, and the attempt cap (an explicit user request).
+async fn triage_and_maybe_fix(
+    app: &AppHandle,
+    state: &AppState,
+    ticket_id: i64,
+    manual: bool,
+) -> Result<String, String> {
+    let ticket = state
+        .store
+        .get_ticket(ticket_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("no such ticket")?;
+    let wt = state
+        .store
+        .primary_worktree_for_ticket(ticket_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("no worktree")?;
+    let repo = state.store.get_repo(wt.repo_id).await.map_err(|e| e.to_string())?.ok_or("repo missing")?;
+    let (path, repo_path) = (wt.path.clone(), repo.path.clone());
+
+    // Cheap pre-check (no LLM): current HEAD + whether any checks are failing.
+    let pre = {
+        let path = path.clone();
+        tokio::task::spawn_blocking(move || {
+            let head = harmony_core::github::head_sha(&path).unwrap_or_default();
+            let failing = harmony_core::github::pr_checks_json(&path)
+                .ok()
+                .map(|j| harmony_core::ci::parse_failing_checks(&j))
+                .unwrap_or_default();
+            (head, failing)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    };
+    let (head, failing) = pre;
+
+    // No failing checks → green; reset CI state so a later failure triages afresh.
+    if failing.is_empty() {
+        if !ticket.ci_triage.is_empty() || ticket.ci_fix_attempts > 0 {
+            let _ = state.store.reset_ci(ticket_id).await;
+            let _ = app.emit("ticket-updated", ticket_id);
+        }
+        return Ok("no failing checks".into());
+    }
+    // Already triaged this exact commit (and not a manual request) → nothing new to do (avoids
+    // re-running the LLM / re-spawning a fix for the same HEAD).
+    if !manual && !head.is_empty() && head == ticket.ci_triaged_sha {
+        return Ok("already triaged this commit".into());
+    }
+
+    // Full triage (gh + LLM attribution) off-thread.
+    let triage = {
+        let (path, repo_path) = (path.clone(), repo_path.clone());
+        tokio::task::spawn_blocking(move || {
+            let base = harmony_core::worktree::default_branch(&repo_path).unwrap_or_else(|_| "main".into());
+            let diff = harmony_core::github::diff(&path, &base).unwrap_or_default();
+            harmony_core::ci::triage(&path, &base, &diff)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?
+    };
+
+    if let Ok(json) = serde_json::to_string(&triage) {
+        let _ = state.store.set_ticket_ci_triage(ticket_id, &head, &json).await;
+    }
+    let _ = app.emit("ticket-updated", ticket_id);
+
+    let should_fix = if manual {
+        true
+    } else {
+        triage.actionable && ci_autofix_enabled(state).await && ticket.ci_fix_attempts < MAX_CI_FIX_ATTEMPTS
+    };
+    if !should_fix {
+        return Ok(triage.reason.clone());
+    }
+
+    let context = ci_fix_context(&triage);
+    let mgr = SessionManager::new(Arc::new(state.store.clone()), HOOK_PORT);
+    let handle = mgr.start_ci_fix(ticket_id, &context).await.map_err(|e| e.to_string())?;
+    wire_session(app, state, handle, ticket_id)?;
+    let _ = state.store.bump_ci_fix_attempts(ticket_id).await;
+    Ok(format!("fixing: {}", triage.reason))
+}
+
+/// Build the opening-prompt context for a fix session from a triage result.
+fn ci_fix_context(triage: &harmony_core::ci::CiTriage) -> String {
+    let mut s = format!("Failing checks: {}\n", triage.failing_checks.join(", "));
+    if let Some(v) = &triage.verdict {
+        s.push_str(&format!("\nWhy it's attributed to this PR: {}\n", v.rationale));
+        if !v.proposed_fix.trim().is_empty() {
+            s.push_str(&format!("\nSuggested fix: {}\n", v.proposed_fix));
+        }
+    }
+    s
+}
+
+/// `FixFinished`: commit + push the fix session's changes (re-triggers CI), keeping the ticket in
+/// the PR column. The next poll tick re-triages the new HEAD (and stops at the attempt cap).
+async fn on_ci_fix_finished(app: &AppHandle, state: &AppState, ticket_id: i64) {
+    if let Ok(Some(ticket)) = state.store.get_ticket(ticket_id).await {
+        if let Ok(Some(wt)) = state.store.primary_worktree_for_ticket(ticket_id).await {
+            let (path, branch, msg) = (wt.path.clone(), wt.branch.clone(), commit_message(&ticket));
+            let _ = tokio::task::spawn_blocking(move || {
+                if harmony_core::github::commit_all(&path, &msg).unwrap_or(false) {
+                    let _ = harmony_core::github::push_branch(&path, &branch);
+                }
+            })
+            .await;
+        }
+    }
+    let _ = state.store.set_ticket_status(ticket_id, harmony_core::status::IN_REVIEW).await;
+    let _ = app.emit("ticket-updated", ticket_id);
+}
+
+/// Manual "Fix CI" button: triage now and fix regardless of the auto gates.
+#[tauri::command]
+async fn request_ci_fix(app: AppHandle, state: State<'_, AppState>, ticket_id: i64) -> Result<String, String> {
+    triage_and_maybe_fix(&app, &state, ticket_id, true).await
+}
+
+#[tauri::command]
+async fn get_ci_autofix(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(ci_autofix_enabled(&state).await)
+}
+
+#[tauri::command]
+async fn set_ci_autofix(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+    state
+        .store
+        .set_setting("ci_autofix", if enabled { "on" } else { "off" })
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // ---- diff / PR pane ------------------------------------------------------
@@ -1241,15 +1417,35 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     use harmony_core::hooks::SystemEvent;
                     while let Some(ev) = rx.recv().await {
-                        let (ticket_id, event) = match ev {
-                            SystemEvent::GrillFinished { ticket_id } => (ticket_id, Event::GrillFinished),
-                            SystemEvent::WorkFinished { ticket_id } => (ticket_id, Event::WorkFinished),
-                            SystemEvent::ReviewFinished { ticket_id } => (ticket_id, Event::ReviewFinished),
+                        let event = match ev {
+                            SystemEvent::GrillFinished { ticket_id } => Some((ticket_id, Event::GrillFinished)),
+                            SystemEvent::WorkFinished { ticket_id } => Some((ticket_id, Event::WorkFinished)),
+                            SystemEvent::ReviewFinished { ticket_id } => Some((ticket_id, Event::ReviewFinished)),
+                            // A CI-fix session finished: commit + push its changes (re-triggers CI),
+                            // outside the flow state machine — the card stays in the PR column.
+                            SystemEvent::FixFinished { ticket_id } => {
+                                let state = ev_handle.state::<AppState>();
+                                on_ci_fix_finished(&ev_handle, &state, ticket_id).await;
+                                None
+                            }
                         };
-                        let state = ev_handle.state::<AppState>();
-                        if let Err(e) = apply_event(&ev_handle, &state, ticket_id, event, false).await {
-                            eprintln!("[flow] {event:?} for #{ticket_id} failed: {e}");
+                        if let Some((ticket_id, event)) = event {
+                            let state = ev_handle.state::<AppState>();
+                            if let Err(e) = apply_event(&ev_handle, &state, ticket_id, event, false).await {
+                                eprintln!("[flow] {event:?} for #{ticket_id} failed: {e}");
+                            }
                         }
+                    }
+                });
+
+                // Background poller: watch PR-stage tickets' CI and auto-fix PR-caused failures.
+                let poll_handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut tick = tokio::time::interval(std::time::Duration::from_secs(CI_POLL_SECS));
+                    loop {
+                        tick.tick().await;
+                        let state = poll_handle.state::<AppState>();
+                        poll_ci_once(&poll_handle, &state).await;
                     }
                 });
             });
@@ -1290,6 +1486,9 @@ pub fn run() {
             transition_ticket,
             grill_ticket,
             request_review,
+            request_ci_fix,
+            get_ci_autofix,
+            set_ci_autofix,
             delete_ticket,
             jira_env,
             install_acli,

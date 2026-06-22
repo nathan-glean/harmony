@@ -46,6 +46,9 @@ export const api = {
     invoke<void>("transition_ticket", { ticketId: id, status, force }),
   grillTicket: (id: number) => invoke<void>("grill_ticket", { ticketId: id }),
   requestReview: (id: number) => invoke<void>("request_review", { ticketId: id }),
+  requestCiFix: (id: number) => invoke<string>("request_ci_fix", { ticketId: id }),
+  getCiAutofix: () => invoke<boolean>("get_ci_autofix"),
+  setCiAutofix: (enabled: boolean) => invoke<void>("set_ci_autofix", { enabled }),
   jiraApplyColumn: (ticketId: number, status: string) =>
     invoke<void>("jira_apply_column", { ticketId, status }),
   deleteTicket: (id: number, force: boolean) =>

@@ -17,6 +17,28 @@ export type Ticket = {
   relevant_paths: string; // first-class spec field (one path per line / markdown)
   constraints: string; // first-class spec field (markdown)
   review_text: string; // latest `/review` prose (Claude's final message), "" when never reviewed
+  ci_triaged_sha: string; // HEAD sha the last CI triage ran against ("" when never)
+  ci_fix_attempts: number; // auto CI-fix attempts made for this PR (capped)
+  ci_triage: string; // JSON of the latest CiTriage, "" when none
+};
+
+// The LLM's attribution of a CI failure (matches harmony_core::ci::CiVerdict).
+export type CiVerdict = {
+  category: "pr_caused" | "unrelated_infra" | "flaky" | "undetermined";
+  confidence: number; // 0..1
+  rationale: string;
+  proposed_fix: string;
+};
+
+// Full CI triage for a ticket's PR (matches harmony_core::ci::CiTriage; parsed from Ticket.ci_triage).
+export type CiTriage = {
+  head_sha: string;
+  failing_checks: string[];
+  base_red_checks: string[];
+  required_checks: string[] | null;
+  verdict: CiVerdict | null;
+  actionable: boolean;
+  reason: string;
 };
 
 // Payload of the `pr-done` event: a background PR creation finished. `ok` false means it was

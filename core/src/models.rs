@@ -54,6 +54,13 @@ pub struct Ticket {
     /// the review session finishes. Latest-only — overwritten on each re-review. Empty when never
     /// reviewed; surfaced in the ticket's Review tab.
     pub review_text: String,
+    /// HEAD sha the last CI triage ran against (idempotency fingerprint — the poller skips a
+    /// commit it has already triaged). Empty when never triaged.
+    pub ci_triaged_sha: String,
+    /// Number of automatic CI-fix attempts made for this PR; capped to prevent runaway loops.
+    pub ci_fix_attempts: i64,
+    /// JSON of the latest `crate::ci::CiTriage` (verdict + reason + failing checks), for the UI.
+    pub ci_triage: String,
 }
 
 /// An isolated git worktree for a ticket. Per-ticket and reused; `is_alternate`

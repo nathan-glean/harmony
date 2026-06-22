@@ -830,7 +830,7 @@ export function App() {
               </div>
 
               <div className={"tabpanel" + (tab === "proof" ? " active" : "")}>
-                <ProofPane key={selected.id} ticketId={selected.id} />
+                <ProofPane key={selected.id} ticket={liveTicket ?? selected} />
               </div>
 
               <div className={"tabpanel" + (tab === "review" ? " active" : "")}>

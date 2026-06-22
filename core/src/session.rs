@@ -221,6 +221,36 @@ impl SessionManager {
         Ok(SessionHandle { session_id, master, child })
     }
 
+    /// Start an autonomous session to fix a failing CI check. Runs in the ticket's worktree with
+    /// `bypassPermissions` (unattended), the opening prompt carrying the triage context (failing
+    /// check, rationale, proposed fix, and a tail of the failed logs). harmony commits + pushes on
+    /// the session's Stop (`FixFinished`), which re-triggers CI. Session `kind = "fix"`.
+    pub async fn start_ci_fix(&self, ticket_id: i64, context: &str) -> Result<SessionHandle> {
+        let ticket = self
+            .store
+            .get_ticket(ticket_id)
+            .await?
+            .ok_or_else(|| anyhow!("no such ticket #{ticket_id}"))?;
+        let repo_id = ticket
+            .repo_id
+            .ok_or_else(|| anyhow!("ticket #{ticket_id} has no repo assigned"))?;
+        let repo = self
+            .store
+            .get_repo(repo_id)
+            .await?
+            .ok_or_else(|| anyhow!("repo #{repo_id} missing"))?;
+
+        let wt = self.ensure_primary_worktree(&ticket, repo_id, &repo).await?;
+        crate::settings::inject_hooks(&wt.path, self.hook_port)?;
+
+        let prompt = render_ci_fix_prompt(context);
+        let (master, child) = spawn_claude(&wt.path, &prompt, None, "bypassPermissions")?;
+
+        let session_id = self.store.add_session(ticket_id, wt.id, &wt.path, "fix").await?;
+        self.store.set_ticket_status(ticket_id, crate::status::WORKING).await?;
+        Ok(SessionHandle { session_id, master, child })
+    }
+
     pub async fn end_session(&self, session_id: i64) -> Result<()> {
         self.store.end_session(session_id).await
     }
@@ -259,6 +289,22 @@ fn render_review_comments_prompt(comments: &[DiffComment]) -> String {
         out.push_str(&format!("- `{}` ({}): {}\n", loc, c.side, c.body.trim()));
     }
     out
+}
+
+/// Opening prompt for an autonomous CI-fix session: a CI check on this branch's PR is failing and
+/// has been attributed to this PR's changes. `context` carries the failing check name, the
+/// attribution rationale/proposed fix, and a tail of the failed-job logs. Fix only that failure;
+/// harmony handles version control.
+fn render_ci_fix_prompt(context: &str) -> String {
+    format!(
+        "A CI check on this branch's pull request is failing, and triage attributed the failure to \
+         this branch's changes. Investigate and fix it autonomously and to completion — no human is \
+         watching, so do not ask for confirmation. Make only the changes needed to fix this CI \
+         failure; do not refactor or touch unrelated code, and do not weaken or delete tests to make \
+         them pass. Run the relevant checks/tests locally to confirm the fix. Do NOT run `git commit` \
+         or `git push` — harmony commits and pushes your changes, which re-triggers CI.\n\n\
+         # Failing CI context\n\n{context}"
+    )
 }
 
 /// Render the ticket spec (body + structured fields) into Claude's opening prompt (DESIGN Q10).

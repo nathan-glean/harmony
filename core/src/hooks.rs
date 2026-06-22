@@ -29,6 +29,8 @@ pub enum SystemEvent {
     WorkFinished { ticket_id: i64 },
     /// A `/review` session finished.
     ReviewFinished { ticket_id: i64 },
+    /// An autonomous CI-fix session finished (commit + push its changes to re-trigger CI).
+    FixFinished { ticket_id: i64 },
 }
 
 /// Shared state for the hook router: the store, plus an optional channel to the app executor.
@@ -140,6 +142,9 @@ async fn handle(
                             }
                             "review" => {
                                 let _ = tx.send(SystemEvent::ReviewFinished { ticket_id: sess.ticket_id });
+                            }
+                            "fix" => {
+                                let _ = tx.send(SystemEvent::FixFinished { ticket_id: sess.ticket_id });
                             }
                             _ => {}
                         }

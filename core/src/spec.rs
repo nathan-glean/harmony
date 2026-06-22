@@ -146,6 +146,9 @@ mod tests {
             reviewed: 0,
             reviewed_sha: String::new(),
             review_text: String::new(),
+            ci_triaged_sha: String::new(),
+            ci_fix_attempts: 0,
+            ci_triage: String::new(),
         }
     }
 

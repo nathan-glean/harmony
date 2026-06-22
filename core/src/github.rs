@@ -75,6 +75,66 @@ pub fn head_sha(worktree: &str) -> Result<String> {
     Ok(run("git", &["rev-parse", "HEAD"], worktree)?.trim().to_string())
 }
 
+/// SHA a ref resolves to. Tries the remote-tracking `origin/<ref>` first (so a bare base-branch
+/// name resolves to the commit CI actually ran against), then the bare ref.
+pub fn rev_parse(worktree: &str, refname: &str) -> Result<String> {
+    if let Ok(s) = run("git", &["rev-parse", &format!("origin/{refname}")], worktree) {
+        return Ok(s.trim().to_string());
+    }
+    Ok(run("git", &["rev-parse", refname], worktree)?.trim().to_string())
+}
+
+/// Workflow runs for `branch` (`gh run list --json …`) — used to map a failing PR check to the
+/// run id whose logs we need, filtered by HEAD sha downstream. Raw JSON array string.
+pub fn run_list_json(worktree: &str, branch: &str) -> Result<String> {
+    run(
+        "gh",
+        &[
+            "run", "list", "--branch", branch, "--limit", "40",
+            "--json", "databaseId,headSha,conclusion,status,name,workflowName",
+        ],
+        worktree,
+    )
+}
+
+/// The failed-step logs for a workflow run (`gh run view <id> --log-failed`). Can be large — the
+/// caller truncates before feeding it to the model. `gh` exits non-zero on some run states but
+/// still prints logs, so read stdout regardless of exit code (like `pr_checks_json`).
+pub fn failed_logs(worktree: &str, run_id: i64) -> Result<String> {
+    let id = run_id.to_string();
+    let out = Command::new("gh")
+        .args(["run", "view", &id, "--log-failed"])
+        .current_dir(worktree)
+        .output()
+        .map_err(|e| crate::cmd_err::spawn_error("gh", &e))?;
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    if stdout.trim().is_empty() && !out.status.success() {
+        return Err(crate::cmd_err::classify("gh", &String::from_utf8_lossy(&out.stderr)));
+    }
+    Ok(stdout)
+}
+
+/// Check-run results for a commit (`gh api repos/{owner}/{repo}/commits/<sha>/check-runs`). Used to
+/// test whether a check is *already red on the base branch* (i.e. not caused by this PR). `gh`
+/// substitutes `{owner}/{repo}` from the repo in `worktree`. Raw JSON object string.
+pub fn check_runs_json(worktree: &str, sha: &str) -> Result<String> {
+    run(
+        "gh",
+        &["api", &format!("repos/{{owner}}/{{repo}}/commits/{sha}/check-runs"), "--paginate"],
+        worktree,
+    )
+}
+
+/// Branch-protection required status checks (`gh api …/branches/<base>/protection/required_status_checks`).
+/// 404s (no protection) / permission errors surface as `Err`; the caller treats that as "unknown".
+pub fn required_checks_json(worktree: &str, base: &str) -> Result<String> {
+    run(
+        "gh",
+        &["api", &format!("repos/{{owner}}/{{repo}}/branches/{base}/protection/required_status_checks")],
+        worktree,
+    )
+}
+
 /// Stage everything and commit it (`git add -A` + `git commit`), if there's anything to commit.
 /// Returns whether a commit was actually made (false when the worktree is clean). harmony owns
 /// committing the agent's work — deterministic, and the squash-merge makes granularity moot.

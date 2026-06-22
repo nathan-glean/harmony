@@ -761,6 +761,9 @@ fn sample_ticket() -> harmony_core::models::Ticket {
         reviewed: 0,
         reviewed_sha: "".into(),
         review_text: "".into(),
+        ci_triaged_sha: "".into(),
+        ci_fix_attempts: 0,
+        ci_triage: "".into(),
     }
 }
 

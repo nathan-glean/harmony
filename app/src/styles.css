@@ -323,6 +323,19 @@ button:disabled { opacity: 0.5; cursor: default; }
 .jc-body { font-size: 13px; white-space: pre-wrap; }
 
 .diffpane, .proofpane { display: flex; flex-direction: column; gap: 8px; }
+.autofix-toggle { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); cursor: pointer; }
+.autofix-toggle input { cursor: pointer; }
+.triage-card { border: 1px solid var(--border); border-radius: 8px; background: var(--bg); padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+.triage-card.pr_caused { border-color: #f7768e; }
+.triage-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.triage-badge { padding: 1px 8px; border-radius: 10px; border: 1px solid var(--border); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+.triage-badge.pr_caused { color: #f7768e; border-color: #f7768e; }
+.triage-badge.unrelated_infra, .triage-badge.flaky, .triage-badge.undetermined { color: var(--muted); }
+.triage-conf { font-size: 12px; color: var(--muted); }
+.triage-attempts { font-size: 12px; color: var(--muted); margin-left: auto; }
+.triage-fix { font-size: 12px; }
+.triage-rationale { margin: 0; font-size: 13px; color: var(--text); }
+.triage-reason { margin: 0; font-size: 12px; }
 .diffpane-head {
   display: flex; align-items: center; justify-content: space-between;
   font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted);
