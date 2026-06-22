@@ -423,6 +423,14 @@ button:disabled { opacity: 0.5; cursor: default; }
 }
 .diff-file .diff-line:hover .add-comment-btn { opacity: 1; }
 
+/* PR comments (Review tab) — reuses .comment-card/.comment-* below */
+.pr-comments { display: flex; flex-direction: column; gap: 8px; margin-top: 16px; }
+.pr-comments-head { display: flex; align-items: center; justify-content: space-between; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); }
+.pr-comment-kind { padding: 0 6px; border-radius: 10px; border: 1px solid var(--border); text-transform: uppercase; letter-spacing: 0.5px; }
+.comment-time { margin-left: auto; }
+.comment-link { color: var(--muted); text-decoration: none; }
+.comment-link:hover { color: var(--text); }
+
 /* inline comment widgets */
 .diff-comments { display: flex; flex-direction: column; gap: 8px; padding: 8px 10px; background: var(--panel); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
 .comment-card { border: 1px solid var(--border); border-radius: 6px; background: var(--bg); padding: 6px 8px; font-family: -apple-system, system-ui, sans-serif; }

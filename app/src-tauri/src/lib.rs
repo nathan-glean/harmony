@@ -789,6 +789,25 @@ async fn ticket_pr(state: State<'_, AppState>, ticket_id: i64) -> Result<PrStatu
     Ok(status)
 }
 
+/// GitHub PR comments (conversation thread, review summaries, inline diff comments) for the
+/// ticket's branch PR. Empty when there's no PR / gh isn't set up.
+#[tauri::command]
+async fn ticket_pr_comments(
+    state: State<'_, AppState>,
+    ticket_id: i64,
+) -> Result<Vec<harmony_core::github::PrComment>, String> {
+    let wt = state
+        .store
+        .primary_worktree_for_ticket(ticket_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("no worktree — start a session first")?;
+    let path = wt.path;
+    tokio::task::spawn_blocking(move || harmony_core::github::pr_comments(&path))
+        .await
+        .map_err(|e| e.to_string())
+}
+
 // ---- diff comments -------------------------------------------------------
 
 /// All review comments left on a ticket's diff (open + sent + resolved).
@@ -1474,6 +1493,7 @@ pub fn run() {
             cleanup_ticket_worktrees,
             ticket_diff,
             ticket_pr,
+            ticket_pr_comments,
             list_diff_comments,
             add_diff_comment,
             delete_diff_comment,

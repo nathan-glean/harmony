@@ -202,6 +202,140 @@ fn parse_pr_status(json: &str) -> PrStatus {
     }
 }
 
+/// A GitHub PR comment normalized for display: the conversation thread, review summaries
+/// (approve/request-changes), and inline diff comments, unified into one shape.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PrComment {
+    pub author: String,
+    pub body: String,
+    /// ISO8601 timestamp from the API (created_at / submitted_at). Used to sort + display.
+    pub created_at: String,
+    /// "conversation" | "review" | "inline".
+    pub kind: String,
+    /// Review state (APPROVED / CHANGES_REQUESTED / COMMENTED) — empty for non-review comments.
+    pub state: String,
+    /// Inline comment file path — empty otherwise.
+    pub path: String,
+    /// Inline comment line — 0 otherwise.
+    pub line: i64,
+    /// `html_url` to the comment on GitHub.
+    pub url: String,
+}
+
+/// The branch's PR number, parsed from `pr_view_json` (None when there's no PR).
+pub fn pr_number(worktree: &str) -> Option<i64> {
+    let json = pr_view_json(worktree).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&json).ok()?;
+    v.get("number").and_then(|n| n.as_i64())
+}
+
+/// `gh api <path> --paginate` (gh substitutes `{owner}/{repo}` from the repo in `worktree`).
+fn gh_api(worktree: &str, path: &str) -> Result<String> {
+    run("gh", &["api", path, "--paginate"], worktree)
+}
+
+/// All PR comments for the branch's PR — conversation thread, review summaries, and inline diff
+/// comments — merged and sorted oldest→newest. Best-effort: no PR (or any `gh` failure) → empty.
+pub fn pr_comments(worktree: &str) -> Vec<PrComment> {
+    let Some(n) = pr_number(worktree) else {
+        return vec![];
+    };
+    let mut out = Vec::new();
+    if let Ok(j) = gh_api(worktree, &format!("repos/{{owner}}/{{repo}}/issues/{n}/comments")) {
+        out.extend(parse_issue_comments(&j));
+    }
+    if let Ok(j) = gh_api(worktree, &format!("repos/{{owner}}/{{repo}}/pulls/{n}/reviews")) {
+        out.extend(parse_reviews(&j));
+    }
+    if let Ok(j) = gh_api(worktree, &format!("repos/{{owner}}/{{repo}}/pulls/{n}/comments")) {
+        out.extend(parse_review_comments(&j));
+    }
+    out.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    out
+}
+
+fn as_array(json: &str) -> Vec<serde_json::Value> {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
+}
+fn str_at(v: &serde_json::Value, key: &str) -> String {
+    v.get(key).and_then(|x| x.as_str()).unwrap_or("").to_string()
+}
+fn login(v: &serde_json::Value) -> String {
+    v.get("user").and_then(|u| u.get("login")).and_then(|x| x.as_str()).unwrap_or("").to_string()
+}
+
+/// Conversation thread comments (`…/issues/{n}/comments`).
+pub fn parse_issue_comments(json: &str) -> Vec<PrComment> {
+    as_array(json)
+        .iter()
+        .map(|c| PrComment {
+            author: login(c),
+            body: str_at(c, "body"),
+            created_at: str_at(c, "created_at"),
+            kind: "conversation".into(),
+            state: String::new(),
+            path: String::new(),
+            line: 0,
+            url: str_at(c, "html_url"),
+        })
+        .collect()
+}
+
+/// Review summaries (`…/pulls/{n}/reviews`). Keep reviews with a non-empty body or a meaningful
+/// state (APPROVED / CHANGES_REQUESTED); drop empty COMMENTED/PENDING noise.
+pub fn parse_reviews(json: &str) -> Vec<PrComment> {
+    as_array(json)
+        .iter()
+        .filter_map(|r| {
+            let body = str_at(r, "body");
+            let state = str_at(r, "state");
+            let keep = !body.trim().is_empty()
+                || matches!(state.as_str(), "APPROVED" | "CHANGES_REQUESTED");
+            if !keep {
+                return None;
+            }
+            Some(PrComment {
+                author: login(r),
+                body,
+                created_at: str_at(r, "submitted_at"),
+                kind: "review".into(),
+                state,
+                path: String::new(),
+                line: 0,
+                url: str_at(r, "html_url"),
+            })
+        })
+        .collect()
+}
+
+/// Inline diff comments (`…/pulls/{n}/comments`). `line` falls back to `original_line` when the
+/// comment's line is no longer present in the current diff.
+pub fn parse_review_comments(json: &str) -> Vec<PrComment> {
+    as_array(json)
+        .iter()
+        .map(|c| {
+            let line = c
+                .get("line")
+                .and_then(|x| x.as_i64())
+                .or_else(|| c.get("original_line").and_then(|x| x.as_i64()))
+                .unwrap_or(0);
+            PrComment {
+                author: login(c),
+                body: str_at(c, "body"),
+                created_at: str_at(c, "created_at"),
+                kind: "inline".into(),
+                state: String::new(),
+                path: str_at(c, "path"),
+                line,
+                url: str_at(c, "html_url"),
+            }
+        })
+        .collect()
+}
+
 /// Squash-merge the branch's PR and delete the remote branch (on the move to Done, once the PR
 /// is approved on GitHub). harmony only merges here — never mid-flow.
 pub fn merge_pr(worktree: &str) -> Result<()> {
@@ -254,6 +388,55 @@ mod tests {
         // `gh` prints an empty object / null fields when there's no PR.
         assert_eq!(parse_pr_status("{}"), PrStatus::default());
         assert_eq!(parse_pr_status(""), PrStatus::default());
+    }
+
+    #[test]
+    fn parse_issue_comments_maps_fields() {
+        let j = r#"[
+            {"user":{"login":"alice"},"body":"looks good","created_at":"2026-01-01T00:00:00Z","html_url":"https://x/c/1"}
+        ]"#;
+        let c = parse_issue_comments(j);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].author, "alice");
+        assert_eq!(c[0].kind, "conversation");
+        assert_eq!(c[0].body, "looks good");
+        assert_eq!(c[0].url, "https://x/c/1");
+    }
+
+    #[test]
+    fn parse_reviews_drops_empty_commented_keeps_state_or_body() {
+        let j = r#"[
+            {"user":{"login":"bob"},"body":"","state":"COMMENTED","submitted_at":"t1","html_url":"u1"},
+            {"user":{"login":"bob"},"body":"","state":"APPROVED","submitted_at":"t2","html_url":"u2"},
+            {"user":{"login":"cara"},"body":"please fix","state":"CHANGES_REQUESTED","submitted_at":"t3","html_url":"u3"},
+            {"user":{"login":"dan"},"body":"nit only","state":"COMMENTED","submitted_at":"t4","html_url":"u4"}
+        ]"#;
+        let r = parse_reviews(j);
+        // The empty COMMENTED review is dropped; the other three are kept.
+        let states: Vec<&str> = r.iter().map(|c| c.state.as_str()).collect();
+        assert_eq!(states, vec!["APPROVED", "CHANGES_REQUESTED", "COMMENTED"]);
+        assert!(r.iter().all(|c| c.kind == "review"));
+        assert_eq!(r[1].body, "please fix");
+    }
+
+    #[test]
+    fn parse_review_comments_uses_line_with_original_fallback() {
+        let j = r#"[
+            {"user":{"login":"eve"},"body":"off by one","created_at":"t","html_url":"u","path":"src/x.rs","line":42},
+            {"user":{"login":"eve"},"body":"stale","created_at":"t","html_url":"u","path":"src/y.rs","line":null,"original_line":7}
+        ]"#;
+        let c = parse_review_comments(j);
+        assert_eq!(c[0].path, "src/x.rs");
+        assert_eq!(c[0].line, 42);
+        assert_eq!(c[0].kind, "inline");
+        assert_eq!(c[1].line, 7); // fell back to original_line
+    }
+
+    #[test]
+    fn parse_comments_handle_empty_and_garbage() {
+        assert!(parse_issue_comments("[]").is_empty());
+        assert!(parse_reviews("not json").is_empty());
+        assert!(parse_review_comments("{}").is_empty());
     }
 
     fn git(dir: &std::path::Path, args: &[&str]) {

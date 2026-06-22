@@ -22,6 +22,7 @@ import { TerminalView } from "./components/Terminal";
 import { SpecEditor } from "./components/SpecEditor";
 import { MarkdownView } from "./components/MarkdownView";
 import { ProofPane } from "./components/ProofPane";
+import { PrComments } from "./components/PrComments";
 import { api } from "./api";
 import type { Ticket, Repo, SessionView, WorktreeView, PendingQuestion, SessionProgress, SessionExit, PrDone } from "./types";
 
@@ -868,6 +869,7 @@ export function App() {
                     have Claude run <code>/review</code> and generate one.
                   </p>
                 )}
+                <PrComments key={selected.id} ticketId={selected.id} />
               </div>
 
               <div className={"tabpanel" + (tab === "diff" ? " active" : "")}>

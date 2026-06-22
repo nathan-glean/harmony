@@ -22,6 +22,18 @@ export type Ticket = {
   ci_triage: string; // JSON of the latest CiTriage, "" when none
 };
 
+// A GitHub PR comment normalized for display (matches harmony_core::github::PrComment).
+export type PrComment = {
+  author: string;
+  body: string;
+  created_at: string; // ISO8601
+  kind: "conversation" | "review" | "inline";
+  state: string; // review state (APPROVED/CHANGES_REQUESTED/COMMENTED) or ""
+  path: string; // inline file path or ""
+  line: number; // inline line or 0
+  url: string;
+};
+
 // The LLM's attribution of a CI failure (matches harmony_core::ci::CiVerdict).
 export type CiVerdict = {
   category: "pr_caused" | "unrelated_infra" | "flaky" | "undetermined";
