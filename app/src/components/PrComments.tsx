@@ -98,17 +98,24 @@ export function PrComments({
   // anchor → status of the matching local pr_comment feedback ("open" = queued, "sent" = sent).
   const [flagged, setFlagged] = useState<Record<string, string>>({});
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setErr(null);
-    try {
-      setComments(await api.ticketPrComments(ticketId));
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, [ticketId]);
+  // `silent` background refreshes (the auto-poll) don't toggle the loading indicator or surface
+  // transient errors, so the list updates without flicker.
+  const load = useCallback(
+    async (silent = false) => {
+      if (!silent) {
+        setLoading(true);
+        setErr(null);
+      }
+      try {
+        setComments(await api.ticketPrComments(ticketId));
+      } catch (e) {
+        if (!silent) setErr(String(e));
+      } finally {
+        if (!silent) setLoading(false);
+      }
+    },
+    [ticketId]
+  );
 
   // Which PR comments are flagged: match local pr_comment feedback by anchor. Open beats sent
   // beats resolved when an anchor has been flagged more than once.
@@ -133,6 +140,15 @@ export function PrComments({
     load();
   }, [load]);
 
+  // Auto-grab new PR comments: refresh quietly every 60s while the modal is open (skip when the
+  // window is hidden to avoid pointless `gh` calls in the background).
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (!document.hidden) load(true);
+    }, 60000);
+    return () => clearInterval(id);
+  }, [load]);
+
   useEffect(() => {
     loadFlagged();
   }, [loadFlagged, version]);
@@ -154,7 +170,7 @@ export function PrComments({
     <div className="pr-comments">
       <div className="pr-comments-head">
         <span>PR comments</span>
-        <button onClick={load} disabled={loading}>
+        <button onClick={() => load()} disabled={loading}>
           {loading ? "Loading…" : "Refresh"}
         </button>
       </div>
