@@ -33,6 +33,9 @@ export type PrComment = {
   path: string; // inline file path or ""
   line: number; // inline line or 0
   url: string;
+  diff_hunk: string; // inline: the unified diff context the comment is on; "" otherwise
+  priority: string; // "high" | "medium" | "low" | "" — parsed from the comment (e.g. Copilot severity)
+  start_line: number; // inline multi-line: first line of the range (line is the last); 0 otherwise
 };
 
 // The LLM's attribution of a CI failure (matches harmony_core::ci::CiVerdict).

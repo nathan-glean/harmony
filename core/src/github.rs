@@ -220,6 +220,46 @@ pub struct PrComment {
     pub line: i64,
     /// `html_url` to the comment on GitHub.
     pub url: String,
+    /// For inline comments: the unified `diff_hunk` the comment anchors to (the line changes it's
+    /// about). Empty otherwise. The proposed edit (`suggestion`) lives in `body`.
+    pub diff_hunk: String,
+    /// For a multi-line inline comment: the first line of the commented range (`line` is the last).
+    /// 0 for single-line / non-inline — used to size how many lines a `suggestion` replaces.
+    pub start_line: i64,
+    /// "high" | "medium" | "low" | "" — priority/severity parsed from the comment body (e.g. a
+    /// Copilot review's stated severity). Empty when none is detected.
+    pub priority: String,
+}
+
+/// Best-effort priority/severity from a comment body. Looks for a level near a "priority"/"severity"
+/// label or a coloured-circle emoji — both strong, low-false-positive signals (a bare word like
+/// "low-level" elsewhere in the prose won't trip it). Returns "high" | "medium" | "low" | "".
+pub fn parse_priority(body: &str) -> String {
+    let b = body.to_lowercase();
+    for key in ["priority", "severity"] {
+        if let Some(i) = b.find(key) {
+            let w = &b[i..(i + 48).min(b.len())];
+            if ["high", "critical", "blocker", "major"].iter().any(|k| w.contains(k)) {
+                return "high".into();
+            }
+            if ["medium", "moderate", "warning"].iter().any(|k| w.contains(k)) {
+                return "medium".into();
+            }
+            if ["low", "minor", "trivial", "nit"].iter().any(|k| w.contains(k)) {
+                return "low".into();
+            }
+        }
+    }
+    if body.contains('🔴') {
+        return "high".into();
+    }
+    if body.contains('🟠') || body.contains('🟡') {
+        return "medium".into();
+    }
+    if body.contains('🟢') {
+        return "low".into();
+    }
+    String::new()
 }
 
 /// The branch's PR number, parsed from `pr_view_json` (None when there's no PR).
@@ -250,8 +290,27 @@ pub fn pr_comments(worktree: &str) -> Vec<PrComment> {
     if let Ok(j) = gh_api(worktree, &format!("repos/{{owner}}/{{repo}}/pulls/{n}/comments")) {
         out.extend(parse_review_comments(&j));
     }
+    let mut out = dedup_comments(out);
     out.sort_by(|a, b| a.created_at.cmp(&b.created_at));
     out
+}
+
+/// Drop duplicate comments, keeping first occurrence. `gh api --paginate` can repeat items, which
+/// would otherwise show the same comment twice in the UI. Identity is the GitHub `html_url` (unique
+/// per comment/review); when a url is missing, fall back to author+kind+body+timestamp.
+fn dedup_comments(comments: Vec<PrComment>) -> Vec<PrComment> {
+    let mut seen = std::collections::HashSet::new();
+    comments
+        .into_iter()
+        .filter(|c| {
+            let key = if c.url.is_empty() {
+                format!("{}\u{1}{}\u{1}{}\u{1}{}", c.author, c.kind, c.created_at, c.body)
+            } else {
+                c.url.clone()
+            };
+            seen.insert(key)
+        })
+        .collect()
 }
 
 fn as_array(json: &str) -> Vec<serde_json::Value> {
@@ -271,15 +330,21 @@ fn login(v: &serde_json::Value) -> String {
 pub fn parse_issue_comments(json: &str) -> Vec<PrComment> {
     as_array(json)
         .iter()
-        .map(|c| PrComment {
-            author: login(c),
-            body: str_at(c, "body"),
-            created_at: str_at(c, "created_at"),
-            kind: "conversation".into(),
-            state: String::new(),
-            path: String::new(),
-            line: 0,
-            url: str_at(c, "html_url"),
+        .map(|c| {
+            let body = str_at(c, "body");
+            PrComment {
+                author: login(c),
+                priority: parse_priority(&body),
+                body,
+                created_at: str_at(c, "created_at"),
+                kind: "conversation".into(),
+                state: String::new(),
+                path: String::new(),
+                line: 0,
+                url: str_at(c, "html_url"),
+                diff_hunk: String::new(),
+                start_line: 0,
+            }
         })
         .collect()
 }
@@ -299,6 +364,7 @@ pub fn parse_reviews(json: &str) -> Vec<PrComment> {
             }
             Some(PrComment {
                 author: login(r),
+                priority: parse_priority(&body),
                 body,
                 created_at: str_at(r, "submitted_at"),
                 kind: "review".into(),
@@ -306,6 +372,8 @@ pub fn parse_reviews(json: &str) -> Vec<PrComment> {
                 path: String::new(),
                 line: 0,
                 url: str_at(r, "html_url"),
+                diff_hunk: String::new(),
+                start_line: 0,
             })
         })
         .collect()
@@ -322,15 +390,24 @@ pub fn parse_review_comments(json: &str) -> Vec<PrComment> {
                 .and_then(|x| x.as_i64())
                 .or_else(|| c.get("original_line").and_then(|x| x.as_i64()))
                 .unwrap_or(0);
+            let start_line = c
+                .get("start_line")
+                .and_then(|x| x.as_i64())
+                .or_else(|| c.get("original_start_line").and_then(|x| x.as_i64()))
+                .unwrap_or(0);
+            let body = str_at(c, "body");
             PrComment {
                 author: login(c),
-                body: str_at(c, "body"),
+                priority: parse_priority(&body),
+                body,
                 created_at: str_at(c, "created_at"),
                 kind: "inline".into(),
                 state: String::new(),
                 path: str_at(c, "path"),
                 line,
                 url: str_at(c, "html_url"),
+                diff_hunk: str_at(c, "diff_hunk"),
+                start_line,
             }
         })
         .collect()
@@ -422,13 +499,15 @@ mod tests {
     #[test]
     fn parse_review_comments_uses_line_with_original_fallback() {
         let j = r#"[
-            {"user":{"login":"eve"},"body":"off by one","created_at":"t","html_url":"u","path":"src/x.rs","line":42},
+            {"user":{"login":"eve"},"body":"```suggestion\nlet x = 1;\n```","created_at":"t","html_url":"u","path":"src/x.rs","line":42,"diff_hunk":"@@ -40,3 +40,3 @@\n-let x = 0;\n+let x = 1;"},
             {"user":{"login":"eve"},"body":"stale","created_at":"t","html_url":"u","path":"src/y.rs","line":null,"original_line":7}
         ]"#;
         let c = parse_review_comments(j);
         assert_eq!(c[0].path, "src/x.rs");
         assert_eq!(c[0].line, 42);
         assert_eq!(c[0].kind, "inline");
+        assert!(c[0].diff_hunk.contains("+let x = 1;"));
+        assert!(c[0].body.contains("```suggestion"));
         assert_eq!(c[1].line, 7); // fell back to original_line
     }
 
@@ -437,6 +516,63 @@ mod tests {
         assert!(parse_issue_comments("[]").is_empty());
         assert!(parse_reviews("not json").is_empty());
         assert!(parse_review_comments("{}").is_empty());
+    }
+
+    #[test]
+    fn parse_priority_detects_labelled_and_emoji() {
+        assert_eq!(parse_priority("Priority: High — fix this"), "high");
+        assert_eq!(parse_priority("severity: medium"), "medium");
+        assert_eq!(parse_priority("**Priority:** Low (nit)"), "low");
+        assert_eq!(parse_priority("🔴 This will crash"), "high");
+        assert_eq!(parse_priority("🟢 minor style note"), "low");
+        // No label → no false positive from incidental words.
+        assert_eq!(parse_priority("this is a low-level helper"), "");
+        assert_eq!(parse_priority("looks good to me"), "");
+    }
+
+    #[test]
+    fn dedup_comments_removes_repeats_by_url() {
+        let mk = |url: &str, body: &str| PrComment {
+            author: "a".into(),
+            body: body.into(),
+            created_at: "t".into(),
+            kind: "conversation".into(),
+            state: String::new(),
+            path: String::new(),
+            line: 0,
+            url: url.into(),
+            diff_hunk: String::new(),
+            priority: String::new(),
+            start_line: 0,
+        };
+        let out = dedup_comments(vec![
+            mk("https://x/c/1", "one"),
+            mk("https://x/c/2", "two"),
+            mk("https://x/c/1", "one"), // duplicate (e.g. from --paginate)
+        ]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].url, "https://x/c/1");
+        assert_eq!(out[1].url, "https://x/c/2");
+    }
+
+    #[test]
+    fn dedup_comments_keeps_distinct_urlless_by_content() {
+        let mk = |body: &str| PrComment {
+            author: "a".into(),
+            body: body.into(),
+            created_at: "t".into(),
+            kind: "review".into(),
+            state: String::new(),
+            path: String::new(),
+            line: 0,
+            url: String::new(),
+            diff_hunk: String::new(),
+            priority: String::new(),
+            start_line: 0,
+        };
+        // Same author/kind/time but different bodies → distinct; identical → collapsed.
+        let out = dedup_comments(vec![mk("x"), mk("y"), mk("x")]);
+        assert_eq!(out.len(), 2);
     }
 
     fn git(dir: &std::path::Path, args: &[&str]) {

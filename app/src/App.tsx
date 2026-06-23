@@ -40,6 +40,9 @@ export function App() {
   const [reviewSub, setReviewSub] = useState<"review" | "diff" | "pr">("review");
   // Bumped whenever review feedback is added/sent, so the feedback list reloads across components.
   const [fbVersion, setFbVersion] = useState(0);
+  // Open-feedback count + send state for the always-visible "Send to Claude" button in the subtabs.
+  const [openFeedback, setOpenFeedback] = useState(0);
+  const [sendingFeedback, setSendingFeedback] = useState(false);
   const [selected, setSelected] = useState<Ticket | null>(null);
   // Live terminals keyed by ticket id → session id (supports several at once).
   const [liveSessions, setLiveSessions] = useState<Record<number, number>>({});
@@ -396,6 +399,41 @@ export function App() {
     setTab(liveSessions[selected.id] ? "session" : selected.jira_key ? "description" : "spec");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected?.id]);
+
+  // Count of open feedback comments for the selected ticket (drives the always-visible
+  // "Send to Claude" button in the Review sub-tab strip). Reloads on feedback changes (fbVersion)
+  // and on sub-tab switches (so diff comments added in the Diff sub-tab are reflected).
+  useEffect(() => {
+    if (!selected) {
+      setOpenFeedback(0);
+      return;
+    }
+    let cancelled = false;
+    api
+      .listDiffComments(selected.id)
+      .then((cs) => {
+        if (!cancelled) setOpenFeedback(cs.filter((c) => c.status === "open").length);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected?.id, fbVersion, reviewSub]);
+
+  const sendFeedbackToClaude = async () => {
+    if (!selected) return;
+    setSendingFeedback(true);
+    try {
+      await api.addressFeedback(selected.id);
+      flash("Sending feedback to Claude…");
+    } catch (e) {
+      flash(String(e));
+    } finally {
+      setSendingFeedback(false);
+      setFbVersion((v) => v + 1);
+    }
+  };
 
   const flash = (m: string) => {
     setToast(m);
@@ -852,6 +890,17 @@ export function App() {
                   >
                     PR comments
                   </button>
+                  {openFeedback > 0 && (
+                    <button
+                      className="send-claude subtab-send"
+                      onClick={sendFeedbackToClaude}
+                      disabled={sendingFeedback}
+                    >
+                      {sendingFeedback
+                        ? "Sending…"
+                        : `Send ${openFeedback} comment${openFeedback === 1 ? "" : "s"} to Claude`}
+                    </button>
+                  )}
                 </div>
 
                 <div className={"subtabpanel" + (reviewSub === "review" ? " active" : "")}>
@@ -904,6 +953,7 @@ export function App() {
                   <PrComments
                     key={`pr-${selected.id}`}
                     ticketId={selected.id}
+                    version={fbVersion}
                     onCommentAdded={() => setFbVersion((v) => v + 1)}
                   />
                 </div>

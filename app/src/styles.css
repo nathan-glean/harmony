@@ -223,6 +223,8 @@ button:disabled { opacity: 0.5; cursor: default; }
 }
 .subtab:hover:not(:disabled) { color: var(--text); }
 .subtab.active { color: var(--text); border-bottom-color: var(--accent); }
+.subtabs { align-items: center; }
+.subtab-send { margin-left: auto; align-self: center; }
 .subtabpanel { display: none; }
 .subtabpanel.active { display: flex; flex-direction: column; gap: 12px; }
 
@@ -454,6 +456,38 @@ button:disabled { opacity: 0.5; cursor: default; }
 .proposed-spec-actions .primary { color: var(--accent); border-color: var(--accent); }
 .proposed-spec-body { max-height: 320px; overflow: auto; }
 
+/* PR comment priority badge (parsed severity). */
+.prio-badge {
+  padding: 0 6px; border-radius: 10px; font-size: 10px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.5px; border: 1px solid;
+}
+.prio-badge.high { color: #f7768e; border-color: #f7768e; }
+.prio-badge.medium { color: #e0af68; border-color: #e0af68; }
+.prio-badge.low { color: #9ece6a; border-color: #9ece6a; }
+
+/* Inline-comment diff context (the lines a review/suggestion is about). */
+.diff-hunk {
+  margin: 4px 0 6px; padding: 6px 8px; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 6px; overflow-x: auto; font: 12px/1.5 Menlo, monospace;
+}
+.dh-line { white-space: pre; }
+.dh-line.add { color: #9ece6a; background: rgba(158, 206, 106, 0.08); }
+.dh-line.del { color: #f7768e; background: rgba(247, 118, 142, 0.08); }
+.dh-line.hunk { color: var(--muted); }
+.suggested-change { margin: 4px 0 6px; }
+.suggested-change-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); margin-bottom: 3px; }
+
+/* Markdown-rendered comment body (PR comments) — MDXEditor themed to blend into the card. */
+.comment-md .mdxeditor {
+  background: transparent;
+  --basePageBg: var(--bg);
+  --baseBg: var(--panel2);
+  --baseBorder: var(--border);
+  --baseText: var(--text);
+  --accentBase: var(--accent);
+}
+.comment-md .md-content { padding: 0; font-size: 13px; line-height: 1.5; min-height: 0; }
+
 /* PR comments (Review tab) — reuses .comment-card/.comment-* below */
 .pr-comments { display: flex; flex-direction: column; gap: 8px; margin-top: 16px; }
 .pr-comments-head { display: flex; align-items: center; justify-content: space-between; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); }
@@ -472,6 +506,8 @@ button:disabled { opacity: 0.5; cursor: default; }
 .comment-composer-range { font-size: 11px; font-family: Menlo, monospace; }
 .comment-status { padding: 0 6px; border-radius: 10px; border: 1px solid var(--border); }
 .comment-status.sent { color: var(--accent); border-color: var(--accent); }
+.comment-status.queued { color: #e0af68; border-color: #e0af68; }
+.comment-card.flagged { border-color: #e0af68; }
 .comment-actions { margin-left: auto; display: flex; gap: 4px; }
 .comment-actions button { font-size: 11px; padding: 1px 6px; }
 .comment-body { font-size: 13px; white-space: pre-wrap; color: var(--text); }

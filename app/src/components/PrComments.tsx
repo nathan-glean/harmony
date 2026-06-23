@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
+import { MarkdownView } from "./MarkdownView";
 import type { PrComment } from "../types";
 
 const KIND_LABEL: Record<PrComment["kind"], string> = {
@@ -32,12 +33,70 @@ function timeAgo(iso: string): string {
 /** Read-only list of the GitHub PR's comments (conversation, review summaries, inline). Shown in
  * the Review tab below Claude's /review output. Each can be "flagged for Claude" — a local note
  * (target `pr_comment`) added to the feedback queue. */
-export function PrComments({ ticketId, onCommentAdded }: { ticketId: number; onCommentAdded: () => void }) {
+// Trim a GitHub `diff_hunk` to just the commented line(s) plus a few lines of context. The hunk
+// always ends at the commented line, so we drop the `@@` header and keep the tail.
+const HUNK_CONTEXT = 4;
+function hunkWindow(hunk: string): string[] {
+  const lines = hunk.split("\n").filter((l) => !l.startsWith("@@"));
+  while (lines.length && lines[lines.length - 1].trim() === "") lines.pop();
+  if (lines.length <= HUNK_CONTEXT + 1) return lines;
+  return ["⋯", ...lines.slice(lines.length - (HUNK_CONTEXT + 1))];
+}
+
+// Drop a leading unified-diff marker (+/-/space) from a hunk line.
+function stripMarker(l: string): string {
+  return l.length > 0 && (l[0] === "+" || l[0] === "-" || l[0] === " ") ? l.slice(1) : l;
+}
+
+// Extract ```suggestion blocks from a comment body → arrays of suggested replacement lines.
+function parseSuggestions(body: string): string[][] {
+  const out: string[][] = [];
+  const re = /```suggestion[^\n]*\n([\s\S]*?)```/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(body))) out.push(m[1].replace(/\n$/, "").split("\n"));
+  return out;
+}
+
+// The comment prose with the ```suggestion blocks removed (rendered separately as a diff).
+function stripSuggestions(body: string): string {
+  return body.replace(/```suggestion[^\n]*\n[\s\S]*?```/g, "").trim();
+}
+
+// Rows for a "Suggested change" diff: the commented original line(s) removed, the suggestion added.
+// The commented line(s) are the last `line - start_line + 1` lines of the diff_hunk.
+function suggestionRows(c: PrComment, suggestion: string[]): { sign: string; text: string }[] {
+  const hl = c.diff_hunk.split("\n").filter((l) => !l.startsWith("@@"));
+  while (hl.length && hl[hl.length - 1].trim() === "") hl.pop();
+  const n = c.start_line > 0 && c.start_line <= c.line ? c.line - c.start_line + 1 : 1;
+  const original = hl.slice(Math.max(0, hl.length - n)).map(stripMarker);
+  return [
+    ...original.map((t) => ({ sign: "-", text: t })),
+    ...suggestion.map((t) => ({ sign: "+", text: t })),
+  ];
+}
+
+// The anchor string a flagged PR comment is stored under (must match on add + lookup).
+function anchorFor(c: PrComment): string {
+  const snippet = c.body.trim().replace(/\s+/g, " ").slice(0, 100);
+  return `${c.author || "unknown"}: "${snippet}"`;
+}
+
+export function PrComments({
+  ticketId,
+  version,
+  onCommentAdded,
+}: {
+  ticketId: number;
+  version: number;
+  onCommentAdded: () => void;
+}) {
   const [comments, setComments] = useState<PrComment[]>([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [flagging, setFlagging] = useState<number | null>(null);
   const [note, setNote] = useState("");
+  // anchor → status of the matching local pr_comment feedback ("open" = queued, "sent" = sent).
+  const [flagged, setFlagged] = useState<Record<string, string>>({});
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -51,18 +110,40 @@ export function PrComments({ ticketId, onCommentAdded }: { ticketId: number; onC
     }
   }, [ticketId]);
 
+  // Which PR comments are flagged: match local pr_comment feedback by anchor. Open beats sent
+  // beats resolved when an anchor has been flagged more than once.
+  const loadFlagged = useCallback(async () => {
+    try {
+      const local = await api.listDiffComments(ticketId);
+      const rank: Record<string, number> = { open: 3, sent: 2, resolved: 1 };
+      const map: Record<string, string> = {};
+      for (const c of local) {
+        if (c.target !== "pr_comment" || !c.anchor) continue;
+        if (!map[c.anchor] || (rank[c.status] ?? 0) > (rank[map[c.anchor]] ?? 0)) {
+          map[c.anchor] = c.status;
+        }
+      }
+      setFlagged(map);
+    } catch {
+      /* best-effort */
+    }
+  }, [ticketId]);
+
   useEffect(() => {
     load();
   }, [load]);
 
+  useEffect(() => {
+    loadFlagged();
+  }, [loadFlagged, version]);
+
   // Add a local "pr_comment"-target note for Claude, anchored to this PR comment.
   const flagForClaude = async (c: PrComment) => {
-    const snippet = c.body.trim().replace(/\s+/g, " ").slice(0, 100);
-    const anchor = `${c.author || "unknown"}: "${snippet}"`;
     try {
-      await api.addComment(ticketId, "pr_comment", anchor, note);
+      await api.addComment(ticketId, "pr_comment", anchorFor(c), note);
       setFlagging(null);
       setNote("");
+      await loadFlagged();
       onCommentAdded();
     } catch (e) {
       setErr(String(e));
@@ -81,10 +162,16 @@ export function PrComments({ ticketId, onCommentAdded }: { ticketId: number; onC
       {err && <div className="diff-err">{err}</div>}
 
       {comments.length > 0 ? (
-        comments.map((c, i) => (
-          <div key={i} className="comment-card">
+        comments.map((c, i) => {
+          const flagStatus = flagged[anchorFor(c)];
+          const isFlagged = flagStatus === "open" || flagStatus === "sent";
+          const suggestions = parseSuggestions(c.body);
+          const bodyProse = suggestions.length ? stripSuggestions(c.body) : c.body;
+          return (
+          <div key={i} className={"comment-card" + (isFlagged ? " flagged" : "")}>
             <div className="comment-head">
               <span className="comment-author">{c.author || "unknown"}</span>
+              {c.priority && <span className={"prio-badge " + c.priority}>{c.priority}</span>}
               <span className="pr-comment-kind">{KIND_LABEL[c.kind]}</span>
               {c.kind === "inline" && c.path && (
                 <span className="comment-range">
@@ -97,6 +184,8 @@ export function PrComments({ ticketId, onCommentAdded }: { ticketId: number; onC
                   {REVIEW_STATE_LABEL[c.state] ?? c.state.toLowerCase()}
                 </span>
               )}
+              {flagStatus === "open" && <span className="comment-status queued">queued for Claude</span>}
+              {flagStatus === "sent" && <span className="comment-status sent">sent to Claude</span>}
               <span className="comment-time muted">{timeAgo(c.created_at)}</span>
               {c.url && (
                 <a className="comment-link" href={c.url} target="_blank" rel="noreferrer">
@@ -104,17 +193,55 @@ export function PrComments({ ticketId, onCommentAdded }: { ticketId: number; onC
                 </a>
               )}
             </div>
-            {c.body.trim() ? (
-              <div className="comment-body">{c.body}</div>
-            ) : (
-              <div className="comment-body muted">(no description)</div>
+            {c.kind === "inline" && c.diff_hunk && (
+              <pre className="diff-hunk">
+                {hunkWindow(c.diff_hunk).map((ln, j) => (
+                  <div
+                    key={j}
+                    className={
+                      "dh-line " +
+                      (ln === "⋯"
+                        ? "hunk"
+                        : ln.startsWith("+")
+                        ? "add"
+                        : ln.startsWith("-")
+                        ? "del"
+                        : "")
+                    }
+                  >
+                    {ln || " "}
+                  </div>
+                ))}
+              </pre>
             )}
-            <div className="comment-actions">
-              {flagging === i ? null : (
-                <button onClick={() => { setFlagging(i); setNote(""); }}>Flag for Claude</button>
-              )}
-            </div>
-            {flagging === i && (
+            {bodyProse.trim() ? (
+              <div className="comment-body comment-md">
+                <MarkdownView markdown={bodyProse} />
+              </div>
+            ) : suggestions.length === 0 ? (
+              <div className="comment-body muted">(no description)</div>
+            ) : null}
+            {suggestions.map((s, si) => (
+              <div key={si} className="suggested-change">
+                <div className="suggested-change-label">Suggested change</div>
+                <pre className="diff-hunk">
+                  {suggestionRows(c, s).map((r, j) => (
+                    <div key={j} className={"dh-line " + (r.sign === "+" ? "add" : "del")}>
+                      {r.sign}
+                      {r.text || " "}
+                    </div>
+                  ))}
+                </pre>
+              </div>
+            ))}
+            {!isFlagged && (
+              <div className="comment-actions">
+                {flagging === i ? null : (
+                  <button onClick={() => { setFlagging(i); setNote(""); }}>Flag for Claude</button>
+                )}
+              </div>
+            )}
+            {flagging === i && !isFlagged && (
               <div className="comment-composer">
                 <textarea
                   placeholder={`Note for Claude about ${c.author || "this"}'s comment…`}
@@ -134,7 +261,8 @@ export function PrComments({ ticketId, onCommentAdded }: { ticketId: number; onC
               </div>
             )}
           </div>
-        ))
+          );
+        })
       ) : (
         !loading && <p className="empty">No PR comments yet.</p>
       )}

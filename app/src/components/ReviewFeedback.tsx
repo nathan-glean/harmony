@@ -33,7 +33,6 @@ export function ReviewFeedback({
   const [reviewSel, setReviewSel] = useState<ReviewSel | null>(null);
   const [reviewAnchor, setReviewAnchor] = useState<string | null>(null);
   const [reviewDraft, setReviewDraft] = useState("");
-  const [sending, setSending] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const reviewRef = useRef<HTMLDivElement>(null);
 
@@ -62,20 +61,6 @@ export function ReviewFeedback({
       onChanged();
     } catch (e) {
       setErr(String(e));
-    }
-  };
-
-  const send = async () => {
-    setSending(true);
-    setErr(null);
-    try {
-      await api.addressFeedback(ticketId);
-      await load();
-      onChanged();
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setSending(false);
     }
   };
 
@@ -130,11 +115,6 @@ export function ReviewFeedback({
 
       <div className="pr-comments-head">
         <span>Feedback for Claude</span>
-        {open.length > 0 && (
-          <button className="send-claude" onClick={send} disabled={sending}>
-            {sending ? "Sending…" : `Send ${open.length} comment${open.length === 1 ? "" : "s"} to Claude`}
-          </button>
-        )}
       </div>
 
       {err && <div className="diff-err">{err}</div>}

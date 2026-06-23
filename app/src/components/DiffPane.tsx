@@ -307,11 +307,6 @@ export function DiffPane({ ticketId }: { ticketId: number }) {
       <div className="diffpane-head">
         <span>Diff / PR</span>
         <div className="diffpane-actions">
-          {openCount > 0 && (
-            <button className="send-claude" onClick={sendToClaude} disabled={sending}>
-              {sending ? "Sending…" : `Address ${openCount} comment${openCount === 1 ? "" : "s"} in Claude`}
-            </button>
-          )}
           <div className="view-toggle" role="group" aria-label="Diff layout">
             <button className={viewType === "unified" ? "on" : ""} onClick={() => setViewType("unified")}>
               Unified
