@@ -61,6 +61,80 @@ pub fn pr_summary(worktree: &str, diff: &str, ticket_ref: Option<&str>) -> Resul
     Ok(sanitize_pr_description(&String::from_utf8_lossy(&out.stdout)))
 }
 
+/// Sentinel the model returns when the PR description is still accurate (no update needed).
+const NO_UPDATE: &str = "NO_UPDATE";
+
+/// Decide whether a branch's PR description has gone stale (e.g. after a large change during
+/// review) and, if so, produce a revised one. Runs `claude -p` in read-only plan mode with the
+/// current description + the branch diff on stdin. Returns `Ok(None)` when the description is still
+/// accurate, `Ok(Some(body))` with the revised description otherwise.
+pub fn maybe_update_pr_description(
+    worktree: &str,
+    current_body: &str,
+    diff: &str,
+    ticket_ref: Option<&str>,
+) -> Result<Option<String>> {
+    let reference = match ticket_ref {
+        Some(r) if !r.trim().is_empty() => {
+            format!(" Keep the ticket reference in the body: {r}.")
+        }
+        _ => String::new(),
+    };
+    let prompt = format!(
+        "A pull request's CURRENT description and the branch's full diff (vs base) are provided on \
+         stdin, separated by a line `=== DIFF ===`. The code may have changed materially since the \
+         description was written (e.g. a large change during review).\n\n\
+         If the current description still accurately reflects what the branch does, reply with \
+         EXACTLY `{NO_UPDATE}` and nothing else. Otherwise, output the REVISED description: edit the \
+         current one in place — preserve its template structure, headings, badges and checkboxes, \
+         and change only what is now inaccurate.{reference}\n\n\
+         Output ONLY `{NO_UPDATE}` or the final description markdown — no preamble, no explanation, \
+         and do NOT wrap the description in a code block or fenced block."
+    );
+    let stdin_body = format!(
+        "{}\n=== DIFF ===\n{}",
+        current_body.trim(),
+        truncate_diff(diff, MAX_DIFF_BYTES)
+    );
+
+    let mut child = Command::new("claude")
+        .arg("-p")
+        .arg(&prompt)
+        .arg("--permission-mode")
+        .arg("plan")
+        .current_dir(worktree)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| crate::cmd_err::spawn_error("claude", &e))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(stdin_body.as_bytes());
+    }
+    let out = child
+        .wait_with_output()
+        .map_err(|e| crate::cmd_err::spawn_error("claude", &e))?;
+    if !out.status.success() {
+        return Err(crate::cmd_err::classify("claude", &String::from_utf8_lossy(&out.stderr)));
+    }
+    Ok(interpret_pr_update(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// Interpret the model's response to the description-staleness check: `None` when it declined to
+/// update (first non-empty line is the `NO_UPDATE` sentinel), else the sanitized revised body.
+fn interpret_pr_update(raw: &str) -> Option<String> {
+    let first = raw.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    if first.eq_ignore_ascii_case(NO_UPDATE) {
+        return None;
+    }
+    let body = sanitize_pr_description(raw);
+    if body.is_empty() {
+        None
+    } else {
+        Some(body)
+    }
+}
+
 /// Clean up `claude -p`'s output into the bare PR description: trim, and — when the model ignores
 /// the prompt and wraps the whole description in a fenced block (often preceded by a reasoning
 /// sentence) — drop the preamble and unwrap the fence. A description that merely *contains* code
@@ -251,6 +325,32 @@ mod tests {
     fn sanitize_handles_empty_and_whitespace_only() {
         assert_eq!(sanitize_pr_description(""), "");
         assert_eq!(sanitize_pr_description("   \n\n  \t\n"), "");
+    }
+
+    #[test]
+    fn interpret_pr_update_no_update_sentinel() {
+        assert_eq!(interpret_pr_update("NO_UPDATE"), None);
+        assert_eq!(interpret_pr_update("  no_update  \n"), None);
+        // Sentinel on the first line wins even if the model rambles after it.
+        assert_eq!(interpret_pr_update("NO_UPDATE\nthe description is still fine"), None);
+        assert_eq!(interpret_pr_update("   \n\nNO_UPDATE"), None);
+    }
+
+    #[test]
+    fn interpret_pr_update_returns_revised_body() {
+        let out = interpret_pr_update("## Description\n\nNow also adds CSV export.");
+        assert_eq!(out.as_deref(), Some("## Description\n\nNow also adds CSV export."));
+    }
+
+    #[test]
+    fn interpret_pr_update_unwraps_fenced_body() {
+        let raw = "```markdown\n## Description\n\nRevised.\n```";
+        assert_eq!(interpret_pr_update(raw).as_deref(), Some("## Description\n\nRevised."));
+    }
+
+    #[test]
+    fn interpret_pr_update_empty_is_none() {
+        assert_eq!(interpret_pr_update("   \n  "), None);
     }
 
     #[test]

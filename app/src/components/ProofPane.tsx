@@ -56,6 +56,8 @@ export function ProofPane({ ticket }: { ticket: Ticket }) {
   const [err, setErr] = useState<string | null>(null);
   const [fixing, setFixing] = useState(false);
   const [autofix, setAutofix] = useState(true);
+  const [descAuto, setDescAuto] = useState(true);
+  const [regen, setRegen] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -73,6 +75,7 @@ export function ProofPane({ ticket }: { ticket: Ticket }) {
   useEffect(() => {
     load();
     api.getCiAutofix().then(setAutofix).catch(() => {});
+    api.getPrDescAutoupdate().then(setDescAuto).catch(() => {});
   }, [load]);
 
   const triage = parseTriage(ticket.ci_triage);
@@ -101,6 +104,29 @@ export function ProofPane({ ticket }: { ticket: Ticket }) {
     }
   };
 
+  const toggleDescAuto = async () => {
+    const next = !descAuto;
+    setDescAuto(next);
+    try {
+      await api.setPrDescAutoupdate(next);
+    } catch (e) {
+      setDescAuto(!next); // revert on failure
+      setErr(String(e));
+    }
+  };
+
+  const regenDescription = async () => {
+    setRegen(true);
+    setErr(null);
+    try {
+      await api.updatePrDescription(ticketId);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setRegen(false);
+    }
+  };
+
   return (
     <div className="proofpane">
       <div className="diffpane-head">
@@ -109,12 +135,25 @@ export function ProofPane({ ticket }: { ticket: Ticket }) {
           <label className="autofix-toggle" title="Automatically fix CI failures caused by this PR">
             <input type="checkbox" checked={autofix} onChange={toggleAutofix} /> Auto-fix
           </label>
+          <label
+            className="autofix-toggle"
+            title="Automatically update the PR description when review changes make it stale"
+          >
+            <input type="checkbox" checked={descAuto} onChange={toggleDescAuto} /> Auto-update description
+          </label>
           <button
             onClick={requestFix}
             disabled={fixing}
             title="Triage the PR's CI now and fix any failing checks (manual backup to auto-fix)"
           >
             {fixing ? "Checking…" : "Check & fix CI"}
+          </button>
+          <button
+            onClick={regenDescription}
+            disabled={regen}
+            title="Have Claude regenerate the PR description from the current changes now"
+          >
+            {regen ? "Updating…" : "Regenerate description"}
           </button>
           <button onClick={load} disabled={loading}>
             {loading ? "Loading…" : "Refresh"}

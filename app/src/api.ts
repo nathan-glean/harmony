@@ -49,6 +49,9 @@ export const api = {
   requestCiFix: (id: number) => invoke<string>("request_ci_fix", { ticketId: id }),
   getCiAutofix: () => invoke<boolean>("get_ci_autofix"),
   setCiAutofix: (enabled: boolean) => invoke<void>("set_ci_autofix", { enabled }),
+  getPrDescAutoupdate: () => invoke<boolean>("get_pr_desc_autoupdate"),
+  setPrDescAutoupdate: (enabled: boolean) => invoke<void>("set_pr_desc_autoupdate", { enabled }),
+  updatePrDescription: (id: number) => invoke<void>("update_pr_description_now", { ticketId: id }),
   jiraApplyColumn: (ticketId: number, status: string) =>
     invoke<void>("jira_apply_column", { ticketId, status }),
   deleteTicket: (id: number, force: boolean) =>

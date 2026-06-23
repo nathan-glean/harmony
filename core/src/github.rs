@@ -54,6 +54,19 @@ pub fn pr_view_json(worktree: &str) -> Result<String> {
     run("gh", &["pr", "view", "--json", "number,title,url,state,isDraft"], worktree)
 }
 
+/// The branch PR's current description body (`gh pr view --json body`). None when there's no PR.
+pub fn pr_body(worktree: &str) -> Option<String> {
+    let json = run("gh", &["pr", "view", "--json", "body"], worktree).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&json).ok()?;
+    v.get("body").and_then(|x| x.as_str()).map(|s| s.to_string())
+}
+
+/// Replace the branch PR's description (`gh pr edit --body`).
+pub fn update_pr_body(worktree: &str, body: &str) -> Result<()> {
+    run("gh", &["pr", "edit", "--body", body], worktree)?;
+    Ok(())
+}
+
 /// `gh pr checks --json …`. NOTE: `gh pr checks` exits non-zero when checks are failing or
 /// pending, but still prints the JSON — so we read stdout regardless of exit code.
 pub fn pr_checks_json(worktree: &str) -> Result<String> {

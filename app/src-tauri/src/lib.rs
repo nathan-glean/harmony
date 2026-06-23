@@ -696,19 +696,92 @@ fn ci_fix_context(triage: &harmony_core::ci::CiTriage) -> String {
 /// `FixFinished`: commit + push the fix session's changes (re-triggers CI), keeping the ticket in
 /// the PR column. The next poll tick re-triages the new HEAD (and stops at the attempt cap).
 async fn on_ci_fix_finished(app: &AppHandle, state: &AppState, ticket_id: i64) {
+    let mut pushed = false;
     if let Ok(Some(ticket)) = state.store.get_ticket(ticket_id).await {
         if let Ok(Some(wt)) = state.store.primary_worktree_for_ticket(ticket_id).await {
             let (path, branch, msg) = (wt.path.clone(), wt.branch.clone(), commit_message(&ticket));
-            let _ = tokio::task::spawn_blocking(move || {
+            pushed = tokio::task::spawn_blocking(move || {
                 if harmony_core::github::commit_all(&path, &msg).unwrap_or(false) {
                     let _ = harmony_core::github::push_branch(&path, &branch);
+                    return harmony_core::github::pr_status(&path).exists;
                 }
+                false
             })
-            .await;
+            .await
+            .unwrap_or(false);
         }
     }
     let _ = state.store.set_ticket_status(ticket_id, harmony_core::status::IN_REVIEW).await;
     let _ = app.emit("ticket-updated", ticket_id);
+    if pushed {
+        maybe_update_pr_desc(app, state, ticket_id).await;
+    }
+}
+
+/// Whether automatic PR-description updates are enabled (kill-switch; default on).
+async fn pr_desc_autoupdate_enabled(state: &AppState) -> bool {
+    state
+        .store
+        .get_setting("pr_desc_autoupdate")
+        .await
+        .ok()
+        .flatten()
+        .map(|v| v != "off")
+        .unwrap_or(true)
+}
+
+/// Ask Claude whether review changes made the PR description stale and, if so, update it on GitHub.
+/// Gated by the `pr_desc_autoupdate` kill-switch unless `force` (a manual request). No-op when
+/// there's no PR. One extra `claude -p` per call — only invoked after a pushed change.
+async fn update_pr_description(app: &AppHandle, state: &AppState, ticket_id: i64, force: bool) {
+    if !force && !pr_desc_autoupdate_enabled(state).await {
+        return;
+    }
+    let ticket = match state.store.get_ticket(ticket_id).await.ok().flatten() {
+        Some(t) => t,
+        None => return,
+    };
+    let wt = match state.store.primary_worktree_for_ticket(ticket_id).await.ok().flatten() {
+        Some(w) => w,
+        None => return,
+    };
+    let repo = match state.store.get_repo(wt.repo_id).await.ok().flatten() {
+        Some(r) => r,
+        None => return,
+    };
+    // Jira browse URL woven into the body (kept across updates), as in `open_pr_for`.
+    let ticket_ref: Option<String> = match ticket.jira_key.as_deref() {
+        Some(key) => Some(match harmony_core::jira::connected_site().await {
+            Some(site) => format!("https://{site}/browse/{key}"),
+            None => key.to_string(),
+        }),
+        None => None,
+    };
+    let (path, repo_path) = (wt.path.clone(), repo.path.clone());
+    let updated = tokio::task::spawn_blocking(move || {
+        let body = harmony_core::github::pr_body(&path)?;
+        let base = harmony_core::worktree::default_branch(&repo_path).unwrap_or_else(|_| "main".into());
+        let diff = harmony_core::github::diff(&path, &base).unwrap_or_default();
+        match harmony_core::draft::maybe_update_pr_description(&path, &body, &diff, ticket_ref.as_deref()) {
+            Ok(Some(new_body)) => {
+                let _ = harmony_core::github::update_pr_body(&path, &new_body);
+                Some(true)
+            }
+            _ => Some(false),
+        }
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(false);
+    if updated {
+        let _ = app.emit("ticket-updated", ticket_id);
+    }
+}
+
+/// Convenience wrapper used by the session-finished handlers (auto, respects the kill-switch).
+async fn maybe_update_pr_desc(app: &AppHandle, state: &AppState, ticket_id: i64) {
+    update_pr_description(app, state, ticket_id, false).await;
 }
 
 /// `AddressFinished`: commit the feedback-addressing session's changes; push only when a PR
@@ -716,24 +789,30 @@ async fn on_ci_fix_finished(app: &AppHandle, state: &AppState, ticket_id: i64) {
 /// (PR column if a PR exists, else Human Review).
 async fn on_address_finished(app: &AppHandle, state: &AppState, ticket_id: i64) {
     let mut pr_exists = false;
+    let mut pushed = false;
     if let Ok(Some(ticket)) = state.store.get_ticket(ticket_id).await {
         if let Ok(Some(wt)) = state.store.primary_worktree_for_ticket(ticket_id).await {
             let (path, branch, msg) = (wt.path.clone(), wt.branch.clone(), commit_message(&ticket));
-            pr_exists = tokio::task::spawn_blocking(move || {
+            let res = tokio::task::spawn_blocking(move || {
                 let committed = harmony_core::github::commit_all(&path, &msg).unwrap_or(false);
                 let exists = harmony_core::github::pr_status(&path).exists;
                 if committed && exists {
                     let _ = harmony_core::github::push_branch(&path, &branch);
                 }
-                exists
+                (exists, committed && exists)
             })
             .await
-            .unwrap_or(false);
+            .unwrap_or((false, false));
+            pr_exists = res.0;
+            pushed = res.1;
         }
     }
     let status = if pr_exists { harmony_core::status::IN_REVIEW } else { harmony_core::status::WAITING };
     let _ = state.store.set_ticket_status(ticket_id, status).await;
     let _ = app.emit("ticket-updated", ticket_id);
+    if pushed {
+        maybe_update_pr_desc(app, state, ticket_id).await;
+    }
 }
 
 /// Manual "Fix CI" button: triage now and fix regardless of the auto gates.
@@ -745,6 +824,27 @@ async fn request_ci_fix(app: AppHandle, state: State<'_, AppState>, ticket_id: i
 #[tauri::command]
 async fn get_ci_autofix(state: State<'_, AppState>) -> Result<bool, String> {
     Ok(ci_autofix_enabled(&state).await)
+}
+
+#[tauri::command]
+async fn get_pr_desc_autoupdate(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(pr_desc_autoupdate_enabled(&state).await)
+}
+
+#[tauri::command]
+async fn set_pr_desc_autoupdate(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+    state
+        .store
+        .set_setting("pr_desc_autoupdate", if enabled { "on" } else { "off" })
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Manual "Regenerate PR description" — runs the staleness check + update now, ignoring the toggle.
+#[tauri::command]
+async fn update_pr_description_now(app: AppHandle, state: State<'_, AppState>, ticket_id: i64) -> Result<(), String> {
+    update_pr_description(&app, &state, ticket_id, true).await;
+    Ok(())
 }
 
 #[tauri::command]
@@ -1580,6 +1680,9 @@ pub fn run() {
             request_ci_fix,
             get_ci_autofix,
             set_ci_autofix,
+            get_pr_desc_autoupdate,
+            set_pr_desc_autoupdate,
+            update_pr_description_now,
             address_feedback,
             accept_proposed_spec,
             reject_proposed_spec,
