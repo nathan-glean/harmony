@@ -108,6 +108,9 @@ export const api = {
   resolveDiffComment: (id: number) => invoke<void>("resolve_diff_comment", { id }),
   addressFeedback: (ticketId: number) => invoke<number>("address_feedback", { ticketId }),
   acceptProposedSpec: (ticketId: number) => invoke<void>("accept_proposed_spec", { ticketId }),
+  acceptProposedSpecAndImplement: (ticketId: number) =>
+    invoke<number>("accept_proposed_spec_and_implement", { ticketId }),
+  proposedSpecDiff: (ticketId: number) => invoke<string>("proposed_spec_diff", { ticketId }),
   rejectProposedSpec: (ticketId: number) => invoke<void>("reject_proposed_spec", { ticketId }),
   startSession: (ticketId: number, repo: string | null) =>
     invoke<number>("start_session", { ticketId, repo }),

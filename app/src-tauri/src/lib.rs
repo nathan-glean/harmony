@@ -977,12 +977,10 @@ async fn address_feedback(app: AppHandle, state: State<'_, AppState>, ticket_id:
     wire_session(&app, &state, handle, ticket_id)
 }
 
-/// Accept Claude's proposed spec update: parse it into the first-class fields, write it as the
-/// live spec, and clear the proposal.
-#[tauri::command]
-async fn accept_proposed_spec(state: State<'_, AppState>, ticket_id: i64) -> Result<(), String> {
-    let ticket = state
-        .store
+/// Apply Claude's proposed spec to the ticket's live fields: parse the proposal into the first-class
+/// fields, write them, and clear the proposal. Shared by plain "Accept" and "Accept & implement".
+async fn apply_proposed_spec(store: &Store, ticket_id: i64) -> Result<(), String> {
+    let ticket = store
         .get_ticket(ticket_id)
         .await
         .map_err(|e| e.to_string())?
@@ -991,12 +989,44 @@ async fn accept_proposed_spec(state: State<'_, AppState>, ticket_id: i64) -> Res
         return Err("no proposed spec to accept".into());
     }
     let f = harmony_core::spec::parse_spec(&ticket.proposed_spec);
-    state
-        .store
+    store
         .set_ticket_spec_fields(ticket_id, &f.spec, &f.acceptance_criteria, &f.relevant_paths, &f.constraints)
         .await
         .map_err(|e| e.to_string())?;
-    state.store.set_ticket_proposed_spec(ticket_id, "").await.map_err(|e| e.to_string())
+    store.set_ticket_proposed_spec(ticket_id, "").await.map_err(|e| e.to_string())
+}
+
+/// Accept Claude's proposed spec update: parse it into the first-class fields, write it as the
+/// live spec, and clear the proposal.
+#[tauri::command]
+async fn accept_proposed_spec(state: State<'_, AppState>, ticket_id: i64) -> Result<(), String> {
+    apply_proposed_spec(&state.store, ticket_id).await
+}
+
+/// Accept Claude's proposed spec update (as `accept_proposed_spec`) and immediately resume Claude to
+/// implement the now-agreed change. Returns the new session id.
+#[tauri::command]
+async fn accept_proposed_spec_and_implement(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ticket_id: i64,
+) -> Result<i64, String> {
+    apply_proposed_spec(&state.store, ticket_id).await?;
+    let mgr = SessionManager::new(Arc::new(state.store.clone()), HOOK_PORT);
+    let handle = mgr.start_implement_spec(ticket_id).await.map_err(|e| e.to_string())?;
+    wire_session(&app, &state, handle, ticket_id)
+}
+
+/// A unified diff (live spec → pending proposal) for the Spec tab's diff view; `""` when no proposal.
+#[tauri::command]
+async fn proposed_spec_diff(state: State<'_, AppState>, ticket_id: i64) -> Result<String, String> {
+    let ticket = state
+        .store
+        .get_ticket(ticket_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("no such ticket")?;
+    Ok(harmony_core::spec::proposed_spec_diff(&ticket))
 }
 
 /// Reject Claude's proposed spec update (discard it; the live spec is unchanged).
@@ -1685,6 +1715,8 @@ pub fn run() {
             update_pr_description_now,
             address_feedback,
             accept_proposed_spec,
+            accept_proposed_spec_and_implement,
+            proposed_spec_diff,
             reject_proposed_spec,
             delete_ticket,
             jira_env,

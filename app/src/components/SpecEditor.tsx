@@ -1,12 +1,22 @@
 import { useState } from "react";
 import { MarkdownField } from "./MarkdownField";
-import { MarkdownView } from "./MarkdownView";
+import { SpecDiff } from "./SpecDiff";
 import { api } from "../api";
 import type { Ticket } from "../types";
 
 /** The Spec tab's editor: four WYSIWYG markdown fields + Save. Buffers are initialised from the
- * ticket at mount, so render this with `key={ticket.id}` to re-init when the ticket changes. */
-export function SpecEditor({ ticket, onSaved }: { ticket: Ticket; onSaved: () => void }) {
+ * ticket at mount, so render this with `key={ticket.id}` to re-init when the ticket changes.
+ * `onImplement` (when provided) accepts the proposed spec and starts a session to implement it —
+ * the parent owns that so it can surface the new session (switch to the Session tab). */
+export function SpecEditor({
+  ticket,
+  onSaved,
+  onImplement,
+}: {
+  ticket: Ticket;
+  onSaved: () => void;
+  onImplement?: () => void | Promise<void>;
+}) {
   const [spec, setSpec] = useState(ticket.spec ?? "");
   const [acceptance, setAcceptance] = useState(ticket.acceptance_criteria ?? "");
   const [paths, setPaths] = useState(ticket.relevant_paths ?? "");
@@ -47,6 +57,14 @@ export function SpecEditor({ ticket, onSaved }: { ticket: Ticket; onSaved: () =>
       setSpecBusy(false);
     }
   };
+  const acceptAndImplement = async () => {
+    setSpecBusy(true);
+    try {
+      await onImplement?.();
+    } finally {
+      setSpecBusy(false);
+    }
+  };
 
   return (
     <div className="spec-fields">
@@ -56,7 +74,12 @@ export function SpecEditor({ ticket, onSaved }: { ticket: Ticket; onSaved: () =>
             <strong>Claude proposed a spec update</strong>
             <span className="muted">from review feedback that contradicted the current spec</span>
             <div className="proposed-spec-actions">
-              <button className="primary" disabled={specBusy} onClick={acceptProposed}>
+              {onImplement && (
+                <button className="primary" disabled={specBusy} onClick={acceptAndImplement}>
+                  {specBusy ? "…" : "Accept & implement"}
+                </button>
+              )}
+              <button disabled={specBusy} onClick={acceptProposed}>
                 {specBusy ? "…" : "Accept"}
               </button>
               <button disabled={specBusy} onClick={rejectProposed}>
@@ -65,7 +88,7 @@ export function SpecEditor({ ticket, onSaved }: { ticket: Ticket; onSaved: () =>
             </div>
           </div>
           <div className="review-text proposed-spec-body">
-            <MarkdownView markdown={ticket.proposed_spec} />
+            <SpecDiff ticket={ticket} />
           </div>
         </div>
       )}

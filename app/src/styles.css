@@ -455,6 +455,7 @@ button:disabled { opacity: 0.5; cursor: default; }
 .proposed-spec-actions { margin-left: auto; display: flex; gap: 6px; }
 .proposed-spec-actions .primary { color: var(--accent); border-color: var(--accent); }
 .proposed-spec-body { max-height: 320px; overflow: auto; }
+.spec-diff { font-size: 12px; }
 
 /* PR comment priority badge (parsed severity). */
 .prio-badge {

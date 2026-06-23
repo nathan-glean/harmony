@@ -288,6 +288,39 @@ impl SessionManager {
         Ok(SessionHandle { session_id, master, child })
     }
 
+    /// Start a session to implement a just-accepted spec revision. The user accepted Claude's
+    /// proposed spec (the live spec fields are already updated by the caller), so resume the
+    /// worktree's Claude (keeping context from the address session that proposed it),
+    /// `bypassPermissions`, with a prompt carrying the updated spec and an instruction to implement
+    /// the change it previously deferred. Session `kind = "address"` (resumed autonomous work on an
+    /// existing PR; harmony commits + pushes on Stop, same as feedback addressing).
+    pub async fn start_implement_spec(&self, ticket_id: i64) -> Result<SessionHandle> {
+        let ticket = self
+            .store
+            .get_ticket(ticket_id)
+            .await?
+            .ok_or_else(|| anyhow!("no such ticket #{ticket_id}"))?;
+        let repo_id = ticket
+            .repo_id
+            .ok_or_else(|| anyhow!("ticket #{ticket_id} has no repo assigned"))?;
+        let repo = self
+            .store
+            .get_repo(repo_id)
+            .await?
+            .ok_or_else(|| anyhow!("repo #{repo_id} missing"))?;
+
+        let wt = self.ensure_primary_worktree(&ticket, repo_id, &repo).await?;
+        crate::settings::inject_hooks(&wt.path, self.hook_port)?;
+
+        let resume = self.store.latest_claude_session_id_for_ticket(ticket_id).await?;
+        let prompt = render_implement_spec_prompt(&ticket);
+        let (master, child) = spawn_claude(&wt.path, &prompt, resume.as_deref(), "bypassPermissions")?;
+
+        let session_id = self.store.add_session(ticket_id, wt.id, &wt.path, "address").await?;
+        self.store.set_ticket_status(ticket_id, crate::status::WORKING).await?;
+        Ok(SessionHandle { session_id, master, child })
+    }
+
     pub async fn end_session(&self, session_id: i64) -> Result<()> {
         self.store.end_session(session_id).await
     }
@@ -416,6 +449,22 @@ fn render_implement_prompt(t: &Ticket) -> String {
          ticket), then carry the steps out, keeping the task list updated as you go. Make all \
          necessary code changes and run whatever you need (tests, build) to be confident it's \
          correct. Do NOT run `git commit` or `git push` — harmony handles version control.",
+        render_prompt(t)
+    )
+}
+
+/// Opening prompt for implementing a just-accepted spec revision. While addressing feedback Claude
+/// proposed a revised spec (because feedback contradicted the old one) and deferred implementing it;
+/// the user has now reviewed and accepted that revision, so the live spec below is the updated one.
+/// Resumed (keeps the address-session context), `bypassPermissions`; harmony handles version control.
+fn render_implement_spec_prompt(t: &Ticket) -> String {
+    format!(
+        "The revised spec you proposed has been reviewed and accepted — the agreed spec is now the \
+         version below. Implement the spec change you previously deferred (the one that contradicted \
+         the earlier spec), making all necessary code edits to satisfy the updated spec, then briefly \
+         summarize what you changed. Work autonomously and to completion — no human is watching, so \
+         do not ask for confirmation. Do NOT run `git commit` or `git push` — harmony handles version \
+         control.\n\n{}",
         render_prompt(t)
     )
 }

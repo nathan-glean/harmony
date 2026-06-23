@@ -863,7 +863,18 @@ export function App() {
               )}
 
               <div className={"tabpanel" + (tab === "spec" ? " active" : "")}>
-                <SpecEditor key={selected.id} ticket={liveTicket ?? selected} onSaved={refresh} />
+                <SpecEditor
+                  key={selected.id}
+                  ticket={liveTicket ?? selected}
+                  onSaved={refresh}
+                  onImplement={async () => {
+                    const id = (liveTicket ?? selected).id;
+                    const sid = await api.acceptProposedSpecAndImplement(id);
+                    setLiveSessions((m) => ({ ...m, [id]: sid }));
+                    setTab("session");
+                    await refresh();
+                  }}
+                />
               </div>
 
               <div className={"tabpanel" + (tab === "proof" ? " active" : "")}>

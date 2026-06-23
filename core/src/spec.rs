@@ -120,6 +120,33 @@ pub fn compose_spec(t: &Ticket) -> String {
     out
 }
 
+/// A unified diff of the live spec (from `compose_spec`) → the pending `proposed_spec`, ready to
+/// feed to the frontend diff renderer (react-diff-view's `parseDiff`). Returns `""` when there's no
+/// proposal. The `diff --git`/`---`/`+++` headers name the side `spec.md` so the renderer detects
+/// markdown for syntax highlighting; the body is a standard unified diff (3 lines of context).
+pub fn proposed_spec_diff(t: &Ticket) -> String {
+    let proposed = t.proposed_spec.trim();
+    if proposed.is_empty() {
+        return String::new();
+    }
+    // Compose the live spec into the same canonical markdown shape the proposal uses, so the diff
+    // reflects real content changes rather than formatting drift.
+    let current = compose_spec(t);
+    // similar wants trailing newlines to treat the inputs as line sequences cleanly.
+    let old = format!("{}\n", current.trim_end());
+    let new = format!("{}\n", proposed);
+    let diff = similar::TextDiff::from_lines(&old, &new);
+    let body = diff
+        .unified_diff()
+        .context_radius(3)
+        .header("a/spec.md", "b/spec.md")
+        .to_string();
+    if body.trim().is_empty() {
+        return String::new(); // identical content
+    }
+    format!("diff --git a/spec.md b/spec.md\n{body}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,6 +226,30 @@ mod tests {
         assert!(composed.contains("## Acceptance criteria\n- a"));
         assert!(!composed.contains("Relevant paths"));
         assert!(!composed.contains("Constraints"));
+    }
+
+    #[test]
+    fn proposed_diff_empty_when_no_proposal() {
+        let t = ticket_with(SpecFields { spec: "Body.".into(), ..Default::default() });
+        assert_eq!(proposed_spec_diff(&t), "");
+    }
+
+    #[test]
+    fn proposed_diff_shows_change() {
+        let mut t = ticket_with(SpecFields {
+            spec: "Build the widget.".into(),
+            acceptance_criteria: "- it works".into(),
+            ..Default::default()
+        });
+        // Proposed spec changes the body and an acceptance criterion.
+        t.proposed_spec = "Build the gadget.\n\n## Acceptance criteria\n- it works well".into();
+        let diff = proposed_spec_diff(&t);
+        assert!(diff.starts_with("diff --git a/spec.md b/spec.md\n"), "diff: {diff}");
+        assert!(diff.contains("--- a/spec.md"));
+        assert!(diff.contains("+++ b/spec.md"));
+        assert!(diff.contains("-Build the widget."));
+        assert!(diff.contains("+Build the gadget."));
+        assert!(diff.contains("@@"));
     }
 
     #[test]
