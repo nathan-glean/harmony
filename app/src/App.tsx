@@ -35,7 +35,9 @@ export function App() {
   // Tickets whose PR is being created in the background (show a loading indicator).
   const [openingPr, setOpeningPr] = useState<Set<number>>(new Set());
   // Active tab in the ticket modal.
-  const [tab, setTab] = useState<"description" | "spec" | "proof" | "review" | "diff" | "session">("spec");
+  const [tab, setTab] = useState<"description" | "spec" | "proof" | "review" | "session">("spec");
+  // Sub-tab within the Review tab (Diff + PR comments are nested under Review).
+  const [reviewSub, setReviewSub] = useState<"review" | "diff" | "pr">("review");
   // Bumped whenever review feedback is added/sent, so the feedback list reloads across components.
   const [fbVersion, setFbVersion] = useState(0);
   const [selected, setSelected] = useState<Ticket | null>(null);
@@ -802,12 +804,6 @@ export function App() {
                   ) : null}
                 </button>
                 <button
-                  className={"tab" + (tab === "diff" ? " active" : "")}
-                  onClick={() => setTab("diff")}
-                >
-                  Diff
-                </button>
-                <button
                   className={"tab" + (tab === "session" ? " active" : "")}
                   onClick={() => {
                     setTab("session");
@@ -837,50 +833,80 @@ export function App() {
               </div>
 
               <div className={"tabpanel" + (tab === "review" ? " active" : "")}>
-                <div className="review-head">
+                <div className="subtabs">
                   <button
-                    disabled={busy !== null || !!liveSessions[selected.id]}
-                    title={
-                      liveSessions[selected.id]
-                        ? "Finish the running session first"
-                        : "Re-run /review on the current changes"
-                    }
-                    onClick={() =>
-                      run("review", async () => {
-                        try {
-                          await api.requestReview(selected.id);
-                          flash(`Reviewing #${selected.id}…`);
-                          setTab("session");
-                        } catch (e) {
-                          flash(String(e));
-                        }
-                        await refresh();
-                      })
-                    }
+                    className={"subtab" + (reviewSub === "review" ? " active" : "")}
+                    onClick={() => setReviewSub("review")}
                   >
-                    {busy === "review" ? "Starting…" : "Request review"}
+                    Review
+                  </button>
+                  <button
+                    className={"subtab" + (reviewSub === "diff" ? " active" : "")}
+                    onClick={() => setReviewSub("diff")}
+                  >
+                    Diff
+                  </button>
+                  <button
+                    className={"subtab" + (reviewSub === "pr" ? " active" : "")}
+                    onClick={() => setReviewSub("pr")}
+                  >
+                    PR comments
                   </button>
                 </div>
-                <ReviewFeedback
-                  key={selected.id}
-                  ticketId={selected.id}
-                  reviewText={(liveTicket ?? selected).review_text}
-                  version={fbVersion}
-                  onChanged={() => setFbVersion((v) => v + 1)}
-                />
-                <PrComments
-                  key={`pr-${selected.id}`}
-                  ticketId={selected.id}
-                  onCommentAdded={() => setFbVersion((v) => v + 1)}
-                />
-              </div>
 
-              <div className={"tabpanel" + (tab === "diff" ? " active" : "")}>
-                {worktrees.some((w) => w.ticket_id === selected.id) ? (
-                  <DiffPane key={selected.id} ticketId={selected.id} />
-                ) : (
-                  <p className="empty">No worktree yet — move the ticket to In Progress to start work and see a diff.</p>
-                )}
+                <div className={"subtabpanel" + (reviewSub === "review" ? " active" : "")}>
+                  <div className="review-head">
+                    <button
+                      disabled={busy !== null || !!liveSessions[selected.id]}
+                      title={
+                        liveSessions[selected.id]
+                          ? "Finish the running session first"
+                          : "Re-run /review on the current changes"
+                      }
+                      onClick={() =>
+                        run("review", async () => {
+                          try {
+                            await api.requestReview(selected.id);
+                            flash(`Reviewing #${selected.id}…`);
+                            setTab("session");
+                          } catch (e) {
+                            flash(String(e));
+                          }
+                          await refresh();
+                        })
+                      }
+                    >
+                      {busy === "review"
+                        ? "Starting…"
+                        : (liveTicket ?? selected).review_text
+                        ? "Re-request review"
+                        : "Request review"}
+                    </button>
+                  </div>
+                  <ReviewFeedback
+                    key={selected.id}
+                    ticketId={selected.id}
+                    reviewText={(liveTicket ?? selected).review_text}
+                    version={fbVersion}
+                    onChanged={() => setFbVersion((v) => v + 1)}
+                  />
+                </div>
+
+                <div className={"subtabpanel" + (reviewSub === "diff" ? " active" : "")}>
+                  {worktrees.some((w) => w.ticket_id === selected.id) ? (
+                    <DiffPane key={selected.id} ticketId={selected.id} />
+                  ) : (
+                    <p className="empty">No worktree yet — move the ticket to In Progress to start work and see a diff.</p>
+                  )}
+                </div>
+
+                <div className={"subtabpanel" + (reviewSub === "pr" ? " active" : "")}>
+                  <PrComments
+                    key={`pr-${selected.id}`}
+                    ticketId={selected.id}
+                    onCommentAdded={() => setFbVersion((v) => v + 1)}
+                  />
+                </div>
               </div>
 
               <div className={"tabpanel" + (tab === "session" ? " active" : "")}>

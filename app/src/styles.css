@@ -214,6 +214,18 @@ button:disabled { opacity: 0.5; cursor: default; }
 .tab:hover:not(:disabled) { color: var(--text); }
 .tab.active { color: var(--text); border-bottom-color: var(--accent); }
 .tab-dot { width: 7px; height: 7px; border-radius: 50%; background: #e0af68; }
+/* Sub-tabs (nested inside the Review tab) — lighter/smaller than the top-level tabs. */
+.subtabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 4px; }
+.subtab {
+  background: transparent; border: none; border-bottom: 2px solid transparent;
+  border-radius: 0; color: var(--muted); padding: 6px 10px; font-size: 12px;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.subtab:hover:not(:disabled) { color: var(--text); }
+.subtab.active { color: var(--text); border-bottom-color: var(--accent); }
+.subtabpanel { display: none; }
+.subtabpanel.active { display: flex; flex-direction: column; gap: 12px; }
+
 .tabpanel { display: none; }
 .tabpanel.active {
   display: flex; flex-direction: column; gap: 12px;
