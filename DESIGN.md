@@ -62,6 +62,25 @@ decision function, `flow::decide` (`core/src/flow.rs`), driven by one shared exe
 [`docs/flow.md`](docs/flow.md) — rendered from `decide` itself (`task flow:doc`) and drift-checked in
 CI, so it always matches the code.
 
+### Autonomous drivers (the long-running loop)
+The state machine is event-driven and pure; the **autonomy** lives in a 60s background poll loop
+(`app/src-tauri/src/lib.rs`, the `run()` setup) whose passes *observe* state and *inject* the events
+a human would, so the board drives itself with `flow::decide` still authoritative. Passes, in order:
+- `poll_ci_once` — triage PR-stage CI; auto-spawn a fix session on PR-caused failures (capped by
+  `MAX_CI_FIX_ATTEMPTS`). [`ci_autofix`, default on]
+- `poll_reviews_once` — re-run `/review` when a reviewed branch's HEAD has moved. [`auto_review`, on]
+- `poll_review_loop_once` — **self-correcting review loop**: an LLM judge (`core/src/review.rs`)
+  classifies a current `/review` as `pass` / `changes_requested`; on the latter it auto-spawns a
+  fix session seeded with the findings → the fix commits → HEAD moves → re-review → re-judge, until
+  clean or `MAX_REVIEW_FIX_ATTEMPTS` (then a desktop **escalation** notification). Pre-PR only; a
+  clean verdict rests in "For Your Review" for the human to open the PR. [`review_loop`, default off]
+- `poll_auto_merge_once` — when a PR is approved on GitHub (`reviewDecision == APPROVED`) **and** CI
+  is green, inject `Move(Done)` so `decide` merges + cleans up. The agent never self-approves.
+  [`auto_merge`, default off — the one irreversible, outward-facing step]
+
+The judge is fingerprinted by HEAD (`judged_sha`) so it runs once per reviewed change, not per poll.
+The generated [`docs/flow.md`](docs/flow.md) covers the underlying transitions these drivers trigger.
+
 ### Per-session flow
 1. Pick ticket → choose repo (defaulted) → write/Draft spec.
 2. Worktree created off fresh default branch; branch `harmony/<KEY>-<slug>`.

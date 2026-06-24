@@ -30,11 +30,15 @@ export function Settings({
   const [mode, setMode] = useState("auto");
   const [autoEndIdle, setAutoEndIdle] = useState(false);
   const [autoReview, setAutoReview] = useState(true);
+  const [reviewLoop, setReviewLoop] = useState(false);
+  const [autoMerge, setAutoMerge] = useState(false);
 
   useEffect(() => {
     api.getPermissionMode().then(setMode).catch(() => {});
     api.getAutoEndIdle().then(setAutoEndIdle).catch(() => {});
     api.getAutoReview().then(setAutoReview).catch(() => {});
+    api.getReviewLoop().then(setReviewLoop).catch(() => {});
+    api.getAutoMerge().then(setAutoMerge).catch(() => {});
   }, []);
 
   const changeMode = (m: string) => {
@@ -52,6 +56,18 @@ export function Settings({
     const next = !autoReview;
     setAutoReview(next);
     api.setAutoReview(next).catch(() => setAutoReview(!next));
+  };
+
+  const toggleReviewLoop = () => {
+    const next = !reviewLoop;
+    setReviewLoop(next);
+    api.setReviewLoop(next).catch(() => setReviewLoop(!next));
+  };
+
+  const toggleAutoMerge = () => {
+    const next = !autoMerge;
+    setAutoMerge(next);
+    api.setAutoMerge(next).catch(() => setAutoMerge(!next));
   };
 
   const commitRename = (r: Repo) => {
@@ -94,6 +110,14 @@ export function Settings({
         <label className="muted" title="When a reviewed branch changes (feedback addressed, work resumed, a CI fix landed), automatically re-run /review on the new code. Applies to For Your Review and In PR Review.">
           <input type="checkbox" checked={autoReview} onChange={toggleAutoReview} /> Auto re-review
           when the code changes
+        </label>
+        <label className="muted" title="Self-correcting review loop: when /review of a 'For Your Review' card finds blocking issues, automatically fix them and re-review until clean (capped, then notifies you). Stays in 'For Your Review' for you to open the PR.">
+          <input type="checkbox" checked={reviewLoop} onChange={toggleReviewLoop} /> Auto-fix review
+          findings and re-review until clean
+        </label>
+        <label className="muted" title="When a PR is approved on GitHub and CI is green, automatically merge it and move the card to Done — no manual drag. Merges to your default branch; the agent never self-approves.">
+          <input type="checkbox" checked={autoMerge} onChange={toggleAutoMerge} /> Auto-merge PRs once
+          approved &amp; green
         </label>
       </div>
 

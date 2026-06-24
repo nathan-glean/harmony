@@ -143,6 +143,36 @@ async fn ticket_crud_and_flags() {
 }
 
 #[tokio::test]
+async fn review_loop_fields_roundtrip() {
+    let dir = TempDir::new("revfields");
+    let store = open_store(&dir).await;
+    let id = store.add_ticket(None, "local", "T", "", None).await.unwrap();
+
+    // Defaults: never judged.
+    let t = store.get_ticket(id).await.unwrap().unwrap();
+    assert_eq!((t.review_verdict.as_str(), t.review_findings.as_str(), t.judged_sha.as_str()), ("", "", ""));
+    assert_eq!(t.review_fix_attempts, 0);
+
+    // Record a verdict + findings + fingerprint and bump the attempt counter.
+    store
+        .set_ticket_review_verdict(id, "abc123", "changes_requested", r#"["fix x","add test"]"#)
+        .await
+        .unwrap();
+    store.bump_review_fix_attempts(id).await.unwrap();
+    let t = store.get_ticket(id).await.unwrap().unwrap();
+    assert_eq!(t.review_verdict, "changes_requested");
+    assert_eq!(t.judged_sha, "abc123");
+    assert!(t.review_findings.contains("add test"));
+    assert_eq!(t.review_fix_attempts, 1);
+
+    // Reset (fresh work cycle) clears verdict, findings, fingerprint, and attempts.
+    store.reset_review_loop(id).await.unwrap();
+    let t = store.get_ticket(id).await.unwrap().unwrap();
+    assert_eq!((t.review_verdict.as_str(), t.review_findings.as_str(), t.judged_sha.as_str()), ("", "", ""));
+    assert_eq!(t.review_fix_attempts, 0);
+}
+
+#[tokio::test]
 async fn spec_fields_persist_independently_and_compose() {
     let dir = TempDir::new("specfields");
     let store = open_store(&dir).await;
@@ -817,6 +847,10 @@ fn sample_ticket() -> harmony_core::models::Ticket {
         ci_fix_attempts: 0,
         ci_triage: "".into(),
         proposed_spec: "".into(),
+        review_verdict: "".into(),
+        review_findings: "".into(),
+        judged_sha: "".into(),
+        review_fix_attempts: 0,
     }
 }
 

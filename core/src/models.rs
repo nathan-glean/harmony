@@ -65,6 +65,18 @@ pub struct Ticket {
     /// (propose & confirm). Markdown of the full revised spec; empty when none pending. The user
     /// accepts (→ live spec fields) or rejects it in the Spec tab.
     pub proposed_spec: String,
+    /// The autonomous review-loop judge's latest verdict over the `/review` output: "pass",
+    /// "changes_requested", or "" when not yet judged. Drives the self-correcting review loop.
+    pub review_verdict: String,
+    /// The judge's must-fix findings, as a JSON array of strings; "" when none. Seeded into the
+    /// autonomous review-fix session's prompt.
+    pub review_findings: String,
+    /// The branch HEAD the review judge last ran against (idempotency fingerprint, like
+    /// `reviewed_sha`) — the loop won't re-judge a verdict it already computed for this HEAD.
+    pub judged_sha: String,
+    /// Number of automatic review-fix attempts made for the current review episode; capped to
+    /// prevent a runaway review→fix→re-review loop. Reset when fresh human work lands.
+    pub review_fix_attempts: i64,
 }
 
 /// An isolated git worktree for a ticket. Per-ticket and reused; `is_alternate`

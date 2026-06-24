@@ -23,6 +23,15 @@ const HOOK_PORT: u16 = 8787;
 const CI_POLL_SECS: u64 = 60;
 /// Max automatic CI-fix attempts per PR before we stop and leave it for a human (anti-loop).
 const MAX_CI_FIX_ATTEMPTS: i64 = 3;
+/// Max automatic review-fix attempts (review→fix→re-review cycles) before we stop and escalate.
+const MAX_REVIEW_FIX_ATTEMPTS: i64 = 3;
+
+/// Best-effort desktop notification — the escalation channel for when the autonomous loop needs a
+/// human (e.g. the review loop is exhausted) or finishes an outward-facing step (auto-merge).
+fn notify(app: &AppHandle, title: &str, body: &str) {
+    use tauri_plugin_notification::NotificationExt;
+    let _ = app.notification().builder().title(title).body(body).show();
+}
 
 /// Live PTY handles for an active session.
 struct SessionIo {
@@ -647,6 +656,150 @@ async fn poll_reviews_once(app: &AppHandle, state: &AppState) {
     }
 }
 
+/// One poll pass for the self-correcting review loop (the review-stage sibling of `poll_ci_once`).
+/// For each pre-PR `For Your Review` ticket with a *current* `/review`, judge it once per reviewed
+/// HEAD; on a `changes_requested` verdict, auto-spawn a fix session seeded with the findings (the
+/// fix commits → HEAD moves → `poll_reviews_once` re-reviews → judged again → loop). Capped by
+/// `MAX_REVIEW_FIX_ATTEMPTS`, then escalates. Gated by `review_loop`; skips live sessions.
+async fn poll_review_loop_once(app: &AppHandle, state: &AppState) {
+    if !review_loop_enabled(state).await {
+        return;
+    }
+    let tickets = match state.store.list_tickets().await {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    for ticket in tickets {
+        // Pre-PR review stage only; post-PR iteration is covered by CI-fix + auto re-review.
+        if ticket.status != harmony_core::status::WAITING
+            || ticket.reviewed != 1
+            || has_live_session(state, ticket.id)
+        {
+            continue;
+        }
+        let wt = match state.store.primary_worktree_for_ticket(ticket.id).await {
+            Ok(Some(wt)) => wt,
+            _ => continue,
+        };
+        let repo_path = match state.store.get_repo(wt.repo_id).await {
+            Ok(Some(r)) => r.path,
+            _ => continue,
+        };
+        // Only act on a CURRENT review (a `/review` exists for this HEAD). If HEAD moved past the
+        // last review, let `poll_reviews_once` re-review first. And judge each reviewed HEAD once
+        // (the `judged_sha` fingerprint) — that also bounds the loop: a fix that changes nothing
+        // doesn't move HEAD, so it isn't re-judged.
+        let path = wt.path.clone();
+        let head = tokio::task::spawn_blocking(move || {
+            harmony_core::github::head_sha(&path).unwrap_or_default()
+        })
+        .await
+        .unwrap_or_default();
+        if head.is_empty() || head != ticket.reviewed_sha || head == ticket.judged_sha {
+            continue;
+        }
+
+        // Judge the review (off-thread `claude -p`), persist the verdict + findings.
+        let judgement = {
+            let (path, review_text, repo_path) =
+                (wt.path.clone(), ticket.review_text.clone(), repo_path.clone());
+            tokio::task::spawn_blocking(move || {
+                let base = harmony_core::worktree::default_branch(&repo_path)
+                    .unwrap_or_else(|_| "main".into());
+                let diff = harmony_core::github::diff(&path, &base).unwrap_or_default();
+                harmony_core::review::judge(&path, &review_text, &diff)
+            })
+            .await
+        };
+        let judgement = match judgement {
+            Ok(Ok(j)) => j,
+            _ => continue, // judge failed → leave for the next tick / a human
+        };
+        let findings_json = serde_json::to_string(&judgement.findings).unwrap_or_else(|_| "[]".into());
+        let _ = state
+            .store
+            .set_ticket_review_verdict(ticket.id, &head, judgement.verdict.as_str(), &findings_json)
+            .await;
+        let _ = app.emit("ticket-updated", ticket.id);
+
+        // Clean (or nothing actionable) → rest in `For Your Review` for the human to open the PR.
+        if judgement.verdict != harmony_core::review::Verdict::ChangesRequested
+            || judgement.findings.is_empty()
+        {
+            continue;
+        }
+
+        // Blocking findings: auto-fix while under the cap, else escalate (once — `judged_sha` now
+        // equals HEAD, so this ticket isn't re-judged until HEAD moves).
+        if ticket.review_fix_attempts >= MAX_REVIEW_FIX_ATTEMPTS {
+            notify(
+                app,
+                "Review loop needs you",
+                &format!(
+                    "#{} ({}) still has review findings after {} auto-fix attempts.",
+                    ticket.id, ticket.title, MAX_REVIEW_FIX_ATTEMPTS
+                ),
+            );
+            continue;
+        }
+        let mgr = SessionManager::new(Arc::new(state.store.clone()), HOOK_PORT);
+        match mgr.start_review_fix(ticket.id).await {
+            Ok(handle) => {
+                let _ = wire_session(app, state, handle, ticket.id);
+                let _ = state.store.bump_review_fix_attempts(ticket.id).await;
+            }
+            Err(e) => eprintln!("[review-loop] start_review_fix for #{} failed: {e}", ticket.id),
+        }
+    }
+}
+
+/// One poll pass for gated auto-merge. For each `In PR Review` ticket whose PR is approved on GitHub
+/// (`reviewDecision == APPROVED`) AND has no failing checks, inject `Move(Done)` — `flow::decide`
+/// then merges (`MergePr`) and cleans up. The continuous approval poll is the missing link that lets
+/// a human approving on GitHub advance the ticket with no drag. Gated by `auto_merge` (default off).
+async fn poll_auto_merge_once(app: &AppHandle, state: &AppState) {
+    if !auto_merge_enabled(state).await {
+        return;
+    }
+    let tickets = match state.store.list_tickets().await {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    for ticket in tickets {
+        if ticket.status != harmony_core::status::IN_REVIEW || has_live_session(state, ticket.id) {
+            continue;
+        }
+        let wt = match state.store.primary_worktree_for_ticket(ticket.id).await {
+            Ok(Some(wt)) => wt,
+            _ => continue,
+        };
+        let path = wt.path.clone();
+        let (mergeable, green) = tokio::task::spawn_blocking(move || {
+            let status = harmony_core::github::pr_status(&path);
+            let failing = harmony_core::github::pr_checks_json(&path)
+                .ok()
+                .map(|j| harmony_core::ci::parse_failing_checks(&j))
+                .unwrap_or_default();
+            // Only an OPEN, approved PR is mergeable — a MERGED/CLOSED state means we're done (and
+            // guards against re-attempting a merge if a post-merge cleanup step had failed).
+            (status.exists && status.approved && status.state == "OPEN", failing.is_empty())
+        })
+        .await
+        .unwrap_or((false, false));
+        if !(mergeable && green) {
+            continue;
+        }
+        match apply_event(app, state, ticket.id, Event::Move(Column::Done), false).await {
+            Ok(()) => notify(
+                app,
+                "Auto-merged",
+                &format!("#{} ({}) was approved + green — merged to Done.", ticket.id, ticket.title),
+            ),
+            Err(e) => eprintln!("[auto-merge] #{} failed: {e}", ticket.id),
+        }
+    }
+}
+
 /// Triage a ticket's PR CI and, when actionable (or `manual`), spawn an autonomous fix session.
 /// Persists the triage on the ticket for the UI. `manual` bypasses the idempotency fingerprint,
 /// the kill-switch, and the attempt cap (an explicit user request).
@@ -890,6 +1043,61 @@ async fn set_auto_end_idle(state: State<'_, AppState>, enabled: bool) -> Result<
     state
         .store
         .set_setting("auto_end_idle", if enabled { "on" } else { "off" })
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Self-correcting review loop toggle (default OFF — opt-in autonomy). When on, a `/review` whose
+/// judge verdict is `changes_requested` auto-spawns a fix session and re-reviews until clean or the
+/// attempt cap (then escalates). Read by `poll_review_loop_once`.
+async fn review_loop_enabled(state: &AppState) -> bool {
+    state
+        .store
+        .get_setting("review_loop")
+        .await
+        .ok()
+        .flatten()
+        .map(|v| v == "on")
+        .unwrap_or(false)
+}
+
+#[tauri::command]
+async fn get_review_loop(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(review_loop_enabled(&state).await)
+}
+
+#[tauri::command]
+async fn set_review_loop(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+    state
+        .store
+        .set_setting("review_loop", if enabled { "on" } else { "off" })
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Auto-merge toggle (default OFF — outward-facing and irreversible). When on, an approved + CI-green
+/// PR is merged and the ticket advances to Done with no human drag. Read by `poll_auto_merge_once`.
+async fn auto_merge_enabled(state: &AppState) -> bool {
+    state
+        .store
+        .get_setting("auto_merge")
+        .await
+        .ok()
+        .flatten()
+        .map(|v| v == "on")
+        .unwrap_or(false)
+}
+
+#[tauri::command]
+async fn get_auto_merge(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(auto_merge_enabled(&state).await)
+}
+
+#[tauri::command]
+async fn set_auto_merge(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+    state
+        .store
+        .set_setting("auto_merge", if enabled { "on" } else { "off" })
         .await
         .map_err(|e| e.to_string())
 }
@@ -1433,6 +1641,11 @@ async fn apply_event(
         .await
         .map_err(|e| e.to_string())?
         .ok_or("no such ticket")?;
+    // A fresh autonomous work cycle just finished → reset the review loop's bookkeeping so the
+    // upcoming review episode (and its attempt cap) starts clean.
+    if event == Event::WorkFinished {
+        let _ = state.store.reset_review_loop(ticket_id).await;
+    }
     let ctx = build_ctx(state, &ticket).await;
     let decision = flow::decide(event, &ctx);
     if let Some(reason) = decision.blocked {
@@ -1721,9 +1934,12 @@ pub fn run() {
                         tick.tick().await;
                         let state = poll_handle.state::<AppState>();
                         // CI first so a pending fix claims the live-session slot before the
-                        // re-review pass considers the same ticket.
+                        // re-review pass considers the same ticket. Then re-review stale changes,
+                        // then judge+auto-fix current reviews, then auto-merge approved PRs.
                         poll_ci_once(&poll_handle, &state).await;
                         poll_reviews_once(&poll_handle, &state).await;
+                        poll_review_loop_once(&poll_handle, &state).await;
+                        poll_auto_merge_once(&poll_handle, &state).await;
                     }
                 });
             });
@@ -1772,6 +1988,10 @@ pub fn run() {
             set_auto_review,
             get_auto_end_idle,
             set_auto_end_idle,
+            get_review_loop,
+            set_review_loop,
+            get_auto_merge,
+            set_auto_merge,
             get_pr_desc_autoupdate,
             set_pr_desc_autoupdate,
             update_pr_description_now,

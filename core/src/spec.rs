@@ -177,6 +177,10 @@ mod tests {
             ci_fix_attempts: 0,
             ci_triage: String::new(),
             proposed_spec: String::new(),
+            review_verdict: String::new(),
+            review_findings: String::new(),
+            judged_sha: String::new(),
+            review_fix_attempts: 0,
         }
     }
 

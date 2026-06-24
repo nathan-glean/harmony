@@ -64,7 +64,11 @@ impl Store {
             ci_triaged_sha TEXT NOT NULL DEFAULT '',
             ci_fix_attempts INTEGER NOT NULL DEFAULT 0,
             ci_triage TEXT NOT NULL DEFAULT '',
-            proposed_spec TEXT NOT NULL DEFAULT ''
+            proposed_spec TEXT NOT NULL DEFAULT '',
+            review_verdict TEXT NOT NULL DEFAULT '',
+            review_findings TEXT NOT NULL DEFAULT '',
+            judged_sha TEXT NOT NULL DEFAULT '',
+            review_fix_attempts INTEGER NOT NULL DEFAULT 0
         );
         UPDATE tickets SET status = 'todo' WHERE status IN ('available', 'ready');
         CREATE TABLE IF NOT EXISTS worktrees (
@@ -174,6 +178,18 @@ impl Store {
             .execute(&self.pool)
             .await;
         let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN proposed_spec TEXT NOT NULL DEFAULT ''")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN review_verdict TEXT NOT NULL DEFAULT ''")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN review_findings TEXT NOT NULL DEFAULT ''")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN judged_sha TEXT NOT NULL DEFAULT ''")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN review_fix_attempts INTEGER NOT NULL DEFAULT 0")
             .execute(&self.pool)
             .await;
         Ok(())
@@ -289,7 +305,7 @@ impl Store {
 
     pub async fn get_ticket(&self, id: i64) -> Result<Option<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec, review_verdict, review_findings, judged_sha, review_fix_attempts
              FROM tickets WHERE id = ?",
         )
         .bind(id)
@@ -299,7 +315,7 @@ impl Store {
 
     pub async fn list_tickets(&self) -> Result<Vec<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec, review_verdict, review_findings, judged_sha, review_fix_attempts
              FROM tickets ORDER BY id",
         )
         .fetch_all(&self.pool)
@@ -601,7 +617,7 @@ impl Store {
 
     pub async fn get_ticket_by_key(&self, key: &str) -> Result<Option<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec, review_verdict, review_findings, judged_sha, review_fix_attempts
              FROM tickets WHERE jira_key = ?",
         )
         .bind(key)
@@ -736,6 +752,50 @@ impl Store {
             .bind(id)
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    /// Record the review-loop judge's verdict (`pass`/`changes_requested`), its must-fix findings
+    /// (JSON array), and the HEAD it was computed against (`judged_sha`, the idempotency
+    /// fingerprint so the same review isn't re-judged).
+    pub async fn set_ticket_review_verdict(
+        &self,
+        id: i64,
+        sha: &str,
+        verdict: &str,
+        findings_json: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE tickets SET judged_sha = ?, review_verdict = ?, review_findings = ? WHERE id = ?",
+        )
+        .bind(sha)
+        .bind(verdict)
+        .bind(findings_json)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Increment the auto review-fix attempt counter (capped against runaway loops by the caller).
+    pub async fn bump_review_fix_attempts(&self, id: i64) -> Result<()> {
+        sqlx::query("UPDATE tickets SET review_fix_attempts = review_fix_attempts + 1 WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Reset review-loop state (attempts, fingerprint, verdict, findings) — e.g. when a fresh human
+    /// work cycle lands, so the next review episode is judged afresh.
+    pub async fn reset_review_loop(&self, id: i64) -> Result<()> {
+        sqlx::query(
+            "UPDATE tickets SET review_fix_attempts = 0, judged_sha = '', review_verdict = '', \
+             review_findings = '' WHERE id = ?",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 

@@ -251,6 +251,45 @@ impl SessionManager {
         Ok(SessionHandle { session_id, master, child })
     }
 
+    /// Start an autonomous session to fix the blocking issues the review-loop judge flagged. The
+    /// review-loop sibling of `start_address`: resumes the worktree's Claude (keeps context),
+    /// `bypassPermissions`, with the judge's must-fix findings (stored as `review_findings` JSON)
+    /// folded into the prompt. Errors when there are no findings. Session `kind = "address"` so
+    /// harmony commits + pushes on Stop (`AddressFinished`), which moves HEAD and re-triggers the
+    /// review loop.
+    pub async fn start_review_fix(&self, ticket_id: i64) -> Result<SessionHandle> {
+        let ticket = self
+            .store
+            .get_ticket(ticket_id)
+            .await?
+            .ok_or_else(|| anyhow!("no such ticket #{ticket_id}"))?;
+        let repo_id = ticket
+            .repo_id
+            .ok_or_else(|| anyhow!("ticket #{ticket_id} has no repo assigned"))?;
+        let repo = self
+            .store
+            .get_repo(repo_id)
+            .await?
+            .ok_or_else(|| anyhow!("repo #{repo_id} missing"))?;
+
+        let findings: Vec<String> =
+            serde_json::from_str(&ticket.review_findings).unwrap_or_default();
+        if findings.is_empty() {
+            return Err(anyhow!("no review findings to address"));
+        }
+
+        let wt = self.ensure_primary_worktree(&ticket, repo_id, &repo).await?;
+        crate::settings::inject_hooks(&wt.path, self.hook_port)?;
+
+        let resume = self.store.latest_claude_session_id_for_ticket(ticket_id).await?;
+        let prompt = crate::review::render_review_fix_prompt(&findings, &ticket);
+        let (master, child) = spawn_claude(&wt.path, &prompt, resume.as_deref(), "bypassPermissions")?;
+
+        let session_id = self.store.add_session(ticket_id, wt.id, &wt.path, "address").await?;
+        self.store.set_ticket_status(ticket_id, crate::status::WORKING).await?;
+        Ok(SessionHandle { session_id, master, child })
+    }
+
     /// Start an autonomous session to address review feedback (comments from any surface) and
     /// improve the PR. Resumes the worktree's Claude (so it keeps context), `bypassPermissions`,
     /// with all open comments folded into the prompt + the spec reconcile instruction. Marks the
@@ -746,6 +785,10 @@ mod tests {
             ci_fix_attempts: 0,
             ci_triage: String::new(),
             proposed_spec: String::new(),
+            review_verdict: String::new(),
+            review_findings: String::new(),
+            judged_sha: String::new(),
+            review_fix_attempts: 0,
         }
     }
 
