@@ -322,6 +322,16 @@ async fn handle(
                 }
             }
 
+            // Review session: the `/review` skill runs in plan mode and writes its verdict to
+            // the plan file — it never calls ExitPlanMode (review is a research task), so its
+            // final assistant message is just a wrap-up, not the review. Capture the plan-file
+            // write as the ticket's review prose instead. Latest write wins.
+            if sess.kind == "review" && event == "PreToolUse" {
+                if let Some(plan) = extract_plan(&v, tool) {
+                    let _ = store.set_ticket_review_text(sess.ticket_id, &plan).await;
+                }
+            }
+
             log_event(&format!(
                 "[hook] {event} ticket=#{} session=#{} tool={}",
                 sess.ticket_id,

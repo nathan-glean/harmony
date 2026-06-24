@@ -332,9 +332,11 @@ impl SessionManager {
 fn render_review_prompt(t: &Ticket) -> String {
     format!(
         "Run the `/review` skill on the changes this branch makes versus its base. Review against \
-         the ticket's intent below, and output a concise, prioritised list of concerns \
+         the ticket's intent below, and produce a concise, prioritised list of concerns \
          (correctness, edge cases, missing tests, scope creep) and any concrete fixes you'd \
-         suggest — this is a pre-PR sanity check for the human. Do not make any edits.\n\n\
+         suggest — this is a pre-PR sanity check for the human. Write your full review to your \
+         plan file as a single, complete document (this is how the review is surfaced to the \
+         human). Do not make any edits to the repo.\n\n\
          # {}\n\n{}",
         t.title,
         crate::spec::compose_spec(t)
@@ -554,44 +556,6 @@ pub fn render_transcript(path: &str) -> Result<String> {
         }
     }
     Ok(out.trim_end().to_string())
-}
-
-/// Extract the final assistant message (its text blocks, joined) from a session transcript
-/// JSONL. Used to capture a `/review` session's verdict — Claude's last prose turn — onto the
-/// ticket. Walks the whole file (unlike `latest_progress`, which tails and caps), so the full
-/// review survives. Tool-use blocks are skipped; only text is kept. `None` on read/parse failure
-/// or when no assistant text is present.
-pub fn last_assistant_message(path: &str) -> Option<String> {
-    let content = std::fs::read_to_string(path).ok()?;
-    let mut last: Option<String> = None;
-    for line in content.lines() {
-        let v: Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let msg = v.get("message");
-        let role = msg.and_then(|m| m.get("role")).and_then(|x| x.as_str()).unwrap_or("");
-        if role != "assistant" {
-            continue;
-        }
-        let Some(Value::Array(arr)) = msg.and_then(|m| m.get("content")) else {
-            continue;
-        };
-        let mut text = String::new();
-        for b in arr {
-            if b.get("type").and_then(|x| x.as_str()) == Some("text") {
-                if let Some(t) = b.get("text").and_then(|x| x.as_str()) {
-                    text.push_str(t);
-                    text.push('\n');
-                }
-            }
-        }
-        let text = text.trim();
-        if !text.is_empty() {
-            last = Some(text.to_string());
-        }
-    }
-    last
 }
 
 /// A snapshot of in-session progress tailed from the live transcript: the latest assistant

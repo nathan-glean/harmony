@@ -1439,15 +1439,8 @@ async fn apply_event(
                 let _ = state.store.mark_reviewed(ticket_id, &sha).await;
             }
         }
-        // Capture the review prose (Claude's final assistant message) from the session
-        // transcript onto the ticket so it shows in the Review tab. Latest-only — overwrites.
-        if let Ok(Some(tp)) = state.store.latest_transcript_path_for_ticket(ticket_id).await {
-            if let Ok(Some(text)) =
-                tokio::task::spawn_blocking(move || harmony_core::session::last_assistant_message(&tp)).await
-            {
-                let _ = state.store.set_ticket_review_text(ticket_id, &text).await;
-            }
-        }
+        // The review prose itself is captured live by the hook server (the `/review` skill's
+        // plan-file write — see `core/src/hooks.rs`), not scraped here.
     }
     let target = decision.target.as_status();
     state.store.set_ticket_status(ticket_id, target).await.map_err(|e| e.to_string())?;
