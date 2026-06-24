@@ -554,3 +554,33 @@ fn comment_addressing_loop() {
     assert_eq!(back.target, HumanReview);
     assert_eq!(back.actions, vec![StopSession, RunReview]);
 }
+
+// ===================================================================
+// Auto re-review (the background poller's contract)
+// ===================================================================
+// The poller in lib.rs fires `Event::ReviewRequested` for a review-stage ticket whose reviewed
+// HEAD has moved. These pin the decision that path relies on: re-run `/review` in place,
+// regardless of `review_current`, from both review columns.
+
+#[test]
+fn review_requested_reruns_in_place_from_human_review() {
+    for from in [HumanReview, Pr] {
+        let d = decide(
+            Event::ReviewRequested,
+            &Ctx { from, reviewed: true, has_changes: true, review_current: true, ..base() },
+        );
+        assert_eq!(d.target, from, "re-review must stay in the current column");
+        assert!(has(&d.actions, RunReview), "{from:?}: ReviewRequested must run /review even when review_current");
+        assert!(d.blocked.is_none());
+    }
+}
+
+#[test]
+fn review_requested_without_changes_is_blocked() {
+    let d = decide(
+        Event::ReviewRequested,
+        &Ctx { from: HumanReview, reviewed: true, has_changes: false, ..base() },
+    );
+    assert!(d.blocked.is_some(), "nothing to review when there are no changes");
+    assert!(!has(&d.actions, RunReview));
+}

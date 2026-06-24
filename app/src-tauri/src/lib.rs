@@ -592,6 +592,61 @@ async fn poll_ci_once(app: &AppHandle, state: &AppState) {
     }
 }
 
+/// Auto re-review kill-switch (default on — the user opted into auto re-review). `"off"` → never
+/// auto-redoes a review (the manual "Request review" button still works).
+async fn auto_review_enabled(state: &AppState) -> bool {
+    state
+        .store
+        .get_setting("auto_review")
+        .await
+        .ok()
+        .flatten()
+        .map(|v| v != "off")
+        .unwrap_or(true)
+}
+
+/// One poll pass: auto-redo `/review` for any review-stage ticket whose reviewed change-set has
+/// moved on since the last review. Mirrors `poll_ci_once`: cheap HEAD-SHA fingerprint for
+/// idempotency, skips live sessions (which also debounces mid-edit churn). `/review` runs in plan
+/// mode (no commits) so it can't move HEAD and re-trigger itself; `mark_reviewed` then re-points
+/// `reviewed_sha` at the reviewed HEAD, closing the gate until the branch changes again.
+async fn poll_reviews_once(app: &AppHandle, state: &AppState) {
+    if !auto_review_enabled(state).await {
+        return;
+    }
+    let tickets = match state.store.list_tickets().await {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    for ticket in tickets {
+        // Only the two review stages, only previously-reviewed tickets (the first review stays
+        // owned by the column-entry flow), and never mid-session.
+        let in_review_stage = matches!(
+            ticket.status.as_str(),
+            harmony_core::status::WAITING | harmony_core::status::IN_REVIEW
+        );
+        if !in_review_stage || ticket.reviewed != 1 || has_live_session(state, ticket.id) {
+            continue;
+        }
+        let wt = match state.store.primary_worktree_for_ticket(ticket.id).await {
+            Ok(Some(wt)) => wt,
+            _ => continue,
+        };
+        // Cheap pre-check (no LLM): has HEAD moved since the review's fingerprint?
+        let path = wt.path.clone();
+        let head = tokio::task::spawn_blocking(move || {
+            harmony_core::github::head_sha(&path).unwrap_or_default()
+        })
+        .await
+        .unwrap_or_default();
+        if head.is_empty() || head == ticket.reviewed_sha {
+            continue; // review is current
+        }
+        // Stale → re-run `/review` in place (stays in the current column).
+        let _ = apply_event(app, state, ticket.id, Event::ReviewRequested, false).await;
+    }
+}
+
 /// Triage a ticket's PR CI and, when actionable (or `manual`), spawn an autonomous fix session.
 /// Persists the triage on the ticket for the UI. `manual` bypasses the idempotency fingerprint,
 /// the kill-switch, and the attempt cap (an explicit user request).
@@ -852,6 +907,20 @@ async fn set_ci_autofix(state: State<'_, AppState>, enabled: bool) -> Result<(),
     state
         .store
         .set_setting("ci_autofix", if enabled { "on" } else { "off" })
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_auto_review(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(auto_review_enabled(&state).await)
+}
+
+#[tauri::command]
+async fn set_auto_review(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+    state
+        .store
+        .set_setting("auto_review", if enabled { "on" } else { "off" })
         .await
         .map_err(|e| e.to_string())
 }
@@ -1689,7 +1758,10 @@ pub fn run() {
                     loop {
                         tick.tick().await;
                         let state = poll_handle.state::<AppState>();
+                        // CI first so a pending fix claims the live-session slot before the
+                        // re-review pass considers the same ticket.
                         poll_ci_once(&poll_handle, &state).await;
+                        poll_reviews_once(&poll_handle, &state).await;
                     }
                 });
             });
@@ -1734,6 +1806,8 @@ pub fn run() {
             request_ci_fix,
             get_ci_autofix,
             set_ci_autofix,
+            get_auto_review,
+            set_auto_review,
             get_auto_end_idle,
             set_auto_end_idle,
             get_pr_desc_autoupdate,

@@ -29,10 +29,12 @@ export function Settings({
   const [editVal, setEditVal] = useState("");
   const [mode, setMode] = useState("auto");
   const [autoEndIdle, setAutoEndIdle] = useState(false);
+  const [autoReview, setAutoReview] = useState(true);
 
   useEffect(() => {
     api.getPermissionMode().then(setMode).catch(() => {});
     api.getAutoEndIdle().then(setAutoEndIdle).catch(() => {});
+    api.getAutoReview().then(setAutoReview).catch(() => {});
   }, []);
 
   const changeMode = (m: string) => {
@@ -44,6 +46,12 @@ export function Settings({
     const next = !autoEndIdle;
     setAutoEndIdle(next);
     api.setAutoEndIdle(next).catch(() => setAutoEndIdle(!next));
+  };
+
+  const toggleAutoReview = () => {
+    const next = !autoReview;
+    setAutoReview(next);
+    api.setAutoReview(next).catch(() => setAutoReview(!next));
   };
 
   const commitRename = (r: Repo) => {
@@ -82,6 +90,10 @@ export function Settings({
         <label className="muted" title="When Claude stops and is waiting, close its terminal instead of leaving it idle. Resume by moving the card back to In Progress (grills restart fresh).">
           <input type="checkbox" checked={autoEndIdle} onChange={toggleAutoEndIdle} /> End idle sessions
           when Claude is waiting
+        </label>
+        <label className="muted" title="When a reviewed branch changes (feedback addressed, work resumed, a CI fix landed), automatically re-run /review on the new code. Applies to For Your Review and In PR Review.">
+          <input type="checkbox" checked={autoReview} onChange={toggleAutoReview} /> Auto re-review
+          when the code changes
         </label>
       </div>
 
