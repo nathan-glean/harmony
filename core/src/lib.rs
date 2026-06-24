@@ -6,6 +6,7 @@
 //!
 //! No UI here — exercised via the `harmony` CLI (see `main.rs`).
 
+pub mod activity;
 pub mod ci;
 pub mod cmd_err;
 pub mod draft;

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { Ticket, SessionProgress } from "../types";
-import { COLUMNS, COLUMN_LABELS } from "../types";
+import { COLUMNS, COLUMN_LABELS, parseActivity } from "../types";
 import { ProgressLine } from "./ProgressLine";
 
 export function Board({
@@ -46,7 +46,13 @@ export function Board({
               {COLUMN_LABELS[col]} <span className="count">{items.length}</span>
             </div>
             <div className="column-body">
-              {items.map((t) => (
+              {items.map((t) => {
+                const act = parseActivity(t.activity);
+                // The pill is the single status signal; the hard "no repo" gate keeps its own badge
+                // (always derivable, shown before the first activity compute).
+                const showPill =
+                  act && act.category !== "idle" && act.label !== "Assign a repo";
+                return (
                 <button
                   key={t.id}
                   className={
@@ -63,7 +69,6 @@ export function Board({
                 >
                   <div className="card-key">
                     {t.jira_key ?? <span className="local">local #{t.id}</span>}
-                    {t.drafting ? <span className="card-drafting">drafting…</span> : null}
                     {t.repo_id == null ? (
                       <span className="card-norepo" title="Assign a repo before moving this ticket">
                         ⚠ no repo
@@ -71,6 +76,14 @@ export function Board({
                     ) : null}
                   </div>
                   <div className="card-title">{t.title}</div>
+                  {showPill && (
+                    <span
+                      className={"card-activity act-" + act!.category}
+                      title={act!.detail ?? ""}
+                    >
+                      {act!.label}
+                    </span>
+                  )}
                   {progress[t.id] && (
                     <ProgressLine p={progress[t.id]} className="card-progress" />
                   )}
@@ -81,7 +94,8 @@ export function Board({
                     </div>
                   )}
                 </button>
-              ))}
+                );
+              })}
             </div>
           </div>
         );

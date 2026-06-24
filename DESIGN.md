@@ -81,6 +81,15 @@ a human would, so the board drives itself with `flow::decide` still authoritativ
 The judge is fingerprinted by HEAD (`judged_sha`) so it runs once per reviewed change, not per poll.
 The generated [`docs/flow.md`](docs/flow.md) covers the underlying transitions these drivers trigger.
 
+**Activity status.** A pure classifier (`core/src/activity.rs`, a sibling of `flow::decide`/`warnings`)
+turns the same facts + settings into a single per-ticket `Activity { category, label }` — *Working*
+(the system is handling it), *WaitingOnYou*, *WaitingExternal*, or *Idle*. The rule: **if the system
+will act on this state automatically (given the settings + caps) it's Working; once it has done all it
+can it's WaitingOnYou/WaitingExternal** — so the same board state reads differently depending on whether
+autonomy is on. The backend recomputes + persists it (`tickets.activity`) on every state-machine event
+and each poll tick, fires the "needs you" desktop notification on the transition into WaitingOnYou, and
+the UI renders it as the per-card pill + modal detail.
+
 ### Per-session flow
 1. Pick ticket → choose repo (defaulted) → write/Draft spec.
 2. Worktree created off fresh default branch; branch `harmony/<KEY>-<slug>`.

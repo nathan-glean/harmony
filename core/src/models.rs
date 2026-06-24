@@ -77,6 +77,10 @@ pub struct Ticket {
     /// Number of automatic review-fix attempts made for the current review episode; capped to
     /// prevent a runaway review→fix→re-review loop. Reset when fresh human work lands.
     pub review_fix_attempts: i64,
+    /// The derived "what's happening" status (JSON of `crate::activity::Activity`), recomputed by the
+    /// backend on every state-machine change and each poll tick. "" until first computed. Rendered as
+    /// the per-card activity pill — the UI never derives it itself.
+    pub activity: String,
 }
 
 /// An isolated git worktree for a ticket. Per-ticket and reused; `is_alternate`

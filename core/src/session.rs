@@ -789,6 +789,7 @@ mod tests {
             review_findings: String::new(),
             judged_sha: String::new(),
             review_fix_attempts: 0,
+            activity: String::new(),
         }
     }
 

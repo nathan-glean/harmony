@@ -21,7 +21,26 @@ export type Ticket = {
   ci_fix_attempts: number; // auto CI-fix attempts made for this PR (capped)
   ci_triage: string; // JSON of the latest CiTriage, "" when none
   proposed_spec: string; // markdown of a spec update Claude proposed (propose & confirm), "" when none
+  activity: string; // JSON of the derived Activity (what's happening), "" until first computed
 };
+
+// The backend-derived "what's happening" status (matches harmony_core::activity::Activity).
+export type ActivityCategory = "working" | "waiting_on_you" | "waiting_external" | "idle";
+export type Activity = {
+  category: ActivityCategory;
+  label: string;
+  detail: string | null;
+};
+
+/** Parse a ticket's `activity` JSON; null when empty/unparseable. */
+export function parseActivity(json: string): Activity | null {
+  if (!json) return null;
+  try {
+    return JSON.parse(json) as Activity;
+  } catch {
+    return null;
+  }
+}
 
 // A GitHub PR comment normalized for display (matches harmony_core::github::PrComment).
 export type PrComment = {

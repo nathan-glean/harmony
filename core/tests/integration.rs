@@ -173,6 +173,31 @@ async fn review_loop_fields_roundtrip() {
 }
 
 #[tokio::test]
+async fn activity_field_and_session_kind_roundtrip() {
+    let dir = TempDir::new("activity");
+    let store = open_store(&dir).await;
+    let id = store.add_ticket(None, "local", "T", "", None).await.unwrap();
+
+    // Default empty; round-trips an Activity JSON blob.
+    assert_eq!(store.get_ticket(id).await.unwrap().unwrap().activity, "");
+    store
+        .set_ticket_activity(id, r#"{"category":"working","label":"Implementing…","detail":null}"#)
+        .await
+        .unwrap();
+    assert!(store.get_ticket(id).await.unwrap().unwrap().activity.contains("Implementing"));
+
+    // active_session_kind_for_ticket: None with no live session, the kind once one exists.
+    assert_eq!(store.active_session_kind_for_ticket(id).await.unwrap(), None);
+    let repo_id = store.add_repo("r", dir.path().to_str().unwrap(), None).await.unwrap();
+    let wt = store.add_worktree(id, repo_id, "b", "/tmp/x", false).await.unwrap();
+    store.add_session(id, wt, "/tmp/x", "review").await.unwrap();
+    assert_eq!(
+        store.active_session_kind_for_ticket(id).await.unwrap().as_deref(),
+        Some("review")
+    );
+}
+
+#[tokio::test]
 async fn spec_fields_persist_independently_and_compose() {
     let dir = TempDir::new("specfields");
     let store = open_store(&dir).await;
@@ -851,6 +876,7 @@ fn sample_ticket() -> harmony_core::models::Ticket {
         review_findings: "".into(),
         judged_sha: "".into(),
         review_fix_attempts: 0,
+        activity: "".into(),
     }
 }
 

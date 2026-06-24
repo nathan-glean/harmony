@@ -729,17 +729,9 @@ async fn poll_review_loop_once(app: &AppHandle, state: &AppState) {
             continue;
         }
 
-        // Blocking findings: auto-fix while under the cap, else escalate (once — `judged_sha` now
-        // equals HEAD, so this ticket isn't re-judged until HEAD moves).
+        // Blocking findings: auto-fix while under the cap, else stop (the activity pill flips to
+        // "Review loop needs you" and `store_activity` fires the escalation notification).
         if ticket.review_fix_attempts >= MAX_REVIEW_FIX_ATTEMPTS {
-            notify(
-                app,
-                "Review loop needs you",
-                &format!(
-                    "#{} ({}) still has review findings after {} auto-fix attempts.",
-                    ticket.id, ticket.title, MAX_REVIEW_FIX_ATTEMPTS
-                ),
-            );
             continue;
         }
         let mgr = SessionManager::new(Arc::new(state.store.clone()), HOOK_PORT);
@@ -1626,6 +1618,91 @@ async fn build_ctx(state: &AppState, ticket: &Ticket) -> Ctx {
     }
 }
 
+/// Whether the persisted CI triage indicates failing checks.
+fn ci_triage_failing(json: &str) -> bool {
+    if json.trim().is_empty() {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|v| v.get("failing_checks").and_then(|f| f.as_array()).map(|a| !a.is_empty()))
+        .unwrap_or(false)
+}
+
+/// The `category` string of a previously-persisted `Activity` JSON (for transition detection).
+fn prev_activity_category(json: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|v| v.get("category").and_then(|c| c.as_str()).map(|s| s.to_string()))
+}
+
+/// Recompute the ticket's derived activity status, persist it, emit `ticket-updated`, and — when the
+/// ticket *newly* enters a "waiting on you" state — fire a desktop notification. This is the single
+/// owner of "needs you" notifications. Builds fresh facts (`build_ctx`) so it reflects state after an
+/// event's actions ran; called from `apply_event` and the activity poll pass.
+async fn store_activity(app: &AppHandle, state: &AppState, ticket_id: i64) {
+    let ticket = match state.store.get_ticket(ticket_id).await {
+        Ok(Some(t)) => t,
+        _ => return,
+    };
+    let ctx = build_ctx(state, &ticket).await;
+    let session_kind = state.store.active_session_kind_for_ticket(ticket_id).await.ok().flatten();
+    let input = harmony_core::activity::ActivityInput {
+        from: ctx.from,
+        has_repo: ctx.has_repo,
+        session_live: ctx.session_live,
+        session_kind,
+        user_question_pending: ctx.user_question_pending,
+        has_changes: ctx.has_changes,
+        review_current: ctx.review_current,
+        reviewed: ctx.reviewed,
+        review_changes_requested: ticket.review_verdict == "changes_requested",
+        review_fix_attempts: ticket.review_fix_attempts,
+        review_fix_max: MAX_REVIEW_FIX_ATTEMPTS,
+        ci_failing: ci_triage_failing(&ticket.ci_triage),
+        ci_fix_attempts: ticket.ci_fix_attempts,
+        ci_fix_max: MAX_CI_FIX_ATTEMPTS,
+        pr_exists: ctx.pr_exists,
+        pr_approved: ctx.pr_approved,
+        auto_review: auto_review_enabled(state).await,
+        review_loop: review_loop_enabled(state).await,
+        ci_autofix: ci_autofix_enabled(state).await,
+        auto_merge: auto_merge_enabled(state).await,
+    };
+    let activity = harmony_core::activity::classify(&input);
+    let prev = prev_activity_category(&ticket.activity);
+    let json = serde_json::to_string(&activity).unwrap_or_default();
+    let _ = state.store.set_ticket_activity(ticket_id, &json).await;
+    let _ = app.emit("ticket-updated", ticket_id);
+
+    // Notify only on a real transition INTO "waiting on you" (skip the initial seed: prev == None).
+    if activity.category == harmony_core::activity::Category::WaitingOnYou
+        && prev.is_some()
+        && prev.as_deref() != Some("waiting_on_you")
+    {
+        let body = activity
+            .detail
+            .clone()
+            .unwrap_or_else(|| "Needs your attention.".to_string());
+        notify(app, &format!("{} — {}", ticket.title, activity.label), &body);
+    }
+}
+
+/// One poll pass: refresh the activity pill for non-terminal tickets, picking up external changes
+/// (PR approval, CI) that don't arrive as flow events. Done tickets are terminal (set on the move).
+async fn poll_activity_once(app: &AppHandle, state: &AppState) {
+    let tickets = match state.store.list_tickets().await {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    for ticket in tickets {
+        if ticket.status == harmony_core::status::DONE {
+            continue;
+        }
+        store_activity(app, state, ticket.id).await;
+    }
+}
+
 /// Run one lifecycle `event` through `flow::decide` and execute the resulting actions, then
 /// persist the target column. A blocked decision returns its reason as `Err` (no state change).
 async fn apply_event(
@@ -1692,6 +1769,9 @@ async fn apply_event(
             }
         });
     }
+    // Refresh the derived activity pill now that the state machine has acted (and notify if this
+    // change means the ticket now needs the user).
+    store_activity(app, state, ticket_id).await;
     Ok(())
 }
 
@@ -1940,6 +2020,8 @@ pub fn run() {
                         poll_reviews_once(&poll_handle, &state).await;
                         poll_review_loop_once(&poll_handle, &state).await;
                         poll_auto_merge_once(&poll_handle, &state).await;
+                        // Last: refresh each ticket's activity pill from the (now-current) facts.
+                        poll_activity_once(&poll_handle, &state).await;
                     }
                 });
             });

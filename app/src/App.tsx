@@ -2,12 +2,7 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { confirm } from "@tauri-apps/plugin-dialog";
-import {
-  isPermissionGranted,
-  requestPermission,
-  sendNotification,
-  onAction,
-} from "@tauri-apps/plugin-notification";
+import { onAction } from "@tauri-apps/plugin-notification";
 import { Board } from "./components/Board";
 import { Sessions } from "./components/Sessions";
 import { Worktrees } from "./components/Worktrees";
@@ -25,6 +20,7 @@ import { PrComments } from "./components/PrComments";
 import { ReviewFeedback } from "./components/ReviewFeedback";
 import { api } from "./api";
 import type { Ticket, Repo, SessionView, WorktreeView, PendingQuestion, SessionProgress, SessionExit, PrDone } from "./types";
+import { parseActivity } from "./types";
 
 export function App() {
   const [view, setView] = useState<"board" | "sessions" | "worktrees" | "settings">("board");
@@ -81,14 +77,15 @@ export function App() {
       const prog = await api.liveProgress();
       setProgress(Object.fromEntries(prog.map((p) => [p.ticket_id, p])));
 
-      // Notify when a live session enters "waiting" (Claude wants input). Skip the first
-      // pass so we don't fire for sessions that were already waiting on launch.
+      // Track the most recent ticket to enter "waiting" so a clicked notification can focus it.
+      // The desktop notification itself is fired by the backend on the activity → "waiting on you"
+      // transition (the single owner of "needs you" alerts — covers every reason, not just a
+      // session going idle). Skip the first pass so we don't seed on launch.
       const liveSess = sess.filter((s) => !s.ended_at);
       for (const s of liveSess) {
         const prev = prevStates.current.get(s.id);
         if (seeded.current && s.state === "waiting" && prev !== "waiting") {
           lastAttention.current = s.ticket_id;
-          notifyAttention(s, questionText(tks, s.ticket_id));
         }
       }
       const next = new Map<number, string>();
@@ -103,33 +100,6 @@ export function App() {
     }
   }, []);
 
-  // First pending-question text for a ticket (if Claude asked a structured question), so the
-  // notification can carry it. Returns null when there's no captured question.
-  function questionText(tks: Ticket[], ticketId: number): string | null {
-    const t = tks.find((x) => x.id === ticketId);
-    if (!t?.pending_question) return null;
-    try {
-      const pq: PendingQuestion = JSON.parse(t.pending_question);
-      return pq.questions[0]?.question ?? null;
-    } catch {
-      return null;
-    }
-  }
-
-  async function notifyAttention(s: SessionView, question: string | null) {
-    try {
-      let granted = await isPermissionGranted();
-      if (!granted) granted = (await requestPermission()) === "granted";
-      if (!granted) return;
-      const who = s.jira_key ?? `local #${s.ticket_id}`;
-      sendNotification({
-        title: question ? `Claude is asking — ${who}` : "Claude needs your input",
-        body: question ?? `${who} — ${s.ticket_title}`,
-      });
-    } catch {
-      /* notifications unavailable */
-    }
-  }
 
   // Open (and start/resume if needed) a live terminal for a ticket.
   const openTerminal = async (ticket: Ticket) => {
@@ -694,6 +664,15 @@ export function App() {
             <div className="modal">
               <div className="modal-head">
                 <span className="badge">{selected.status}</span>
+                {(() => {
+                  const act = parseActivity((liveTicket ?? selected).activity);
+                  return act && act.category !== "idle" ? (
+                    <span className={"modal-activity act-" + act.category} title={act.detail ?? ""}>
+                      {act.label}
+                      {act.detail ? ` — ${act.detail}` : ""}
+                    </span>
+                  ) : null;
+                })()}
                 <strong>{selected.jira_key ?? `local #${selected.id}`}</strong>
                 <span className="modal-title">{selected.title}</span>
                 {selected.jira_key && (
