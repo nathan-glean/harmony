@@ -726,6 +726,52 @@ async fn hook_emits_grill_finished_on_spec_capture() {
 }
 
 #[tokio::test]
+async fn hook_emits_session_idle_for_spec_stop_when_auto_end_on() {
+    // auto_end_idle on: a spec/grill session that comes to rest on a Stop (no pending question,
+    // no plan captured) has its PTY freed via SessionIdle.
+    let dir = TempDir::new("evidle");
+    let (store, ticket_id, cwd) = seed_session(&dir, "spec").await;
+    store.set_setting("auto_end_idle", "on").await.unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<hooks::SystemEvent>();
+    let port = spawn_hooks_with(store.clone(), Some(tx)).await;
+    let client = reqwest::Client::new();
+
+    post(&client, port, "Stop", &serde_json::json!({ "cwd": cwd })).await;
+
+    assert_eq!(rx.recv().await.unwrap(), hooks::SystemEvent::SessionIdle { ticket_id });
+}
+
+#[tokio::test]
+async fn hook_no_session_idle_when_auto_end_off() {
+    // Default off: a spec session lingers in waiting (no SessionIdle).
+    let dir = TempDir::new("evidleoff");
+    let (store, _ticket_id, cwd) = seed_session(&dir, "spec").await;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<hooks::SystemEvent>();
+    let port = spawn_hooks_with(store.clone(), Some(tx)).await;
+    let client = reqwest::Client::new();
+
+    post(&client, port, "Stop", &serde_json::json!({ "cwd": cwd })).await;
+
+    assert!(rx.try_recv().is_err(), "auto_end_idle off must not emit SessionIdle");
+}
+
+#[tokio::test]
+async fn hook_no_session_idle_when_question_pending() {
+    // Even with auto_end_idle on, an AskUserQuestion-blocked session stays alive.
+    let dir = TempDir::new("evidleq");
+    let (store, ticket_id, cwd) = seed_session(&dir, "spec").await;
+    store.set_setting("auto_end_idle", "on").await.unwrap();
+    store.set_ticket_question(ticket_id, r#"{"session_id":1,"questions":[]}"#).await.unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<hooks::SystemEvent>();
+    let port = spawn_hooks_with(store.clone(), Some(tx)).await;
+    let client = reqwest::Client::new();
+
+    post(&client, port, "Stop", &serde_json::json!({ "cwd": cwd })).await;
+
+    assert!(rx.try_recv().is_err(), "a pending question must suppress SessionIdle");
+}
+
+#[tokio::test]
 async fn hook_cli_mode_still_writes_status() {
     // events=None (CLI): the hook keeps the legacy direct ticket-status write on a work Stop.
     let dir = TempDir::new("evcli");

@@ -856,6 +856,29 @@ async fn set_ci_autofix(state: State<'_, AppState>, enabled: bool) -> Result<(),
         .map_err(|e| e.to_string())
 }
 
+/// Auto-end-idle toggle (default off). When on, a session that comes to rest in `waiting` after a
+/// Stop with no pending question has its PTY freed instead of left hanging (read in `hooks.rs`).
+#[tauri::command]
+async fn get_auto_end_idle(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(state
+        .store
+        .get_setting("auto_end_idle")
+        .await
+        .ok()
+        .flatten()
+        .map(|v| v == "on")
+        .unwrap_or(false))
+}
+
+#[tauri::command]
+async fn set_auto_end_idle(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+    state
+        .store
+        .set_setting("auto_end_idle", if enabled { "on" } else { "off" })
+        .await
+        .map_err(|e| e.to_string())
+}
+
 // ---- diff / PR pane ------------------------------------------------------
 
 #[derive(Serialize)]
@@ -1648,6 +1671,14 @@ pub fn run() {
                                 on_address_finished(&ev_handle, &state, ticket_id).await;
                                 None
                             }
+                            // An idle `waiting` session (auto_end_idle on): free its PTY, leave the
+                            // card where it is. The wait-task then marks it done (claude_session_id
+                            // preserved for --resume) and clears `drafting`. Outside the flow.
+                            SystemEvent::SessionIdle { ticket_id } => {
+                                let state = ev_handle.state::<AppState>();
+                                stop_ticket_sessions(&state, ticket_id);
+                                None
+                            }
                         };
                         if let Some((ticket_id, event)) = event {
                             let state = ev_handle.state::<AppState>();
@@ -1710,6 +1741,8 @@ pub fn run() {
             request_ci_fix,
             get_ci_autofix,
             set_ci_autofix,
+            get_auto_end_idle,
+            set_auto_end_idle,
             get_pr_desc_autoupdate,
             set_pr_desc_autoupdate,
             update_pr_description_now,

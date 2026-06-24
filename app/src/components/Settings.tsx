@@ -28,14 +28,22 @@ export function Settings({
   const [editId, setEditId] = useState<number | null>(null);
   const [editVal, setEditVal] = useState("");
   const [mode, setMode] = useState("auto");
+  const [autoEndIdle, setAutoEndIdle] = useState(false);
 
   useEffect(() => {
     api.getPermissionMode().then(setMode).catch(() => {});
+    api.getAutoEndIdle().then(setAutoEndIdle).catch(() => {});
   }, []);
 
   const changeMode = (m: string) => {
     setMode(m);
     api.setPermissionMode(m).catch(() => {});
+  };
+
+  const toggleAutoEndIdle = () => {
+    const next = !autoEndIdle;
+    setAutoEndIdle(next);
+    api.setAutoEndIdle(next).catch(() => setAutoEndIdle(!next));
   };
 
   const commitRename = (r: Repo) => {
@@ -71,6 +79,10 @@ export function Settings({
             </option>
           ))}
         </select>
+        <label className="muted" title="When Claude stops and is waiting, close its terminal instead of leaving it idle. Resume by moving the card back to In Progress (grills restart fresh).">
+          <input type="checkbox" checked={autoEndIdle} onChange={toggleAutoEndIdle} /> End idle sessions
+          when Claude is waiting
+        </label>
       </div>
 
       <h3>Repositories</h3>

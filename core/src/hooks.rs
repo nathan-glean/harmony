@@ -33,6 +33,10 @@ pub enum SystemEvent {
     FixFinished { ticket_id: i64 },
     /// A feedback-addressing session finished (commit + push so the PR reflects the changes).
     AddressFinished { ticket_id: i64 },
+    /// A session came to rest in `waiting` after a `Stop` with no pending question, and the
+    /// `auto_end_idle` setting is on → free its PTY instead of leaving an idle terminal hanging.
+    /// The executor stops the session; the ticket stays in its column (resume by moving it back).
+    SessionIdle { ticket_id: i64 },
 }
 
 /// Shared state for the hook router: the store, plus an optional channel to the app executor.
@@ -176,7 +180,31 @@ async fn handle(
                             "address" => {
                                 let _ = tx.send(SystemEvent::AddressFinished { ticket_id: sess.ticket_id });
                             }
-                            _ => {}
+                            // Any other kind (e.g. `spec`/grill) has no domain event to tear it
+                            // down, so it lingers alive in `waiting`. When `auto_end_idle` is on,
+                            // free its PTY on a Stop with no pending question (an `AskUserQuestion`
+                            // keeps the session alive so its answer card can reach a live PTY).
+                            _ => {
+                                let auto_end = store
+                                    .get_setting("auto_end_idle")
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                    .map(|v| v == "on")
+                                    .unwrap_or(false);
+                                if auto_end {
+                                    let pending = store
+                                        .get_ticket(sess.ticket_id)
+                                        .await
+                                        .ok()
+                                        .flatten()
+                                        .map(|t| !t.pending_question.trim().is_empty())
+                                        .unwrap_or(false);
+                                    if !pending {
+                                        let _ = tx.send(SystemEvent::SessionIdle { ticket_id: sess.ticket_id });
+                                    }
+                                }
+                            }
                         }
                     }
                 }
