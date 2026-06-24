@@ -59,6 +59,11 @@ tasks:
     cmds:
       - '{{.WITH_CARGO}}; cargo run --bin harmony -- {{.CLI_ARGS}}'
 
+  flow:doc:
+    desc: Regenerate docs/flow.md from the flow state machine (the CI test guards drift)
+    cmds:
+      - '{{.WITH_CARGO}}; UPDATE_FLOW_DOC=1 cargo test -p harmony-core --test flow_doc'
+
   # ---- Frontend (Vite / React) ----
 
   app:install:

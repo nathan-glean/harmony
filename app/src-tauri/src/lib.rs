@@ -750,29 +750,6 @@ fn ci_fix_context(triage: &harmony_core::ci::CiTriage) -> String {
 
 /// `FixFinished`: commit + push the fix session's changes (re-triggers CI), keeping the ticket in
 /// the PR column. The next poll tick re-triages the new HEAD (and stops at the attempt cap).
-async fn on_ci_fix_finished(app: &AppHandle, state: &AppState, ticket_id: i64) {
-    let mut pushed = false;
-    if let Ok(Some(ticket)) = state.store.get_ticket(ticket_id).await {
-        if let Ok(Some(wt)) = state.store.primary_worktree_for_ticket(ticket_id).await {
-            let (path, branch, msg) = (wt.path.clone(), wt.branch.clone(), commit_message(&ticket));
-            pushed = tokio::task::spawn_blocking(move || {
-                if harmony_core::github::commit_all(&path, &msg).unwrap_or(false) {
-                    let _ = harmony_core::github::push_branch(&path, &branch);
-                    return harmony_core::github::pr_status(&path).exists;
-                }
-                false
-            })
-            .await
-            .unwrap_or(false);
-        }
-    }
-    let _ = state.store.set_ticket_status(ticket_id, harmony_core::status::IN_REVIEW).await;
-    let _ = app.emit("ticket-updated", ticket_id);
-    if pushed {
-        maybe_update_pr_desc(app, state, ticket_id).await;
-    }
-}
-
 /// Whether automatic PR-description updates are enabled (kill-switch; default on).
 async fn pr_desc_autoupdate_enabled(state: &AppState) -> bool {
     state
@@ -837,37 +814,6 @@ async fn update_pr_description(app: &AppHandle, state: &AppState, ticket_id: i64
 /// Convenience wrapper used by the session-finished handlers (auto, respects the kill-switch).
 async fn maybe_update_pr_desc(app: &AppHandle, state: &AppState, ticket_id: i64) {
     update_pr_description(app, state, ticket_id, false).await;
-}
-
-/// `AddressFinished`: commit the feedback-addressing session's changes; push only when a PR
-/// already exists (so we don't create a remote branch pre-PR). Restore the ticket's review column
-/// (PR column if a PR exists, else Human Review).
-async fn on_address_finished(app: &AppHandle, state: &AppState, ticket_id: i64) {
-    let mut pr_exists = false;
-    let mut pushed = false;
-    if let Ok(Some(ticket)) = state.store.get_ticket(ticket_id).await {
-        if let Ok(Some(wt)) = state.store.primary_worktree_for_ticket(ticket_id).await {
-            let (path, branch, msg) = (wt.path.clone(), wt.branch.clone(), commit_message(&ticket));
-            let res = tokio::task::spawn_blocking(move || {
-                let committed = harmony_core::github::commit_all(&path, &msg).unwrap_or(false);
-                let exists = harmony_core::github::pr_status(&path).exists;
-                if committed && exists {
-                    let _ = harmony_core::github::push_branch(&path, &branch);
-                }
-                (exists, committed && exists)
-            })
-            .await
-            .unwrap_or((false, false));
-            pr_exists = res.0;
-            pushed = res.1;
-        }
-    }
-    let status = if pr_exists { harmony_core::status::IN_REVIEW } else { harmony_core::status::WAITING };
-    let _ = state.store.set_ticket_status(ticket_id, status).await;
-    let _ = app.emit("ticket-updated", ticket_id);
-    if pushed {
-        maybe_update_pr_desc(app, state, ticket_id).await;
-    }
 }
 
 /// Manual "Fix CI" button: triage now and fix regardless of the auto gates.
@@ -1041,6 +987,8 @@ async fn list_diff_comments(
 }
 
 /// Leave a new comment on a diff line; returns its id. `side` is "new" or "old".
+// A Tauri command whose args mirror the diff-comment record fields — they don't usefully group.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn add_diff_comment(
     state: State<'_, AppState>,
@@ -1441,6 +1389,15 @@ async fn build_ctx(state: &AppState, ticket: &Ticket) -> Ctx {
         (false, false, harmony_core::github::PrStatus::default())
     };
 
+    let auto_end_idle = state
+        .store
+        .get_setting("auto_end_idle")
+        .await
+        .ok()
+        .flatten()
+        .map(|v| v == "on")
+        .unwrap_or(false);
+
     Ctx {
         has_repo: ticket.repo_id.is_some(),
         has_spec: ticket.grilled == 1,
@@ -1455,6 +1412,9 @@ async fn build_ctx(state: &AppState, ticket: &Ticket) -> Ctx {
         pr_exists: pr.exists,
         pr_approved: pr.approved,
         is_jira: ticket.jira_key.is_some(),
+        // Claude is mid-question → a Stop isn't "done"; keep the session live (see `flow::decide`).
+        user_question_pending: !ticket.pending_question.trim().is_empty(),
+        auto_end_idle,
     }
 }
 
@@ -1478,15 +1438,6 @@ async fn apply_event(
     if let Some(reason) = decision.blocked {
         return Err(reason.to_string());
     }
-    // Work just finished → commit the agent's changes (harmony owns version control). Doing it
-    // here, before the move to Human Review / `/review`, means the review and the reviewed-SHA
-    // fingerprint see committed state and the branch is PR-ready.
-    if event == Event::WorkFinished {
-        if let Ok(Some(wt)) = state.store.primary_worktree_for_ticket(ticket_id).await {
-            let (path, msg) = (wt.path.clone(), commit_message(&ticket));
-            let _ = tokio::task::spawn_blocking(move || harmony_core::github::commit_all(&path, &msg)).await;
-        }
-    }
     // `OpenPr` is slow (Claude-generated body + push + gh create) — run it in the background so
     // the card moves to the PR column immediately with a loading indicator. Every other action
     // runs synchronously here.
@@ -1496,20 +1447,6 @@ async fn apply_event(
             continue;
         }
         run_action(app, state, &ticket, *action, force).await?;
-    }
-    // After a review completes, fingerprint the reviewed HEAD so `/review` isn't re-run until
-    // the branch changes again (`flow::Ctx.review_current`).
-    if event == Event::ReviewFinished {
-        if let Ok(Some(wt)) = state.store.primary_worktree_for_ticket(ticket_id).await {
-            let path = wt.path.clone();
-            if let Ok(Ok(sha)) =
-                tokio::task::spawn_blocking(move || harmony_core::github::head_sha(&path)).await
-            {
-                let _ = state.store.mark_reviewed(ticket_id, &sha).await;
-            }
-        }
-        // The review prose itself is captured live by the hook server (the `/review` skill's
-        // plan-file write — see `core/src/hooks.rs`), not scraped here.
     }
     let target = decision.target.as_status();
     state.store.set_ticket_status(ticket_id, target).await.map_err(|e| e.to_string())?;
@@ -1573,6 +1510,49 @@ async fn run_action(
         Action::RunReview => {
             let handle = mgr().start_review(id).await.map_err(|e| e.to_string())?;
             wire_session(app, state, handle, id)?;
+        }
+        // Commit the agent's working changes (harmony owns version control). A no-op when clean.
+        Action::CommitChanges => {
+            if let Some(wt) =
+                state.store.primary_worktree_for_ticket(id).await.map_err(|e| e.to_string())?
+            {
+                let (path, msg) = (wt.path.clone(), commit_message(ticket));
+                let _ = tokio::task::spawn_blocking(move || harmony_core::github::commit_all(&path, &msg))
+                    .await;
+            }
+        }
+        // Push the branch (re-triggers CI / updates the PR). When a PR exists, refresh its
+        // description if the change made it stale (respects the `pr_desc_autoupdate` kill-switch).
+        Action::PushBranch => {
+            if let Some(wt) =
+                state.store.primary_worktree_for_ticket(id).await.map_err(|e| e.to_string())?
+            {
+                let (path, branch) = (wt.path.clone(), wt.branch.clone());
+                let pushed = tokio::task::spawn_blocking(move || {
+                    harmony_core::github::push_branch(&path, &branch).is_ok()
+                        && harmony_core::github::pr_status(&path).exists
+                })
+                .await
+                .unwrap_or(false);
+                if pushed {
+                    maybe_update_pr_desc(app, state, id).await;
+                }
+            }
+        }
+        // Fingerprint the reviewed HEAD so the column-entry `/review` isn't re-run until the branch
+        // moves again (`flow::Ctx.review_current`). The review prose itself is captured live by the
+        // hook server (the `/review` skill's plan-file write — see `core/src/hooks.rs`).
+        Action::MarkReviewed => {
+            if let Some(wt) =
+                state.store.primary_worktree_for_ticket(id).await.map_err(|e| e.to_string())?
+            {
+                let path = wt.path.clone();
+                if let Ok(Ok(sha)) =
+                    tokio::task::spawn_blocking(move || harmony_core::github::head_sha(&path)).await
+                {
+                    let _ = state.store.mark_reviewed(id, &sha).await;
+                }
+            }
         }
         // `OpenPr` is handled asynchronously by `apply_event` (so the card moves immediately with
         // a loading indicator); it's intentionally a no-op here in the synchronous action loop.
@@ -1714,39 +1694,21 @@ pub fn run() {
                 let ev_handle = handle.clone();
                 tauri::async_runtime::spawn(async move {
                     use harmony_core::hooks::SystemEvent;
+                    // Every system event maps 1:1 to a `flow::Event` and runs through the single
+                    // executor path — `decide` owns the column, actions (commit/push/stop/...), and
+                    // all gating (pending question, `auto_end_idle`). No event-specific side paths.
                     while let Some(ev) = rx.recv().await {
-                        let event = match ev {
-                            SystemEvent::GrillFinished { ticket_id } => Some((ticket_id, Event::GrillFinished)),
-                            SystemEvent::WorkFinished { ticket_id } => Some((ticket_id, Event::WorkFinished)),
-                            SystemEvent::ReviewFinished { ticket_id } => Some((ticket_id, Event::ReviewFinished)),
-                            // A CI-fix session finished: commit + push its changes (re-triggers CI),
-                            // outside the flow state machine — the card stays in the PR column.
-                            SystemEvent::FixFinished { ticket_id } => {
-                                let state = ev_handle.state::<AppState>();
-                                on_ci_fix_finished(&ev_handle, &state, ticket_id).await;
-                                None
-                            }
-                            // A feedback-addressing session finished: commit (+ push if a PR
-                            // exists) so the change is reflected; keep the ticket in its column.
-                            SystemEvent::AddressFinished { ticket_id } => {
-                                let state = ev_handle.state::<AppState>();
-                                on_address_finished(&ev_handle, &state, ticket_id).await;
-                                None
-                            }
-                            // An idle `waiting` session (auto_end_idle on): free its PTY, leave the
-                            // card where it is. The wait-task then marks it done (claude_session_id
-                            // preserved for --resume) and clears `drafting`. Outside the flow.
-                            SystemEvent::SessionIdle { ticket_id } => {
-                                let state = ev_handle.state::<AppState>();
-                                stop_ticket_sessions(&state, ticket_id);
-                                None
-                            }
+                        let (ticket_id, event) = match ev {
+                            SystemEvent::GrillFinished { ticket_id } => (ticket_id, Event::GrillFinished),
+                            SystemEvent::WorkFinished { ticket_id } => (ticket_id, Event::WorkFinished),
+                            SystemEvent::ReviewFinished { ticket_id } => (ticket_id, Event::ReviewFinished),
+                            SystemEvent::FixFinished { ticket_id } => (ticket_id, Event::FixFinished),
+                            SystemEvent::AddressFinished { ticket_id } => (ticket_id, Event::AddressFinished),
+                            SystemEvent::SessionIdle { ticket_id } => (ticket_id, Event::SessionIdle),
                         };
-                        if let Some((ticket_id, event)) = event {
-                            let state = ev_handle.state::<AppState>();
-                            if let Err(e) = apply_event(&ev_handle, &state, ticket_id, event, false).await {
-                                eprintln!("[flow] {event:?} for #{ticket_id} failed: {e}");
-                            }
+                        let state = ev_handle.state::<AppState>();
+                        if let Err(e) = apply_event(&ev_handle, &state, ticket_id, event, false).await {
+                            eprintln!("[flow] {event:?} for #{ticket_id} failed: {e}");
                         }
                     }
                 });

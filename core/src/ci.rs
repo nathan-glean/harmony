@@ -154,7 +154,7 @@ pub fn candidate_checks<'a>(
 ) -> Vec<&'a String> {
     failing
         .iter()
-        .filter(|c| required.map_or(true, |r| r.contains(*c)))
+        .filter(|c| required.is_none_or(|r| r.contains(*c)))
         .filter(|c| !base_red.contains(*c))
         .collect()
 }

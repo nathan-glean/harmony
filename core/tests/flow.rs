@@ -1,9 +1,8 @@
 //! Executable spec for the ticket-lifecycle state machine (`harmony_core::flow`).
 //!
 //! These tests ARE the contract: each encodes one rule of the golden path or an edge case the
-//! app must obey. `flow::decide`/`flow::warnings` are currently `todo!()`, so this suite is RED
-//! by design — a later task implements the state machine until every case here is green. The
-//! planner is pure, so there's no DB/Claude/git here: just `(event, ctx) -> Decision`.
+//! app must obey. The planner is pure, so there's no DB/Claude/git here: just
+//! `(event, ctx) -> Decision`.
 
 use harmony_core::flow::{decide, warnings, Action, Column, Ctx, Event, Warning};
 use Action::*;
@@ -53,7 +52,8 @@ fn work_finished_moves_to_human_review_and_runs_review() {
         &Ctx { from: InProgress, has_spec: true, planned: true, session_live: true, has_changes: true, ..base() },
     );
     assert_eq!(d.target, HumanReview);
-    assert_eq!(d.actions, vec![StopSession, RunReview]);
+    // Commit the agent's work first (so review + the reviewed-SHA see committed state), stop, review.
+    assert_eq!(d.actions, vec![CommitChanges, StopSession, RunReview]);
 }
 
 #[test]
@@ -63,7 +63,7 @@ fn review_finished_stops_and_stays_in_human_review() {
         &Ctx { from: HumanReview, session_live: true, has_changes: true, ..base() },
     );
     assert_eq!(d.target, HumanReview);
-    assert_eq!(d.actions, vec![StopSession]);
+    assert_eq!(d.actions, vec![StopSession, MarkReviewed]);
 }
 
 #[test]
@@ -370,8 +370,9 @@ fn grill_finished_after_ticket_moved_on_only_stops() {
 fn review_finished_off_human_review_only_stops() {
     for from in [Todo, InProgress, Pr, Done] {
         let d = decide(Event::ReviewFinished, &Ctx { from, session_live: true, ..base() });
-        assert_eq!(d.target, from);
-        assert!(!d.actions.iter().any(|a| *a != StopSession), "from {from:?}: only StopSession, no move");
+        assert_eq!(d.target, from, "from {from:?}: a stale ReviewFinished must not move the ticket");
+        assert!(has(&d.actions, StopSession));
+        assert!(!has(&d.actions, RunReview), "from {from:?}: never re-run review on a finish event");
     }
 }
 
@@ -552,7 +553,7 @@ fn comment_addressing_loop() {
                has_worktree: true, has_changes: true, review_current: false, ..base() },
     );
     assert_eq!(back.target, HumanReview);
-    assert_eq!(back.actions, vec![StopSession, RunReview]);
+    assert_eq!(back.actions, vec![CommitChanges, StopSession, RunReview]);
 }
 
 // ===================================================================
@@ -583,4 +584,111 @@ fn review_requested_without_changes_is_blocked() {
     );
     assert!(d.blocked.is_some(), "nothing to review when there are no changes");
     assert!(!has(&d.actions, RunReview));
+}
+
+// ===================================================================
+// Work finished: commit + question-pending gate
+// ===================================================================
+
+#[test]
+fn work_finished_commits_before_review() {
+    let d = decide(
+        Event::WorkFinished,
+        &Ctx { from: InProgress, session_live: true, has_spec: true, planned: true, has_changes: true, ..base() },
+    );
+    // Commit is first so the /review and the reviewed-SHA fingerprint see committed state.
+    assert_eq!(d.actions.first(), Some(&CommitChanges));
+    assert!(has(&d.actions, RunReview));
+}
+
+#[test]
+fn work_finished_with_question_pending_stays_in_progress() {
+    // A Stop while an AskUserQuestion is outstanding isn't "done" — Claude is waiting on the user.
+    let d = decide(
+        Event::WorkFinished,
+        &Ctx { from: InProgress, session_live: true, has_spec: true, planned: true,
+               has_changes: true, user_question_pending: true, ..base() },
+    );
+    assert_eq!(d.target, InProgress, "a pending question means work isn't finished");
+    assert!(d.actions.is_empty(), "leave the session live to receive the answer");
+}
+
+// ===================================================================
+// Review finished: reviewed-SHA fingerprint
+// ===================================================================
+
+#[test]
+fn review_finished_marks_reviewed() {
+    let d = decide(
+        Event::ReviewFinished,
+        &Ctx { from: HumanReview, session_live: true, has_changes: true, ..base() },
+    );
+    assert_eq!(d.actions, vec![StopSession, MarkReviewed]);
+}
+
+// ===================================================================
+// CI-fix / feedback-addressing session finished
+// ===================================================================
+
+#[test]
+fn fix_finished_commits_pushes_and_stays_in_pr() {
+    let d = decide(
+        Event::FixFinished,
+        &Ctx { from: Pr, reviewed: true, has_changes: true, has_worktree: true, pr_exists: true, ..base() },
+    );
+    assert_eq!(d.target, Pr);
+    assert_eq!(d.actions, vec![CommitChanges, PushBranch]);
+}
+
+#[test]
+fn address_finished_with_pr_commits_pushes_and_returns_to_pr() {
+    let d = decide(
+        Event::AddressFinished,
+        &Ctx { from: InProgress, reviewed: true, has_changes: true, has_worktree: true, pr_exists: true, ..base() },
+    );
+    assert_eq!(d.target, Pr, "a PR exists => land back in the PR column");
+    assert_eq!(d.actions, vec![CommitChanges, PushBranch]);
+}
+
+#[test]
+fn address_finished_without_pr_commits_only_and_returns_to_human_review() {
+    let d = decide(
+        Event::AddressFinished,
+        &Ctx { from: InProgress, reviewed: true, has_changes: true, has_worktree: true, pr_exists: false, ..base() },
+    );
+    assert_eq!(d.target, HumanReview, "no PR => don't create a remote branch; stay pre-PR");
+    assert_eq!(d.actions, vec![CommitChanges], "no push without a PR");
+}
+
+// ===================================================================
+// Idle session teardown (auto_end_idle)
+// ===================================================================
+
+#[test]
+fn session_idle_stops_when_auto_end_idle_on() {
+    let d = decide(
+        Event::SessionIdle,
+        &Ctx { from: HumanReview, session_live: true, auto_end_idle: true, ..base() },
+    );
+    assert_eq!(d.target, HumanReview, "idle teardown never moves the ticket");
+    assert_eq!(d.actions, vec![StopSession]);
+}
+
+#[test]
+fn session_idle_noop_when_auto_end_idle_off() {
+    let d = decide(
+        Event::SessionIdle,
+        &Ctx { from: HumanReview, session_live: true, auto_end_idle: false, ..base() },
+    );
+    assert!(d.actions.is_empty(), "leave the idle session alone when the setting is off");
+}
+
+#[test]
+fn session_idle_with_question_pending_keeps_session_alive() {
+    // An AskUserQuestion keeps the session alive so its answer card can reach a live PTY.
+    let d = decide(
+        Event::SessionIdle,
+        &Ctx { from: HumanReview, session_live: true, auto_end_idle: true, user_question_pending: true, ..base() },
+    );
+    assert!(d.actions.is_empty(), "don't free a session that's waiting on the user");
 }

@@ -607,12 +607,12 @@ mod tests {
 
         assert_eq!(commits_ahead(&p, "main"), 0);
         // Clean tree → no-op.
-        assert_eq!(commit_all(&p, "noop").unwrap(), false);
+        assert!(!commit_all(&p, "noop").unwrap());
 
         // Dirty → commits, HEAD advances, but still 0 ahead of main (we committed onto main here).
         std::fs::write(dir.join("new.txt"), "x").unwrap();
-        assert_eq!(commit_all(&p, "feat: add").unwrap(), true);
-        assert_eq!(commit_all(&p, "again").unwrap(), false); // now clean
+        assert!(commit_all(&p, "feat: add").unwrap());
+        assert!(!commit_all(&p, "again").unwrap()); // now clean
 
         let _ = std::fs::remove_dir_all(&dir);
     }

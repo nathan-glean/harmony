@@ -54,6 +54,14 @@ Tauri desktop app (single process)
     └── Diff / PR panes
 ```
 
+### Ticket lifecycle state machine
+The board's behaviour — which column a ticket lands in and what side effects run — is a single pure
+decision function, `flow::decide` (`core/src/flow.rs`), driven by one shared executor
+(`core/src/executor.rs`) from both the Tauri app and the headless CLI. Its contract is pinned by
+`core/tests/flow.rs`, and a **generated diagram + transition table** lives at
+[`docs/flow.md`](docs/flow.md) — rendered from `decide` itself (`task flow:doc`) and drift-checked in
+CI, so it always matches the code.
+
 ### Per-session flow
 1. Pick ticket → choose repo (defaulted) → write/Draft spec.
 2. Worktree created off fresh default branch; branch `harmony/<KEY>-<slug>`.

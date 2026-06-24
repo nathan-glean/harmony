@@ -9,6 +9,7 @@
 //!   - `comment list` → a top-level **object** `{comments:[...], total, ...}`. Each comment
 //!     has `author` (a **plain string** display name, not an object), `body` (**plain
 //!     string**), `id`, `visibility` — and **no timestamp field** (`created` is absent).
+//!
 //! Parsing stays defensive (array-or-wrapped, flat-or-nested, string-or-ADF) so an acli
 //! schema change won't break us, but the verified paths above are tried first.
 

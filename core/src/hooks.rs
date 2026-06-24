@@ -152,60 +152,25 @@ async fn handle(
             let _ = store.set_session_state(sess.id, session_state, tool).await;
 
             match &ctx.events {
-                // App mode: the flow executor owns ticket status + advancement. Emit a domain
-                // event on the relevant Stop; never write ticket status here.
+                // App mode: the flow executor owns ticket status + advancement. This handler is a
+                // thin adapter — on a `Stop`, map the session kind to its domain event and emit it.
+                // All gating (a pending question means work isn't done; `auto_end_idle` decides
+                // whether an idle session is torn down) lives in `flow::decide` via `flow::Ctx`, so
+                // we emit unconditionally here and never write ticket status.
                 Some(tx) => {
                     if event == "Stop" {
-                        match sess.kind.as_str() {
-                            // Work done = a Stop with no pending question (a pending question
-                            // means Claude is waiting on the user → stay In Progress).
-                            "work" => {
-                                let pending = store
-                                    .get_ticket(sess.ticket_id)
-                                    .await
-                                    .ok()
-                                    .flatten()
-                                    .map(|t| !t.pending_question.trim().is_empty())
-                                    .unwrap_or(false);
-                                if !pending {
-                                    let _ = tx.send(SystemEvent::WorkFinished { ticket_id: sess.ticket_id });
-                                }
-                            }
-                            "review" => {
-                                let _ = tx.send(SystemEvent::ReviewFinished { ticket_id: sess.ticket_id });
-                            }
-                            "fix" => {
-                                let _ = tx.send(SystemEvent::FixFinished { ticket_id: sess.ticket_id });
-                            }
-                            "address" => {
-                                let _ = tx.send(SystemEvent::AddressFinished { ticket_id: sess.ticket_id });
-                            }
+                        let id = sess.ticket_id;
+                        let ev = match sess.kind.as_str() {
+                            "work" => SystemEvent::WorkFinished { ticket_id: id },
+                            "review" => SystemEvent::ReviewFinished { ticket_id: id },
+                            "fix" => SystemEvent::FixFinished { ticket_id: id },
+                            "address" => SystemEvent::AddressFinished { ticket_id: id },
                             // Any other kind (e.g. `spec`/grill) has no domain event to tear it
-                            // down, so it lingers alive in `waiting`. When `auto_end_idle` is on,
-                            // free its PTY on a Stop with no pending question (an `AskUserQuestion`
-                            // keeps the session alive so its answer card can reach a live PTY).
-                            _ => {
-                                let auto_end = store
-                                    .get_setting("auto_end_idle")
-                                    .await
-                                    .ok()
-                                    .flatten()
-                                    .map(|v| v == "on")
-                                    .unwrap_or(false);
-                                if auto_end {
-                                    let pending = store
-                                        .get_ticket(sess.ticket_id)
-                                        .await
-                                        .ok()
-                                        .flatten()
-                                        .map(|t| !t.pending_question.trim().is_empty())
-                                        .unwrap_or(false);
-                                    if !pending {
-                                        let _ = tx.send(SystemEvent::SessionIdle { ticket_id: sess.ticket_id });
-                                    }
-                                }
-                            }
-                        }
+                            // down — it's an idle session. `decide` frees its PTY when
+                            // `auto_end_idle` is on and no question is pending.
+                            _ => SystemEvent::SessionIdle { ticket_id: id },
+                        };
+                        let _ = tx.send(ev);
                     }
                 }
                 // Headless/CLI mode (no executor): keep the legacy direct ticket-status write so

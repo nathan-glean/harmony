@@ -1,13 +1,15 @@
-//! Ticket-lifecycle state machine (the single source of truth for "what should happen").
+//! Ticket-lifecycle state machine — the single source of truth for "what should happen".
 //!
 //! This is a PURE decision function: given an [`Event`] (a user column-move or a system event
 //! like a finished session) and the ticket's [`Ctx`] (its current state + repo/PR/changes
 //! facts), it returns a [`Decision`] — the column the ticket should end in and the ordered list
-//! of [`Action`]s to execute. No I/O, no async: trivially testable, and meant to replace the
-//! orchestration logic currently scattered across the React frontend and the Tauri commands.
+//! of [`Action`]s to execute. No I/O, no async: trivially testable. The Tauri app's executor
+//! (`apply_event` in `app/src-tauri/src/lib.rs`) is the single runtime path that turns these
+//! [`Action`]s into real effects, so every lifecycle decision flows through `decide`.
 //!
-//! Status: the behaviour is specified by the suite in `core/tests/flow.rs`; `decide`/`warnings`
-//! are intentionally `todo!()` until that spec is implemented.
+//! The behaviour is pinned by the suite in `core/tests/flow.rs`, and a human-readable diagram +
+//! transition table is generated from `decide` itself by [`crate::flow_doc`] (see `docs/flow.md`),
+//! so the documentation can never silently drift from the code.
 
 /// A board column. Maps 1:1 to the `crate::status` strings. The user-facing names differ:
 /// `HumanReview` is the "For Your Review" (pre-PR sanity check) column, and `Pr` is "In PR
@@ -63,6 +65,15 @@ pub enum Event {
     ReviewRequested,
     /// The `/review` run completed.
     ReviewFinished,
+    /// An autonomous CI-fix session finished — commit + push its changes (re-triggers CI).
+    FixFinished,
+    /// A feedback-addressing session finished — commit (and push when a PR exists) so the change
+    /// is reflected on the branch/PR.
+    AddressFinished,
+    /// A session came to rest in `waiting` after a `Stop` with no pending question (an idle PTY
+    /// with no domain event to tear it down — e.g. a finished grill). Frees the PTY when the
+    /// `auto_end_idle` setting is on; otherwise a no-op.
+    SessionIdle,
 }
 
 /// A side effect to carry out as a result of a decision. Pure markers — the executor (a later
@@ -84,6 +95,14 @@ pub enum Action {
     StopSession,
     /// Run the `/review` skill (a read-only session that emits suggestions, then stops).
     RunReview,
+    /// Commit the worktree's working changes (harmony owns version control). A no-op when the
+    /// tree is clean. Emitted before review / push so they see committed state.
+    CommitChanges,
+    /// Push the ticket's branch to its remote (re-triggers CI / updates the PR).
+    PushBranch,
+    /// Fingerprint the current HEAD as the reviewed SHA so `/review` isn't re-run until the branch
+    /// moves again (drives [`Ctx::review_current`]).
+    MarkReviewed,
     /// Push the branch and open a draft PR.
     OpenPr,
     /// Merge the approved PR.
@@ -129,6 +148,11 @@ pub struct Ctx {
     pub pr_approved: bool,
     /// The ticket is linked to Jira (used for the repo-less warning surface).
     pub is_jira: bool,
+    /// A live `AskUserQuestion` is outstanding for this ticket — Claude is waiting on the user, so
+    /// a `WorkFinished`/`SessionIdle` `Stop` is NOT a real "done" and must keep the session alive.
+    pub user_question_pending: bool,
+    /// The `auto_end_idle` setting is on: free an idle session's PTY instead of leaving it hanging.
+    pub auto_end_idle: bool,
 }
 
 /// The outcome of a decision.
@@ -255,13 +279,19 @@ pub fn decide(event: Event, ctx: &Ctx) -> Decision {
             Decision { target: ctx.from, actions, blocked: None }
         }
 
-        // Autonomous work done → move to Human review and review the changes. A WorkFinished
-        // arriving when the ticket is no longer In Progress is stale and ignored.
+        // Autonomous work done → commit the changes, move to Human review and review them. A
+        // WorkFinished arriving when the ticket is no longer In Progress is stale and ignored; a
+        // WorkFinished while a question is outstanding isn't really "done" — Claude is waiting on
+        // the user, so leave the session live in In Progress.
         Event::WorkFinished => {
             if ctx.from != InProgress {
                 return Decision { target: ctx.from, actions: vec![], blocked: None };
             }
-            let mut actions = vec![StopSession];
+            if ctx.user_question_pending {
+                return Decision { target: InProgress, actions: vec![], blocked: None };
+            }
+            // Commit first so the review and the reviewed-SHA fingerprint see committed state.
+            let mut actions = vec![CommitChanges, StopSession];
             if ctx.has_changes && !ctx.review_current {
                 actions.push(RunReview);
             }
@@ -283,9 +313,42 @@ pub fn decide(event: Event, ctx: &Ctx) -> Decision {
             }
         }
 
-        // The /review run finished: stop its session; the ticket stays where it is.
+        // The /review run finished: stop its session and fingerprint the reviewed HEAD (so the
+        // column-entry review isn't re-run until the branch moves). The ticket stays where it is.
         Event::ReviewFinished => {
-            Decision { target: ctx.from, actions: vec![StopSession], blocked: None }
+            Decision { target: ctx.from, actions: vec![StopSession, MarkReviewed], blocked: None }
+        }
+
+        // An autonomous CI-fix session finished: commit + push its changes (re-triggers CI). The
+        // card belongs in the PR column (that's the only stage CI-fixes run in).
+        Event::FixFinished => {
+            Decision { target: Pr, actions: vec![CommitChanges, PushBranch], blocked: None }
+        }
+
+        // A feedback-addressing session finished: commit, and push only when a PR already exists
+        // (so we don't create a remote branch pre-PR). Land back in the review column — PR if a PR
+        // exists, otherwise Human review.
+        Event::AddressFinished => {
+            let mut actions = vec![CommitChanges];
+            let target = if ctx.pr_exists {
+                actions.push(PushBranch);
+                Pr
+            } else {
+                HumanReview
+            };
+            Decision { target, actions, blocked: None }
+        }
+
+        // An idle session came to rest with no domain event to tear it down. Free its PTY when
+        // `auto_end_idle` is on and Claude isn't waiting on a question; otherwise leave it be. The
+        // ticket stays in its column (resume by moving it back).
+        Event::SessionIdle => {
+            let actions = if ctx.auto_end_idle && !ctx.user_question_pending {
+                vec![StopSession]
+            } else {
+                vec![]
+            };
+            Decision { target: ctx.from, actions, blocked: None }
         }
     }
 }

@@ -10,6 +10,7 @@ pub mod ci;
 pub mod cmd_err;
 pub mod draft;
 pub mod flow;
+pub mod flow_doc;
 pub mod github;
 pub mod hooks;
 pub mod jira;
