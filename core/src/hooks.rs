@@ -287,13 +287,20 @@ async fn handle(
                 }
             }
 
-            // Review session: the `/review` skill runs in plan mode and writes its verdict to
-            // the plan file — it never calls ExitPlanMode (review is a research task), so its
-            // final assistant message is just a wrap-up, not the review. Capture the plan-file
-            // write as the ticket's review prose instead. Latest write wins.
+            // Review session: the `/review` skill runs in plan mode and writes its verdict to the
+            // plan file — it never calls ExitPlanMode (review is a research task). The verdict IS
+            // the deliverable, so capturing it = completion. Plan-mode sessions don't reliably fire
+            // a `Stop` when they come to rest, so (like the grill's `GrillFinished` above) emit
+            // `ReviewFinished` here to tear the session down + fingerprint the reviewed HEAD, rather
+            // than waiting for a `Stop` that may never arrive. The `Stop` arm stays a safe fallback:
+            // a second `ReviewFinished` is idempotent, and a later plan-file write lands on an
+            // already-ended session (no live session → ignored).
             if sess.kind == "review" && event == "PreToolUse" {
                 if let Some(plan) = extract_plan(&v, tool) {
                     let _ = store.set_ticket_review_text(sess.ticket_id, &plan).await;
+                    if let Some(tx) = &ctx.events {
+                        let _ = tx.send(SystemEvent::ReviewFinished { ticket_id: sess.ticket_id });
+                    }
                 }
             }
 

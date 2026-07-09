@@ -759,6 +759,34 @@ async fn hook_emits_review_finished_on_review_stop() {
 }
 
 #[tokio::test]
+async fn hook_emits_review_finished_on_review_capture() {
+    // A plan-mode `/review` writes its verdict to a plan file (PreToolUse) and may never fire a
+    // Stop. Capturing the verdict IS completion, so it must emit ReviewFinished (tear down +
+    // fingerprint) — not just capture the text. Mirrors the grill's GrillFinished-on-capture.
+    let dir = TempDir::new("evrevcap");
+    let (store, ticket_id, cwd) = seed_session(&dir, "review").await;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<hooks::SystemEvent>();
+    let port = spawn_hooks_with(store.clone(), Some(tx)).await;
+    let client = reqwest::Client::new();
+
+    post(&client, port, "PreToolUse", &serde_json::json!({
+        "cwd": cwd,
+        "tool_name": "Write",
+        "tool_input": { "file_path": "/x/.claude/plans/review.md", "content": "# Review\n\nLooks good." }
+    })).await;
+
+    assert_eq!(rx.recv().await.unwrap(), hooks::SystemEvent::ReviewFinished { ticket_id });
+    // The verdict prose is still captured for the Review tab.
+    assert!(store
+        .get_ticket(ticket_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .review_text
+        .contains("Looks good"));
+}
+
+#[tokio::test]
 async fn hook_emits_grill_finished_on_spec_capture() {
     let dir = TempDir::new("evgrill");
     let store = Arc::new(open_store(&dir).await);
