@@ -22,6 +22,7 @@ export type Ticket = {
   ci_triage: string; // JSON of the latest CiTriage, "" when none
   proposed_spec: string; // markdown of a spec update Claude proposed (propose & confirm), "" when none
   activity: string; // JSON of the derived Activity (what's happening), "" until first computed
+  orchestrator_note: string; // the orchestrator's last action + why (audit line), "" when none
 };
 
 // The backend-derived "what's happening" status (matches harmony_core::activity::Activity).

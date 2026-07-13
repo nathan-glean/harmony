@@ -182,6 +182,9 @@ mod tests {
             judged_sha: String::new(),
             review_fix_attempts: 0,
             activity: String::new(),
+            orchestrator_note: String::new(),
+            orchestrator_seen: String::new(),
+            restart_attempts: 0,
         }
     }
 

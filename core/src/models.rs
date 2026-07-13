@@ -81,6 +81,15 @@ pub struct Ticket {
     /// backend on every state-machine change and each poll tick. "" until first computed. Rendered as
     /// the per-card activity pill — the UI never derives it itself.
     pub activity: String,
+    /// The orchestrator's last action + rationale for this ticket (e.g. "answered Q: chose 'Postgres'",
+    /// "escalated: ambiguous scope"). Human-facing audit line; "" when the orchestrator hasn't acted.
+    pub orchestrator_note: String,
+    /// Idempotency fingerprint for the orchestrator conductor: the "stuck state" it last decided on
+    /// (so it doesn't re-answer/re-escalate the same state every tick). "" until first decided.
+    pub orchestrator_seen: String,
+    /// Number of times the orchestrator has auto-restarted a crashed session for this ticket; capped
+    /// to avoid crash loops (reset when work legitimately progresses).
+    pub restart_attempts: i64,
 }
 
 /// An isolated git worktree for a ticket. Per-ticket and reused; `is_alternate`

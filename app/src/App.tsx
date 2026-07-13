@@ -689,6 +689,12 @@ export function App() {
                 </button>
               </div>
 
+              {(liveTicket ?? selected).orchestrator_note ? (
+                <div className="orchestrator-note" title="The orchestrator's last autonomous action on this ticket">
+                  🤖 {(liveTicket ?? selected).orchestrator_note}
+                </div>
+              ) : null}
+
               <div className="actions">
                 {selected.status === "todo" && !liveSessions[selected.id] && (
                   <button
