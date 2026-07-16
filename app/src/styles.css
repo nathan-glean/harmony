@@ -612,3 +612,9 @@ button:disabled { opacity: 0.5; cursor: default; }
   0%, 100% { opacity: 1; }
   50% { opacity: 0.55; }
 }
+
+/* The orchestrator's last autonomous action on a ticket (audit line in the modal). */
+.orchestrator-note {
+  margin: 6px 0 2px; font-size: 12px; color: var(--muted);
+  border-left: 2px solid #bb9af7; padding-left: 8px;
+}

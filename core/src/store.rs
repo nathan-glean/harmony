@@ -69,7 +69,10 @@ impl Store {
             review_findings TEXT NOT NULL DEFAULT '',
             judged_sha TEXT NOT NULL DEFAULT '',
             review_fix_attempts INTEGER NOT NULL DEFAULT 0,
-            activity TEXT NOT NULL DEFAULT ''
+            activity TEXT NOT NULL DEFAULT '',
+            orchestrator_note TEXT NOT NULL DEFAULT '',
+            orchestrator_seen TEXT NOT NULL DEFAULT '',
+            restart_attempts INTEGER NOT NULL DEFAULT 0
         );
         UPDATE tickets SET status = 'todo' WHERE status IN ('available', 'ready');
         CREATE TABLE IF NOT EXISTS worktrees (
@@ -196,6 +199,15 @@ impl Store {
         let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN activity TEXT NOT NULL DEFAULT ''")
             .execute(&self.pool)
             .await;
+        let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN orchestrator_note TEXT NOT NULL DEFAULT ''")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN orchestrator_seen TEXT NOT NULL DEFAULT ''")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN restart_attempts INTEGER NOT NULL DEFAULT 0")
+            .execute(&self.pool)
+            .await;
         Ok(())
     }
 
@@ -309,7 +321,7 @@ impl Store {
 
     pub async fn get_ticket(&self, id: i64) -> Result<Option<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec, review_verdict, review_findings, judged_sha, review_fix_attempts, activity
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec, review_verdict, review_findings, judged_sha, review_fix_attempts, activity, orchestrator_note, orchestrator_seen, restart_attempts
              FROM tickets WHERE id = ?",
         )
         .bind(id)
@@ -319,7 +331,7 @@ impl Store {
 
     pub async fn list_tickets(&self) -> Result<Vec<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec, review_verdict, review_findings, judged_sha, review_fix_attempts, activity
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec, review_verdict, review_findings, judged_sha, review_fix_attempts, activity, orchestrator_note, orchestrator_seen, restart_attempts
              FROM tickets ORDER BY id",
         )
         .fetch_all(&self.pool)
@@ -621,7 +633,7 @@ impl Store {
 
     pub async fn get_ticket_by_key(&self, key: &str) -> Result<Option<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec, review_verdict, review_findings, judged_sha, review_fix_attempts, activity
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec, review_verdict, review_findings, judged_sha, review_fix_attempts, activity, orchestrator_note, orchestrator_seen, restart_attempts
              FROM tickets WHERE jira_key = ?",
         )
         .bind(key)
@@ -798,6 +810,48 @@ impl Store {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    /// Record the orchestrator's last action + rationale (human-facing audit line) and the "stuck
+    /// state" fingerprint it decided on (idempotency, so it doesn't re-decide the same state).
+    pub async fn set_orchestrator_note(&self, id: i64, note: &str, seen: &str) -> Result<()> {
+        sqlx::query("UPDATE tickets SET orchestrator_note = ?, orchestrator_seen = ? WHERE id = ?")
+            .bind(note)
+            .bind(seen)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Increment the orchestrator's crash-restart counter (capped against crash loops by the caller).
+    pub async fn bump_restart_attempts(&self, id: i64) -> Result<()> {
+        sqlx::query("UPDATE tickets SET restart_attempts = restart_attempts + 1 WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Reset the crash-restart counter (work progressed legitimately).
+    pub async fn reset_restart_attempts(&self, id: i64) -> Result<()> {
+        sqlx::query("UPDATE tickets SET restart_attempts = 0 WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// The `state` of the ticket's most-recent session (`working`|`waiting`|`done`|`error`), if any.
+    /// `error` (from `fail_session`) marks a crashed session the orchestrator can restart.
+    pub async fn latest_session_state_for_ticket(&self, id: i64) -> Result<Option<String>> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT state FROM sessions WHERE ticket_id = ? ORDER BY id DESC LIMIT 1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|(s,)| s))
     }
 
     /// The `kind` of the ticket's live (not-yet-ended) session, if any — used to label what the

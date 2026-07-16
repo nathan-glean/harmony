@@ -32,6 +32,8 @@ export function Settings({
   const [autoReview, setAutoReview] = useState(true);
   const [reviewLoop, setReviewLoop] = useState(false);
   const [autoMerge, setAutoMerge] = useState(false);
+  const [orchestrator, setOrchestrator] = useState(false);
+  const [maxConcurrent, setMaxConcurrent] = useState(3);
 
   useEffect(() => {
     api.getPermissionMode().then(setMode).catch(() => {});
@@ -39,6 +41,8 @@ export function Settings({
     api.getAutoReview().then(setAutoReview).catch(() => {});
     api.getReviewLoop().then(setReviewLoop).catch(() => {});
     api.getAutoMerge().then(setAutoMerge).catch(() => {});
+    api.getOrchestrator().then(setOrchestrator).catch(() => {});
+    api.getMaxConcurrent().then(setMaxConcurrent).catch(() => {});
   }, []);
 
   const changeMode = (m: string) => {
@@ -68,6 +72,18 @@ export function Settings({
     const next = !autoMerge;
     setAutoMerge(next);
     api.setAutoMerge(next).catch(() => setAutoMerge(!next));
+  };
+
+  const toggleOrchestrator = () => {
+    const next = !orchestrator;
+    setOrchestrator(next);
+    api.setOrchestrator(next).catch(() => setOrchestrator(!next));
+  };
+
+  const changeMaxConcurrent = (n: number) => {
+    const v = Math.max(1, Math.floor(n || 1));
+    setMaxConcurrent(v);
+    api.setMaxConcurrent(v).catch(() => {});
   };
 
   const commitRename = (r: Repo) => {
@@ -118,6 +134,21 @@ export function Settings({
         <label className="muted" title="When a PR is approved on GitHub and CI is green, automatically merge it and move the card to Done — no manual drag. Merges to your default branch; the agent never self-approves.">
           <input type="checkbox" checked={autoMerge} onChange={toggleAutoMerge} /> Auto-merge PRs once
           approved &amp; green
+        </label>
+        <label className="muted" title="Orchestrator: autonomously starts ready tickets and restarts crashed sessions (up to the concurrency limit), answers worker questions it can derive from the spec (escalating genuine judgment to you), and auto-advances the loop (opens PRs when a review is clean). It never merges. You still create/spec tickets, offer judgment on escalations, and check outcomes.">
+          <input type="checkbox" checked={orchestrator} onChange={toggleOrchestrator} /> Orchestrator —
+          run &amp; wrangle sessions autonomously
+        </label>
+        <label className="muted" title="Maximum worker sessions the orchestrator runs at once.">
+          Max concurrent sessions
+          <input
+            type="number"
+            min={1}
+            value={maxConcurrent}
+            disabled={!orchestrator}
+            onChange={(e) => changeMaxConcurrent(Number(e.target.value))}
+            style={{ width: 56, marginLeft: 8 }}
+          />
         </label>
       </div>
 

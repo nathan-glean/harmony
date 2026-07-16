@@ -16,6 +16,7 @@ pub mod github;
 pub mod hooks;
 pub mod jira;
 pub mod models;
+pub mod orchestrator;
 pub mod review;
 pub mod session;
 pub mod settings;

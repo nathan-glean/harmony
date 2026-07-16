@@ -710,6 +710,25 @@ fn extract_blocks(content: Option<&Value>) -> String {
     }
 }
 
+/// Build the `claude` CLI args for a spawned session. `--strict-mcp-config` (with no `--mcp-config`)
+/// loads ZERO MCP servers, so a freshly-created worktree never blocks at startup on the project/user
+/// MCP "trust these servers?" prompt or a slow/broken MCP connection. Workers don't use MCP today
+/// (see DESIGN.md / BACKLOG "live MCP tools" is deferred); if that changes, pass `--mcp-config <file>`
+/// alongside this flag to allow only harmony-curated servers. Pure, for testability.
+fn claude_args(prompt: &str, resume: Option<&str>, permission_mode: &str) -> Vec<String> {
+    let mut args = vec![
+        "--permission-mode".to_string(),
+        permission_mode.to_string(),
+        "--strict-mcp-config".to_string(),
+    ];
+    if let Some(id) = resume {
+        args.push("--resume".to_string());
+        args.push(id.to_string());
+    }
+    args.push(prompt.to_string());
+    args
+}
+
 fn spawn_claude(
     cwd: &str,
     prompt: &str,
@@ -726,13 +745,9 @@ fn spawn_claude(
 
     let mut cmd = CommandBuilder::new("claude");
     cmd.cwd(cwd);
-    cmd.arg("--permission-mode");
-    cmd.arg(permission_mode);
-    if let Some(id) = resume {
-        cmd.arg("--resume");
-        cmd.arg(id);
+    for a in claude_args(prompt, resume, permission_mode) {
+        cmd.arg(a);
     }
-    cmd.arg(prompt);
 
     let child = pair.slave.spawn_command(cmd)?;
     drop(pair.slave);
@@ -790,7 +805,27 @@ mod tests {
             judged_sha: String::new(),
             review_fix_attempts: 0,
             activity: String::new(),
+            orchestrator_note: String::new(),
+            orchestrator_seen: String::new(),
+            restart_attempts: 0,
         }
+    }
+
+    #[test]
+    fn claude_args_always_disable_mcp() {
+        // Every spawned session must pass --strict-mcp-config so a fresh worktree can't hang on the
+        // MCP trust prompt / a slow MCP connection at startup.
+        let a = claude_args("do it", None, "bypassPermissions");
+        assert!(a.iter().any(|s| s == "--strict-mcp-config"), "missing --strict-mcp-config: {a:?}");
+        assert_eq!(a.windows(2).find(|w| w[0] == "--permission-mode").map(|w| &w[1]), Some(&"bypassPermissions".to_string()));
+        assert_eq!(a.last().unwrap(), "do it", "prompt must be the final positional arg");
+        assert!(!a.iter().any(|s| s == "--resume"));
+
+        // Resume threads the id through and still disables MCP.
+        let r = claude_args("go", Some("sess-123"), "plan");
+        assert!(r.iter().any(|s| s == "--strict-mcp-config"));
+        assert_eq!(r.windows(2).find(|w| w[0] == "--resume").map(|w| &w[1]), Some(&"sess-123".to_string()));
+        assert_eq!(r.last().unwrap(), "go");
     }
 
     #[test]

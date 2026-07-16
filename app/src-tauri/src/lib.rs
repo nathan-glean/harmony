@@ -25,6 +25,8 @@ const CI_POLL_SECS: u64 = 60;
 const MAX_CI_FIX_ATTEMPTS: i64 = 3;
 /// Max automatic review-fix attempts (review→fix→re-review cycles) before we stop and escalate.
 const MAX_REVIEW_FIX_ATTEMPTS: i64 = 3;
+/// Max times the orchestrator auto-restarts a crashed session for a ticket before escalating.
+const MAX_RESTART_ATTEMPTS: i64 = 2;
 
 /// Best-effort desktop notification — the escalation channel for when the autonomous loop needs a
 /// human (e.g. the review loop is exhausted) or finishes an outward-facing step (auto-merge).
@@ -792,6 +794,276 @@ async fn poll_auto_merge_once(app: &AppHandle, state: &AppState) {
     }
 }
 
+// ---- orchestrator (autonomous coordinator) -------------------------------
+
+/// Distinct tickets that currently have a live session (concurrency accounting).
+fn live_ticket_count(state: &AppState) -> usize {
+    let map = state.sessions.lock().unwrap();
+    let mut ids: Vec<i64> = map.values().map(|io| io.ticket_id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids.len()
+}
+
+/// The live session id for a ticket, if any.
+fn live_session_id_for_ticket(state: &AppState, ticket_id: i64) -> Option<i64> {
+    let map = state.sessions.lock().unwrap();
+    map.iter().find(|(_, io)| io.ticket_id == ticket_id).map(|(sid, _)| *sid)
+}
+
+/// A stable fingerprint of a "stuck state" (so the conductor decides it once, not every tick).
+fn state_fingerprint(kind: &str, content: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    content.hash(&mut h);
+    format!("{kind}:{:x}", h.finish())
+}
+
+/// The `label` of a ticket's persisted `activity` JSON (used to route auto-advance).
+fn activity_label(json: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|v| v.get("label").and_then(|l| l.as_str()).map(|s| s.to_string()))
+}
+
+/// Truncate for a human-facing note.
+fn short(s: &str, n: usize) -> String {
+    let s = s.trim();
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        format!("{}…", s.chars().take(n).collect::<String>())
+    }
+}
+
+/// Parse a ticket's `pending_question` JSON into (first question text, option labels, multiSelect).
+fn parse_pending_question(json: &str) -> Option<(String, Vec<String>, bool)> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let q = v.get("questions")?.as_array()?.first()?;
+    let question = q.get("question")?.as_str()?.to_string();
+    let multi = q.get("multiSelect").and_then(|x| x.as_bool()).unwrap_or(false);
+    let options = q
+        .get("options")
+        .and_then(|o| o.as_array())
+        .map(|arr| {
+            arr.iter()
+                .map(|o| {
+                    let label = o.get("label").and_then(|x| x.as_str()).unwrap_or("");
+                    let desc = o.get("description").and_then(|x| x.as_str()).unwrap_or("");
+                    if desc.is_empty() { label.to_string() } else { format!("{label} — {desc}") }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some((question, options, multi))
+}
+
+/// The autonomous coordinator pass, gated by `orchestrator` (runs last in the tick, on fresh
+/// activity). (A) reconcile crashed sessions + dispatch ready work under the concurrency cap; (B)
+/// try to unstick each ticket the human would otherwise handle — answer derivable worker questions,
+/// accept low-risk spec proposals, open PRs on a clean review — escalating genuine judgment (left in
+/// place; the WaitingOnYou desktop notification already fired). The state machine stays
+/// authoritative: every action goes through the existing commands.
+async fn poll_orchestrator_once(app: &AppHandle, state: &AppState) {
+    if !orchestrator_enabled(state).await {
+        return;
+    }
+    let tickets = match state.store.list_tickets().await {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    let cap = max_concurrent(state).await;
+    let mut slots = harmony_core::orchestrator::dispatch_slots(cap, live_ticket_count(state));
+
+    // (A1) Reconcile: restart sessions that crashed (latest session ended `error`) for a ticket
+    // still in the working column, capped to avoid crash loops (escalate past the cap).
+    for t in &tickets {
+        if slots == 0 {
+            break;
+        }
+        if t.status != harmony_core::status::WORKING || has_live_session(state, t.id) {
+            continue;
+        }
+        let crashed = matches!(
+            state.store.latest_session_state_for_ticket(t.id).await.ok().flatten().as_deref(),
+            Some("error")
+        );
+        if !crashed {
+            continue;
+        }
+        if t.restart_attempts >= MAX_RESTART_ATTEMPTS {
+            let seen = state_fingerprint("crash", &t.status);
+            if t.orchestrator_seen != seen {
+                let _ = state
+                    .store
+                    .set_orchestrator_note(t.id, "escalated: session crashed repeatedly", &seen)
+                    .await;
+                notify(app, &format!("{} — needs you", t.title), "A session crashed repeatedly.");
+            }
+            continue;
+        }
+        let mgr = SessionManager::new(Arc::new(state.store.clone()), HOOK_PORT);
+        match mgr.start(t.id).await {
+            Ok(handle) => {
+                if wire_session(app, state, handle, t.id).is_ok() {
+                    let _ = state.store.bump_restart_attempts(t.id).await;
+                    let _ = state.store.set_orchestrator_note(t.id, "restarted crashed session", "").await;
+                    slots -= 1;
+                }
+            }
+            Err(e) => eprintln!("[orchestrator] restart #{} failed: {e}", t.id),
+        }
+    }
+
+    // (A2) Dispatch: start eligible ready Todos (has repo + grilled), oldest first, up to slots.
+    let mut ready: Vec<&Ticket> = tickets
+        .iter()
+        .filter(|t| {
+            t.status == harmony_core::status::TODO
+                && harmony_core::orchestrator::todo_dispatch_eligible(
+                    t.repo_id.is_some(),
+                    t.grilled == 1,
+                    t.drafting == 1,
+                    has_live_session(state, t.id),
+                )
+        })
+        .collect();
+    ready.sort_by_key(|t| t.created_at);
+    for t in ready {
+        if slots == 0 {
+            break;
+        }
+        match apply_event(app, state, t.id, Event::Move(Column::InProgress), false).await {
+            Ok(()) => {
+                let _ = state.store.set_orchestrator_note(t.id, "dispatched: started work", "").await;
+                slots -= 1;
+            }
+            Err(e) => eprintln!("[orchestrator] dispatch #{} failed: {e}", t.id),
+        }
+    }
+
+    // (B) Unstick tickets the human would otherwise handle.
+    for t in &tickets {
+        // 1) Answer a live worker's outstanding question (conductor; escalate genuine judgment).
+        if !t.pending_question.trim().is_empty() {
+            if let Some(session_id) = live_session_id_for_ticket(state, t.id) {
+                let seen = state_fingerprint("q", &t.pending_question);
+                if t.orchestrator_seen != seen {
+                    orchestrator_answer_question(app, state, t, session_id, &seen).await;
+                }
+                continue;
+            }
+        }
+        // 2) Accept a low-risk proposed spec (conductor; escalate genuine judgment).
+        if !t.proposed_spec.trim().is_empty() {
+            let seen = state_fingerprint("spec", &t.proposed_spec);
+            if t.orchestrator_seen != seen {
+                orchestrator_judge_spec(app, state, t, &seen).await;
+            }
+            continue;
+        }
+        // 3) Auto-advance: a clean, reviewed change waiting for a PR → open it (deterministic).
+        if activity_label(&t.activity).as_deref() == Some("Ready to open PR")
+            && !has_live_session(state, t.id)
+        {
+            match apply_event(app, state, t.id, Event::Move(Column::Pr), false).await {
+                Ok(()) => {
+                    let _ = state.store.set_orchestrator_note(t.id, "opened PR (review clean)", "").await;
+                }
+                Err(e) => eprintln!("[orchestrator] open-PR #{} failed: {e}", t.id),
+            }
+        }
+    }
+}
+
+/// Conductor: decide how to answer a worker's question (or escalate), then deliver it via the PTY.
+async fn orchestrator_answer_question(
+    app: &AppHandle,
+    state: &AppState,
+    ticket: &Ticket,
+    session_id: i64,
+    seen: &str,
+) {
+    let Some((question, options, multi)) = parse_pending_question(&ticket.pending_question) else {
+        return;
+    };
+    let wt = match state.store.primary_worktree_for_ticket(ticket.id).await {
+        Ok(Some(w)) => w,
+        _ => return,
+    };
+    let spec = harmony_core::spec::compose_spec(ticket);
+    let (path, q, opts) = (wt.path.clone(), question.clone(), options.clone());
+    let decision = tokio::task::spawn_blocking(move || {
+        harmony_core::orchestrator::answer_question(&path, &q, &opts, multi, &spec)
+    })
+    .await;
+    let decision = match decision {
+        Ok(Ok(d)) => d,
+        _ => return, // conductor failed → leave for the human next tick
+    };
+    use harmony_core::orchestrator::QDecision;
+    match decision {
+        QDecision::Answer { selected, custom } => {
+            let note = match &custom {
+                Some(txt) => format!("answered question — \"{}\"", short(txt, 60)),
+                None => format!(
+                    "answered question — option {}",
+                    selected.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",")
+                ),
+            };
+            let _ = deliver_answer(state, session_id, options.len(), selected, custom, multi);
+            let _ = state.store.set_orchestrator_note(ticket.id, &note, seen).await;
+            let _ = app.emit("ticket-updated", ticket.id);
+        }
+        QDecision::Escalate { reason } => {
+            let _ = state
+                .store
+                .set_orchestrator_note(ticket.id, &format!("escalated question: {}", short(&reason, 80)), seen)
+                .await;
+        }
+    }
+}
+
+/// Conductor: decide whether to accept a proposed spec revision (or escalate).
+async fn orchestrator_judge_spec(app: &AppHandle, state: &AppState, ticket: &Ticket, seen: &str) {
+    let wt = match state.store.primary_worktree_for_ticket(ticket.id).await {
+        Ok(Some(w)) => w,
+        _ => return,
+    };
+    let current = harmony_core::spec::compose_spec(ticket);
+    let (path, proposed) = (wt.path.clone(), ticket.proposed_spec.clone());
+    let decision = tokio::task::spawn_blocking(move || {
+        harmony_core::orchestrator::judge_spec(&path, &current, &proposed)
+    })
+    .await;
+    let decision = match decision {
+        Ok(Ok(d)) => d,
+        _ => return,
+    };
+    use harmony_core::orchestrator::SpecDecision;
+    match decision {
+        SpecDecision::Accept => {
+            if apply_proposed_spec(&state.store, ticket.id).await.is_ok() {
+                let mgr = SessionManager::new(Arc::new(state.store.clone()), HOOK_PORT);
+                if let Ok(handle) = mgr.start_implement_spec(ticket.id).await {
+                    let _ = wire_session(app, state, handle, ticket.id);
+                }
+                let _ = state
+                    .store
+                    .set_orchestrator_note(ticket.id, "accepted proposed spec + resumed", seen)
+                    .await;
+                let _ = app.emit("ticket-updated", ticket.id);
+            }
+        }
+        SpecDecision::Escalate { reason } => {
+            let _ = state
+                .store
+                .set_orchestrator_note(ticket.id, &format!("escalated spec change: {}", short(&reason, 80)), seen)
+                .await;
+        }
+    }
+}
+
 /// Triage a ticket's PR CI and, when actionable (or `manual`), spawn an autonomous fix session.
 /// Persists the triage on the ticket for the UI. `manual` bypasses the idempotency fingerprint,
 /// the kill-switch, and the attempt cap (an explicit user request).
@@ -1090,6 +1362,61 @@ async fn set_auto_merge(state: State<'_, AppState>, enabled: bool) -> Result<(),
     state
         .store
         .set_setting("auto_merge", if enabled { "on" } else { "off" })
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Orchestrator toggle (default OFF). When on, the coordinator autonomously dispatches/reconciles
+/// sessions, answers derivable worker questions (escalating judgment), and auto-advances the loop.
+async fn orchestrator_enabled(state: &AppState) -> bool {
+    state
+        .store
+        .get_setting("orchestrator")
+        .await
+        .ok()
+        .flatten()
+        .map(|v| v == "on")
+        .unwrap_or(false)
+}
+
+/// Max concurrent live worker sessions the orchestrator will run at once (default 3).
+async fn max_concurrent(state: &AppState) -> usize {
+    state
+        .store
+        .get_setting("max_concurrent")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(3)
+}
+
+#[tauri::command]
+async fn get_orchestrator(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(orchestrator_enabled(&state).await)
+}
+
+#[tauri::command]
+async fn set_orchestrator(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+    state
+        .store
+        .set_setting("orchestrator", if enabled { "on" } else { "off" })
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_max_concurrent(state: State<'_, AppState>) -> Result<u32, String> {
+    Ok(max_concurrent(&state).await as u32)
+}
+
+#[tauri::command]
+async fn set_max_concurrent(state: State<'_, AppState>, n: u32) -> Result<(), String> {
+    let n = n.max(1);
+    state
+        .store
+        .set_setting("max_concurrent", &n.to_string())
         .await
         .map_err(|e| e.to_string())
 }
@@ -1481,6 +1808,20 @@ fn answer_question(
     custom_text: Option<String>,
     multi_select: bool,
 ) -> Result<(), String> {
+    deliver_answer(&state, session_id, option_count, selected, custom_text, multi_select)
+}
+
+/// Translate an AskUserQuestion answer into TUI keystrokes and write them to the session's PTY.
+/// Shared by the `answer_question` command (the human via `QuestionCard`) and the orchestrator
+/// conductor (answering derivable questions autonomously).
+fn deliver_answer(
+    state: &AppState,
+    session_id: i64,
+    option_count: usize,
+    selected: Vec<usize>,
+    custom_text: Option<String>,
+    multi_select: bool,
+) -> Result<(), String> {
     const DOWN: &str = "\x1b[B";
     const ENTER: &str = "\r";
     let mut keys = String::new();
@@ -1719,9 +2060,11 @@ async fn apply_event(
         .map_err(|e| e.to_string())?
         .ok_or("no such ticket")?;
     // A fresh autonomous work cycle just finished → reset the review loop's bookkeeping so the
-    // upcoming review episode (and its attempt cap) starts clean.
+    // upcoming review episode (and its attempt cap) starts clean, and clear the orchestrator's
+    // crash-restart counter (work progressed legitimately).
     if event == Event::WorkFinished {
         let _ = state.store.reset_review_loop(ticket_id).await;
+        let _ = state.store.reset_restart_attempts(ticket_id).await;
     }
     let ctx = build_ctx(state, &ticket).await;
     let decision = flow::decide(event, &ctx);
@@ -2022,6 +2365,8 @@ pub fn run() {
                         poll_auto_merge_once(&poll_handle, &state).await;
                         // Last: refresh each ticket's activity pill from the (now-current) facts.
                         poll_activity_once(&poll_handle, &state).await;
+                        // Last: the autonomous coordinator acts on the now-fresh board state.
+                        poll_orchestrator_once(&poll_handle, &state).await;
                     }
                 });
             });
@@ -2074,6 +2419,10 @@ pub fn run() {
             set_review_loop,
             get_auto_merge,
             set_auto_merge,
+            get_orchestrator,
+            set_orchestrator,
+            get_max_concurrent,
+            set_max_concurrent,
             get_pr_desc_autoupdate,
             set_pr_desc_autoupdate,
             update_pr_description_now,
