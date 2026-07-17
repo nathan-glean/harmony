@@ -56,9 +56,14 @@ pub fn pr_summary(worktree: &str, diff: &str, ticket_ref: Option<&str>) -> Resul
         .wait_with_output()
         .map_err(|e| crate::cmd_err::spawn_error("claude", &e))?;
     if !out.status.success() {
-        return Err(crate::cmd_err::classify("claude", &String::from_utf8_lossy(&out.stderr)));
+        return Err(crate::cmd_err::classify(
+            "claude",
+            &String::from_utf8_lossy(&out.stderr),
+        ));
     }
-    Ok(sanitize_pr_description(&String::from_utf8_lossy(&out.stdout)))
+    Ok(sanitize_pr_description(&String::from_utf8_lossy(
+        &out.stdout,
+    )))
 }
 
 /// Sentinel the model returns when the PR description is still accurate (no update needed).
@@ -115,7 +120,10 @@ pub fn maybe_update_pr_description(
         .wait_with_output()
         .map_err(|e| crate::cmd_err::spawn_error("claude", &e))?;
     if !out.status.success() {
-        return Err(crate::cmd_err::classify("claude", &String::from_utf8_lossy(&out.stderr)));
+        return Err(crate::cmd_err::classify(
+            "claude",
+            &String::from_utf8_lossy(&out.stderr),
+        ));
     }
     Ok(interpret_pr_update(&String::from_utf8_lossy(&out.stdout)))
 }
@@ -123,7 +131,11 @@ pub fn maybe_update_pr_description(
 /// Interpret the model's response to the description-staleness check: `None` when it declined to
 /// update (first non-empty line is the `NO_UPDATE` sentinel), else the sanitized revised body.
 fn interpret_pr_update(raw: &str) -> Option<String> {
-    let first = raw.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    let first = raw
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
     if first.eq_ignore_ascii_case(NO_UPDATE) {
         return None;
     }
@@ -141,7 +153,10 @@ fn interpret_pr_update(raw: &str) -> Option<String> {
 /// blocks is left untouched (see `unwrap_wrapping_fence`).
 fn sanitize_pr_description(raw: &str) -> String {
     let text = raw.trim();
-    unwrap_wrapping_fence(text).unwrap_or_else(|| text.to_string()).trim().to_string()
+    unwrap_wrapping_fence(text)
+        .unwrap_or_else(|| text.to_string())
+        .trim()
+        .to_string()
 }
 
 /// If `text` is a single fenced block wrapping the entire description (optionally preceded by a
@@ -153,7 +168,12 @@ fn unwrap_wrapping_fence(text: &str) -> Option<String> {
         t.starts_with("```") || t.starts_with("~~~")
     };
     let lines: Vec<&str> = text.lines().collect();
-    let fence_idxs: Vec<usize> = lines.iter().enumerate().filter(|(_, l)| is_fence(l)).map(|(i, _)| i).collect();
+    let fence_idxs: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| is_fence(l))
+        .map(|(i, _)| i)
+        .collect();
     if fence_idxs.len() < 2 {
         return None;
     }
@@ -167,7 +187,11 @@ fn unwrap_wrapping_fence(text: &str) -> Option<String> {
         return None;
     }
     // Opener language label, e.g. "```markdown" → "markdown".
-    let lang = lines[open].trim_start().trim_start_matches(['`', '~']).trim().to_lowercase();
+    let lang = lines[open]
+        .trim_start()
+        .trim_start_matches(['`', '~'])
+        .trim()
+        .to_lowercase();
     let first_nonblank = lines.iter().position(|l| !l.trim().is_empty());
 
     // (a) explicit whole-doc wrapper (```markdown / ```md), preamble allowed; or
@@ -204,7 +228,7 @@ mod tests {
     fn truncate_diff_caps_on_line_boundary() {
         let diff = "aaaa\nbbbb\ncccc\ndddd\n"; // 5 bytes/line, 20 total
         let out = truncate_diff(diff, 12); // 12 lands inside "cccc"
-        // Kept whole lines only (line boundary), dropped the partial "cccc" and beyond.
+                                           // Kept whole lines only (line boundary), dropped the partial "cccc" and beyond.
         assert!(out.starts_with("aaaa\nbbbb\n"));
         assert!(!out.contains("cccc"));
         assert!(out.contains("(diff truncated)"));
@@ -215,7 +239,10 @@ mod tests {
         let raw = "I'll fill out the Analytics template, which fits these changes.\n\n\
                    ```markdown\n## Description\n\nModels the quiz events.\n\n- item one\n```\n";
         let out = sanitize_pr_description(raw);
-        assert_eq!(out, "## Description\n\nModels the quiz events.\n\n- item one");
+        assert_eq!(
+            out,
+            "## Description\n\nModels the quiz events.\n\n- item one"
+        );
         assert!(!out.contains("I'll fill out"));
         assert!(!out.contains("```"));
     }
@@ -251,7 +278,11 @@ mod tests {
     fn sanitize_unwraps_case_insensitive_language() {
         for label in ["Markdown", "MARKDOWN", "Md"] {
             let raw = format!("```{label}\n## Title\n\nbody\n```");
-            assert_eq!(sanitize_pr_description(&raw), "## Title\n\nbody", "label={label}");
+            assert_eq!(
+                sanitize_pr_description(&raw),
+                "## Title\n\nbody",
+                "label={label}"
+            );
         }
     }
 
@@ -279,7 +310,10 @@ mod tests {
         let raw = "I'll write the description.\n\n\
                    ```markdown\n## Description\n\nRuns:\n\n```sql\nSELECT 1;\n```\n\nDone.\n```";
         let out = sanitize_pr_description(raw);
-        assert_eq!(out, "## Description\n\nRuns:\n\n```sql\nSELECT 1;\n```\n\nDone.");
+        assert_eq!(
+            out,
+            "## Description\n\nRuns:\n\n```sql\nSELECT 1;\n```\n\nDone."
+        );
         assert!(out.contains("```sql"));
         assert!(!out.contains("I'll write"));
     }
@@ -332,20 +366,29 @@ mod tests {
         assert_eq!(interpret_pr_update("NO_UPDATE"), None);
         assert_eq!(interpret_pr_update("  no_update  \n"), None);
         // Sentinel on the first line wins even if the model rambles after it.
-        assert_eq!(interpret_pr_update("NO_UPDATE\nthe description is still fine"), None);
+        assert_eq!(
+            interpret_pr_update("NO_UPDATE\nthe description is still fine"),
+            None
+        );
         assert_eq!(interpret_pr_update("   \n\nNO_UPDATE"), None);
     }
 
     #[test]
     fn interpret_pr_update_returns_revised_body() {
         let out = interpret_pr_update("## Description\n\nNow also adds CSV export.");
-        assert_eq!(out.as_deref(), Some("## Description\n\nNow also adds CSV export."));
+        assert_eq!(
+            out.as_deref(),
+            Some("## Description\n\nNow also adds CSV export.")
+        );
     }
 
     #[test]
     fn interpret_pr_update_unwraps_fenced_body() {
         let raw = "```markdown\n## Description\n\nRevised.\n```";
-        assert_eq!(interpret_pr_update(raw).as_deref(), Some("## Description\n\nRevised."));
+        assert_eq!(
+            interpret_pr_update(raw).as_deref(),
+            Some("## Description\n\nRevised.")
+        );
     }
 
     #[test]
@@ -355,7 +398,8 @@ mod tests {
 
     #[test]
     fn sanitize_strips_realistic_full_description() {
-        let raw = "I'll fill out the Analytics template, which fits these dbt modelling changes.\n\n\
+        let raw =
+            "I'll fill out the Analytics template, which fits these dbt modelling changes.\n\n\
                    ```markdown\n\
                    <!-- template:analytics -->\n\
                    [![Jira: DNA-1801](https://example/badge)](https://example/browse/DNA-1801)\n\n\
@@ -367,7 +411,10 @@ mod tests {
                    - [ ] Run new models locally\n\
                    ```";
         let out = sanitize_pr_description(raw);
-        assert!(out.starts_with("<!-- template:analytics -->"), "got: {out:?}");
+        assert!(
+            out.starts_with("<!-- template:analytics -->"),
+            "got: {out:?}"
+        );
         assert!(out.contains("## Description & motivation"));
         assert!(out.contains("- [ ] Run new models locally"));
         assert!(!out.contains("I'll fill out"));

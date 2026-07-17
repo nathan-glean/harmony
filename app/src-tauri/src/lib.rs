@@ -120,7 +120,11 @@ async fn get_permission_mode(state: State<'_, AppState>) -> Result<String, Strin
 
 #[tauri::command]
 async fn set_permission_mode(state: State<'_, AppState>, mode: String) -> Result<(), String> {
-    state.store.set_setting("permission_mode", &mode).await.map_err(|e| e.to_string())
+    state
+        .store
+        .set_setting("permission_mode", &mode)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -128,7 +132,11 @@ async fn rename_repo(state: State<'_, AppState>, id: i64, name: String) -> Resul
     if name.trim().is_empty() {
         return Err("name cannot be empty".into());
     }
-    state.store.rename_repo(id, name.trim()).await.map_err(|e| e.to_string())
+    state
+        .store
+        .rename_repo(id, name.trim())
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -161,10 +169,12 @@ async fn session_transcript(state: State<'_, AppState>, ticket_id: i64) -> Resul
         .await
         .map_err(|e| e.to_string())?
     {
-        Some(path) => tokio::task::spawn_blocking(move || harmony_core::session::render_transcript(&path))
-            .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string()),
+        Some(path) => {
+            tokio::task::spawn_blocking(move || harmony_core::session::render_transcript(&path))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())
+        }
         None => Ok(String::new()),
     }
 }
@@ -204,10 +214,11 @@ async fn live_progress(state: State<'_, AppState>) -> Result<Vec<SessionProgress
             .ok()
             .flatten();
         let Some(path) = path else { continue };
-        let prog = tokio::task::spawn_blocking(move || harmony_core::session::latest_progress(&path))
-            .await
-            .ok()
-            .flatten();
+        let prog =
+            tokio::task::spawn_blocking(move || harmony_core::session::latest_progress(&path))
+                .await
+                .ok()
+                .flatten();
         if let Some(p) = prog {
             out.push(SessionProgress {
                 ticket_id,
@@ -222,18 +233,30 @@ async fn live_progress(state: State<'_, AppState>) -> Result<Vec<SessionProgress
 
 #[tauri::command]
 async fn clear_ended_sessions(state: State<'_, AppState>) -> Result<u64, String> {
-    state.store.delete_ended_sessions().await.map_err(|e| e.to_string())
+    state
+        .store
+        .delete_ended_sessions()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn list_worktrees(state: State<'_, AppState>) -> Result<Vec<WorktreeView>, String> {
-    state.store.list_worktrees().await.map_err(|e| e.to_string())
+    state
+        .store
+        .list_worktrees()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Total uncommitted changes across all of a ticket's worktrees (so the UI can warn before a
 /// destructive move-to-Done / delete). 0 means clean.
 async fn ticket_uncommitted(state: &AppState, ticket_id: i64) -> usize {
-    let worktrees = state.store.worktrees_for_ticket(ticket_id).await.unwrap_or_default();
+    let worktrees = state
+        .store
+        .worktrees_for_ticket(ticket_id)
+        .await
+        .unwrap_or_default();
     worktrees
         .iter()
         .map(|wt| harmony_core::worktree::uncommitted_count(&wt.path).unwrap_or(0))
@@ -271,7 +294,9 @@ async fn cleanup_worktrees(state: &AppState, ticket_id: i64, force: bool) -> Res
     if !force {
         let n = ticket_uncommitted(state, ticket_id).await;
         if n > 0 {
-            return Err(format!("DIRTY: {n} uncommitted change(s) would be discarded"));
+            return Err(format!(
+                "DIRTY: {n} uncommitted change(s) would be discarded"
+            ));
         }
     }
     harmony_core::worktree::cleanup_for_ticket(&state.store, ticket_id).await;
@@ -281,7 +306,11 @@ async fn cleanup_worktrees(state: &AppState, ticket_id: i64, force: bool) -> Res
         .await
         .map_err(|e| e.to_string())?;
     for wt in worktrees {
-        state.store.delete_worktree(wt.id).await.map_err(|e| e.to_string())?;
+        state
+            .store
+            .delete_worktree(wt.id)
+            .await
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -295,24 +324,37 @@ async fn delete_worktree(state: State<'_, AppState>, id: i64, force: bool) -> Re
         if !force {
             let n = harmony_core::worktree::uncommitted_count(&wt.path).unwrap_or(0);
             if n > 0 {
-                return Err(format!("DIRTY: {n} uncommitted change(s) would be discarded"));
+                return Err(format!(
+                    "DIRTY: {n} uncommitted change(s) would be discarded"
+                ));
             }
         }
         if let Ok(Some(repo)) = state.store.get_repo(wt.repo_id).await {
             let _ = harmony_core::worktree::remove(&repo.path, std::path::Path::new(&wt.path));
         }
     }
-    state.store.delete_worktree(id).await.map_err(|e| e.to_string())
+    state
+        .store
+        .delete_worktree(id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn delete_session(state: State<'_, AppState>, id: i64) -> Result<(), String> {
-    state.store.delete_session(id).await.map_err(|e| e.to_string())
+    state
+        .store
+        .delete_session(id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Delete the ended sessions for a worktree (clears a consolidated group).
 #[tauri::command]
-async fn delete_worktree_sessions(state: State<'_, AppState>, worktree_id: i64) -> Result<u64, String> {
+async fn delete_worktree_sessions(
+    state: State<'_, AppState>,
+    worktree_id: i64,
+) -> Result<u64, String> {
     state
         .store
         .delete_ended_sessions_for_worktree(worktree_id)
@@ -348,7 +390,11 @@ async fn add_local_ticket(
 
 #[tauri::command]
 async fn set_spec(state: State<'_, AppState>, id: i64, spec: String) -> Result<(), String> {
-    state.store.set_ticket_spec(id, &spec).await.map_err(|e| e.to_string())
+    state
+        .store
+        .set_ticket_spec(id, &spec)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Save the spec body and all three first-class fields together (the detail editor's Save).
@@ -363,26 +409,49 @@ async fn set_spec_fields(
 ) -> Result<(), String> {
     state
         .store
-        .set_ticket_spec_fields(id, &spec, &acceptance_criteria, &relevant_paths, &constraints)
+        .set_ticket_spec_fields(
+            id,
+            &spec,
+            &acceptance_criteria,
+            &relevant_paths,
+            &constraints,
+        )
         .await
         .map_err(|e| e.to_string())
 }
 
 /// Move a ticket to a column (drag-and-drop / manual override).
 #[tauri::command]
-async fn set_ticket_status(state: State<'_, AppState>, id: i64, status: String) -> Result<(), String> {
+async fn set_ticket_status(
+    state: State<'_, AppState>,
+    id: i64,
+    status: String,
+) -> Result<(), String> {
     if !harmony_core::status::is_valid(&status) {
         return Err(format!("invalid status: {status}"));
     }
-    state.store.set_ticket_status(id, &status).await.map_err(|e| e.to_string())
+    state
+        .store
+        .set_ticket_status(id, &status)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Reflect a board-column move onto the linked Jira issue (best-effort; only if a matching
 /// status exists in the issue's workflow). No-op for non-Jira tickets and the
 /// "For Your Review" (waiting) state, which has no Jira equivalent.
 #[tauri::command]
-async fn jira_apply_column(state: State<'_, AppState>, ticket_id: i64, status: String) -> Result<(), String> {
-    let ticket = match state.store.get_ticket(ticket_id).await.map_err(|e| e.to_string())? {
+async fn jira_apply_column(
+    state: State<'_, AppState>,
+    ticket_id: i64,
+    status: String,
+) -> Result<(), String> {
+    let ticket = match state
+        .store
+        .get_ticket(ticket_id)
+        .await
+        .map_err(|e| e.to_string())?
+    {
         Some(t) => t,
         None => return Ok(()),
     };
@@ -404,15 +473,25 @@ async fn jira_apply_column(state: State<'_, AppState>, ticket_id: i64, status: S
 /// Delete a ticket: remove its git worktrees then its DB records. Unless `force`, refuses if
 /// any worktree has uncommitted changes (returns a `DIRTY:` error the UI confirms first).
 #[tauri::command]
-async fn delete_ticket(state: State<'_, AppState>, ticket_id: i64, force: bool) -> Result<(), String> {
+async fn delete_ticket(
+    state: State<'_, AppState>,
+    ticket_id: i64,
+    force: bool,
+) -> Result<(), String> {
     if !force {
         let n = ticket_uncommitted(&state, ticket_id).await;
         if n > 0 {
-            return Err(format!("DIRTY: {n} uncommitted change(s) would be discarded"));
+            return Err(format!(
+                "DIRTY: {n} uncommitted change(s) would be discarded"
+            ));
         }
     }
     harmony_core::worktree::cleanup_for_ticket(&state.store, ticket_id).await;
-    state.store.delete_ticket(ticket_id).await.map_err(|e| e.to_string())
+    state
+        .store
+        .delete_ticket(ticket_id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // ---- jira ----------------------------------------------------------------
@@ -432,7 +511,10 @@ async fn jira_env() -> JiraEnv {
     } else {
         None
     };
-    JiraEnv { acli_installed, site }
+    JiraEnv {
+        acli_installed,
+        site,
+    }
 }
 
 /// Install acli via Homebrew (best-effort). Returns the installed version.
@@ -446,12 +528,16 @@ async fn install_acli() -> Result<String, String> {
 
 #[tauri::command]
 async fn jira_logout() -> Result<(), String> {
-    harmony_core::jira::logout().await.map_err(|e| e.to_string())
+    harmony_core::jira::logout()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn jira_sync(state: State<'_, AppState>) -> Result<usize, String> {
-    let issues = harmony_core::jira::search_assigned().await.map_err(|e| e.to_string())?;
+    let issues = harmony_core::jira::search_assigned()
+        .await
+        .map_err(|e| e.to_string())?;
     for issue in &issues {
         state
             .store
@@ -478,7 +564,9 @@ async fn open_in_jira(state: State<'_, AppState>, ticket_id: i64) -> Result<(), 
         .map_err(|e| e.to_string())?
         .ok_or("no such ticket")?;
     let key = ticket.jira_key.ok_or("ticket is not linked to Jira")?;
-    harmony_core::jira::open_in_browser(&key).await.map_err(|e| e.to_string())
+    harmony_core::jira::open_in_browser(&key)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// The linked Jira issue's description + comments (read-only) for the detail panel.
@@ -491,9 +579,14 @@ async fn jira_detail(state: State<'_, AppState>, ticket_id: i64) -> Result<JiraD
         .map_err(|e| e.to_string())?
         .ok_or("no such ticket")?;
     let key = ticket.jira_key.ok_or("ticket is not linked to Jira")?;
-    let issue = harmony_core::jira::get_issue(&key).await.map_err(|e| e.to_string())?;
+    let issue = harmony_core::jira::get_issue(&key)
+        .await
+        .map_err(|e| e.to_string())?;
     let comments = harmony_core::jira::comments(&key).await.unwrap_or_default();
-    Ok(JiraDetail { description: issue.description, comments })
+    Ok(JiraDetail {
+        description: issue.description,
+        comments,
+    })
 }
 
 // ---- pull request --------------------------------------------------------
@@ -542,23 +635,33 @@ async fn open_pr_for(store: &Store, ticket_id: i64) -> Result<String, String> {
         }),
         None => None,
     };
-    let (title, path, branch, repo_path) =
-        (ticket.title.clone(), wt.path.clone(), wt.branch.clone(), repo.path.clone());
+    let (title, path, branch, repo_path) = (
+        ticket.title.clone(),
+        wt.path.clone(),
+        wt.branch.clone(),
+        repo.path.clone(),
+    );
     let commit_msg = commit_message(&ticket);
 
     let url = tokio::task::spawn_blocking(move || -> Result<String, String> {
         // Commit any leftover uncommitted work (e.g. edits made directly during human review) so
         // the branch isn't empty, then refuse clearly if there's still nothing to PR.
         harmony_core::github::commit_all(&path, &commit_msg).map_err(|e| e.to_string())?;
-        let base = harmony_core::worktree::default_branch(&repo_path).unwrap_or_else(|_| "main".into());
+        let base =
+            harmony_core::worktree::default_branch(&repo_path).unwrap_or_else(|_| "main".into());
         if harmony_core::github::commits_ahead(&path, &base) == 0 {
             return Err("no committed changes to open a PR for".into());
         }
         // Generated diff summary (conforms to the repo's PR template if present), else the spec.
-        let body =
-            harmony_core::github::generated_pr_body(&path, &repo_path, ticket_ref.as_deref(), &fallback);
+        let body = harmony_core::github::generated_pr_body(
+            &path,
+            &repo_path,
+            ticket_ref.as_deref(),
+            &fallback,
+        );
         harmony_core::github::push_branch(&path, &branch).map_err(|e| e.to_string())?;
-        harmony_core::github::create_draft_pr(&path, &title, &body, &branch).map_err(|e| e.to_string())
+        harmony_core::github::create_draft_pr(&path, &title, &body, &branch)
+            .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -574,7 +677,12 @@ async fn open_pr_for(store: &Store, ticket_id: i64) -> Result<String, String> {
 
 /// True if a live session is attached for this ticket (don't triage / spawn fixes mid-session).
 fn has_live_session(state: &AppState, ticket_id: i64) -> bool {
-    state.sessions.lock().unwrap().values().any(|io| io.ticket_id == ticket_id)
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .values()
+        .any(|io| io.ticket_id == ticket_id)
 }
 
 /// Auto-fix kill-switch (default on — the user opted into auto-fix). `"off"` → suggest-only.
@@ -703,8 +811,11 @@ async fn poll_review_loop_once(app: &AppHandle, state: &AppState) {
 
         // Judge the review (off-thread `claude -p`), persist the verdict + findings.
         let judgement = {
-            let (path, review_text, repo_path) =
-                (wt.path.clone(), ticket.review_text.clone(), repo_path.clone());
+            let (path, review_text, repo_path) = (
+                wt.path.clone(),
+                ticket.review_text.clone(),
+                repo_path.clone(),
+            );
             tokio::task::spawn_blocking(move || {
                 let base = harmony_core::worktree::default_branch(&repo_path)
                     .unwrap_or_else(|_| "main".into());
@@ -717,7 +828,8 @@ async fn poll_review_loop_once(app: &AppHandle, state: &AppState) {
             Ok(Ok(j)) => j,
             _ => continue, // judge failed → leave for the next tick / a human
         };
-        let findings_json = serde_json::to_string(&judgement.findings).unwrap_or_else(|_| "[]".into());
+        let findings_json =
+            serde_json::to_string(&judgement.findings).unwrap_or_else(|_| "[]".into());
         let _ = state
             .store
             .set_ticket_review_verdict(ticket.id, &head, judgement.verdict.as_str(), &findings_json)
@@ -742,7 +854,10 @@ async fn poll_review_loop_once(app: &AppHandle, state: &AppState) {
                 let _ = wire_session(app, state, handle, ticket.id);
                 let _ = state.store.bump_review_fix_attempts(ticket.id).await;
             }
-            Err(e) => eprintln!("[review-loop] start_review_fix for #{} failed: {e}", ticket.id),
+            Err(e) => eprintln!(
+                "[review-loop] start_review_fix for #{} failed: {e}",
+                ticket.id
+            ),
         }
     }
 }
@@ -776,7 +891,10 @@ async fn poll_auto_merge_once(app: &AppHandle, state: &AppState) {
                 .unwrap_or_default();
             // Only an OPEN, approved PR is mergeable — a MERGED/CLOSED state means we're done (and
             // guards against re-attempting a merge if a post-merge cleanup step had failed).
-            (status.exists && status.approved && status.state == "OPEN", failing.is_empty())
+            (
+                status.exists && status.approved && status.state == "OPEN",
+                failing.is_empty(),
+            )
         })
         .await
         .unwrap_or((false, false));
@@ -787,7 +905,10 @@ async fn poll_auto_merge_once(app: &AppHandle, state: &AppState) {
             Ok(()) => notify(
                 app,
                 "Auto-merged",
-                &format!("#{} ({}) was approved + green — merged to Done.", ticket.id, ticket.title),
+                &format!(
+                    "#{} ({}) was approved + green — merged to Done.",
+                    ticket.id, ticket.title
+                ),
             ),
             Err(e) => eprintln!("[auto-merge] #{} failed: {e}", ticket.id),
         }
@@ -808,7 +929,9 @@ fn live_ticket_count(state: &AppState) -> usize {
 /// The live session id for a ticket, if any.
 fn live_session_id_for_ticket(state: &AppState, ticket_id: i64) -> Option<i64> {
     let map = state.sessions.lock().unwrap();
-    map.iter().find(|(_, io)| io.ticket_id == ticket_id).map(|(sid, _)| *sid)
+    map.iter()
+        .find(|(_, io)| io.ticket_id == ticket_id)
+        .map(|(sid, _)| *sid)
 }
 
 /// A stable fingerprint of a "stuck state" (so the conductor decides it once, not every tick).
@@ -823,7 +946,11 @@ fn state_fingerprint(kind: &str, content: &str) -> String {
 fn activity_label(json: &str) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(json)
         .ok()
-        .and_then(|v| v.get("label").and_then(|l| l.as_str()).map(|s| s.to_string()))
+        .and_then(|v| {
+            v.get("label")
+                .and_then(|l| l.as_str())
+                .map(|s| s.to_string())
+        })
 }
 
 /// Truncate for a human-facing note.
@@ -841,7 +968,10 @@ fn parse_pending_question(json: &str) -> Option<(String, Vec<String>, bool)> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
     let q = v.get("questions")?.as_array()?.first()?;
     let question = q.get("question")?.as_str()?.to_string();
-    let multi = q.get("multiSelect").and_then(|x| x.as_bool()).unwrap_or(false);
+    let multi = q
+        .get("multiSelect")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
     let options = q
         .get("options")
         .and_then(|o| o.as_array())
@@ -850,7 +980,11 @@ fn parse_pending_question(json: &str) -> Option<(String, Vec<String>, bool)> {
                 .map(|o| {
                     let label = o.get("label").and_then(|x| x.as_str()).unwrap_or("");
                     let desc = o.get("description").and_then(|x| x.as_str()).unwrap_or("");
-                    if desc.is_empty() { label.to_string() } else { format!("{label} — {desc}") }
+                    if desc.is_empty() {
+                        label.to_string()
+                    } else {
+                        format!("{label} — {desc}")
+                    }
                 })
                 .collect()
         })
@@ -885,7 +1019,13 @@ async fn poll_orchestrator_once(app: &AppHandle, state: &AppState) {
             continue;
         }
         let crashed = matches!(
-            state.store.latest_session_state_for_ticket(t.id).await.ok().flatten().as_deref(),
+            state
+                .store
+                .latest_session_state_for_ticket(t.id)
+                .await
+                .ok()
+                .flatten()
+                .as_deref(),
             Some("error")
         );
         if !crashed {
@@ -898,7 +1038,11 @@ async fn poll_orchestrator_once(app: &AppHandle, state: &AppState) {
                     .store
                     .set_orchestrator_note(t.id, "escalated: session crashed repeatedly", &seen)
                     .await;
-                notify(app, &format!("{} — needs you", t.title), "A session crashed repeatedly.");
+                notify(
+                    app,
+                    &format!("{} — needs you", t.title),
+                    "A session crashed repeatedly.",
+                );
             }
             continue;
         }
@@ -907,7 +1051,10 @@ async fn poll_orchestrator_once(app: &AppHandle, state: &AppState) {
             Ok(handle) => {
                 if wire_session(app, state, handle, t.id).is_ok() {
                     let _ = state.store.bump_restart_attempts(t.id).await;
-                    let _ = state.store.set_orchestrator_note(t.id, "restarted crashed session", "").await;
+                    let _ = state
+                        .store
+                        .set_orchestrator_note(t.id, "restarted crashed session", "")
+                        .await;
                     slots -= 1;
                 }
             }
@@ -935,7 +1082,10 @@ async fn poll_orchestrator_once(app: &AppHandle, state: &AppState) {
         }
         match apply_event(app, state, t.id, Event::Move(Column::InProgress), false).await {
             Ok(()) => {
-                let _ = state.store.set_orchestrator_note(t.id, "dispatched: started work", "").await;
+                let _ = state
+                    .store
+                    .set_orchestrator_note(t.id, "dispatched: started work", "")
+                    .await;
                 slots -= 1;
             }
             Err(e) => eprintln!("[orchestrator] dispatch #{} failed: {e}", t.id),
@@ -968,7 +1118,10 @@ async fn poll_orchestrator_once(app: &AppHandle, state: &AppState) {
         {
             match apply_event(app, state, t.id, Event::Move(Column::Pr), false).await {
                 Ok(()) => {
-                    let _ = state.store.set_orchestrator_note(t.id, "opened PR (review clean)", "").await;
+                    let _ = state
+                        .store
+                        .set_orchestrator_note(t.id, "opened PR (review clean)", "")
+                        .await;
                 }
                 Err(e) => eprintln!("[orchestrator] open-PR #{} failed: {e}", t.id),
             }
@@ -1008,17 +1161,28 @@ async fn orchestrator_answer_question(
                 Some(txt) => format!("answered question — \"{}\"", short(txt, 60)),
                 None => format!(
                     "answered question — option {}",
-                    selected.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",")
+                    selected
+                        .iter()
+                        .map(|i| i.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
                 ),
             };
             let _ = deliver_answer(state, session_id, options.len(), selected, custom, multi);
-            let _ = state.store.set_orchestrator_note(ticket.id, &note, seen).await;
+            let _ = state
+                .store
+                .set_orchestrator_note(ticket.id, &note, seen)
+                .await;
             let _ = app.emit("ticket-updated", ticket.id);
         }
         QDecision::Escalate { reason } => {
             let _ = state
                 .store
-                .set_orchestrator_note(ticket.id, &format!("escalated question: {}", short(&reason, 80)), seen)
+                .set_orchestrator_note(
+                    ticket.id,
+                    &format!("escalated question: {}", short(&reason, 80)),
+                    seen,
+                )
                 .await;
         }
     }
@@ -1058,7 +1222,11 @@ async fn orchestrator_judge_spec(app: &AppHandle, state: &AppState, ticket: &Tic
         SpecDecision::Escalate { reason } => {
             let _ = state
                 .store
-                .set_orchestrator_note(ticket.id, &format!("escalated spec change: {}", short(&reason, 80)), seen)
+                .set_orchestrator_note(
+                    ticket.id,
+                    &format!("escalated spec change: {}", short(&reason, 80)),
+                    seen,
+                )
                 .await;
         }
     }
@@ -1085,7 +1253,12 @@ async fn triage_and_maybe_fix(
         .await
         .map_err(|e| e.to_string())?
         .ok_or("no worktree")?;
-    let repo = state.store.get_repo(wt.repo_id).await.map_err(|e| e.to_string())?.ok_or("repo missing")?;
+    let repo = state
+        .store
+        .get_repo(wt.repo_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("repo missing")?;
     let (path, repo_path) = (wt.path.clone(), repo.path.clone());
 
     // Cheap pre-check (no LLM): current HEAD + whether any checks are failing.
@@ -1122,7 +1295,8 @@ async fn triage_and_maybe_fix(
     let triage = {
         let (path, repo_path) = (path.clone(), repo_path.clone());
         tokio::task::spawn_blocking(move || {
-            let base = harmony_core::worktree::default_branch(&repo_path).unwrap_or_else(|_| "main".into());
+            let base = harmony_core::worktree::default_branch(&repo_path)
+                .unwrap_or_else(|_| "main".into());
             let diff = harmony_core::github::diff(&path, &base).unwrap_or_default();
             harmony_core::ci::triage(&path, &base, &diff)
         })
@@ -1132,14 +1306,19 @@ async fn triage_and_maybe_fix(
     };
 
     if let Ok(json) = serde_json::to_string(&triage) {
-        let _ = state.store.set_ticket_ci_triage(ticket_id, &head, &json).await;
+        let _ = state
+            .store
+            .set_ticket_ci_triage(ticket_id, &head, &json)
+            .await;
     }
     let _ = app.emit("ticket-updated", ticket_id);
 
     let should_fix = if manual {
         true
     } else {
-        triage.actionable && ci_autofix_enabled(state).await && ticket.ci_fix_attempts < MAX_CI_FIX_ATTEMPTS
+        triage.actionable
+            && ci_autofix_enabled(state).await
+            && ticket.ci_fix_attempts < MAX_CI_FIX_ATTEMPTS
     };
     if !should_fix {
         return Ok(triage.reason.clone());
@@ -1147,7 +1326,10 @@ async fn triage_and_maybe_fix(
 
     let context = ci_fix_context(&triage);
     let mgr = SessionManager::new(Arc::new(state.store.clone()), HOOK_PORT);
-    let handle = mgr.start_ci_fix(ticket_id, &context).await.map_err(|e| e.to_string())?;
+    let handle = mgr
+        .start_ci_fix(ticket_id, &context)
+        .await
+        .map_err(|e| e.to_string())?;
     wire_session(app, state, handle, ticket_id)?;
     let _ = state.store.bump_ci_fix_attempts(ticket_id).await;
     Ok(format!("fixing: {}", triage.reason))
@@ -1157,7 +1339,10 @@ async fn triage_and_maybe_fix(
 fn ci_fix_context(triage: &harmony_core::ci::CiTriage) -> String {
     let mut s = format!("Failing checks: {}\n", triage.failing_checks.join(", "));
     if let Some(v) = &triage.verdict {
-        s.push_str(&format!("\nWhy it's attributed to this PR: {}\n", v.rationale));
+        s.push_str(&format!(
+            "\nWhy it's attributed to this PR: {}\n",
+            v.rationale
+        ));
         if !v.proposed_fix.trim().is_empty() {
             s.push_str(&format!("\nSuggested fix: {}\n", v.proposed_fix));
         }
@@ -1190,7 +1375,13 @@ async fn update_pr_description(app: &AppHandle, state: &AppState, ticket_id: i64
         Some(t) => t,
         None => return,
     };
-    let wt = match state.store.primary_worktree_for_ticket(ticket_id).await.ok().flatten() {
+    let wt = match state
+        .store
+        .primary_worktree_for_ticket(ticket_id)
+        .await
+        .ok()
+        .flatten()
+    {
         Some(w) => w,
         None => return,
     };
@@ -1209,9 +1400,15 @@ async fn update_pr_description(app: &AppHandle, state: &AppState, ticket_id: i64
     let (path, repo_path) = (wt.path.clone(), repo.path.clone());
     let updated = tokio::task::spawn_blocking(move || {
         let body = harmony_core::github::pr_body(&path)?;
-        let base = harmony_core::worktree::default_branch(&repo_path).unwrap_or_else(|_| "main".into());
+        let base =
+            harmony_core::worktree::default_branch(&repo_path).unwrap_or_else(|_| "main".into());
         let diff = harmony_core::github::diff(&path, &base).unwrap_or_default();
-        match harmony_core::draft::maybe_update_pr_description(&path, &body, &diff, ticket_ref.as_deref()) {
+        match harmony_core::draft::maybe_update_pr_description(
+            &path,
+            &body,
+            &diff,
+            ticket_ref.as_deref(),
+        ) {
             Ok(Some(new_body)) => {
                 let _ = harmony_core::github::update_pr_body(&path, &new_body);
                 Some(true)
@@ -1235,7 +1432,11 @@ async fn maybe_update_pr_desc(app: &AppHandle, state: &AppState, ticket_id: i64)
 
 /// Manual "Fix CI" button: triage now and fix regardless of the auto gates.
 #[tauri::command]
-async fn request_ci_fix(app: AppHandle, state: State<'_, AppState>, ticket_id: i64) -> Result<String, String> {
+async fn request_ci_fix(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ticket_id: i64,
+) -> Result<String, String> {
     triage_and_maybe_fix(&app, &state, ticket_id, true).await
 }
 
@@ -1260,7 +1461,11 @@ async fn set_pr_desc_autoupdate(state: State<'_, AppState>, enabled: bool) -> Re
 
 /// Manual "Regenerate PR description" — runs the staleness check + update now, ignoring the toggle.
 #[tauri::command]
-async fn update_pr_description_now(app: AppHandle, state: State<'_, AppState>, ticket_id: i64) -> Result<(), String> {
+async fn update_pr_description_now(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ticket_id: i64,
+) -> Result<(), String> {
     update_pr_description(&app, &state, ticket_id, true).await;
     Ok(())
 }
@@ -1446,7 +1651,8 @@ async fn ticket_diff(state: State<'_, AppState>, ticket_id: i64) -> Result<Strin
         .ok_or("repo missing")?;
     let (path, repo_path) = (wt.path, repo.path);
     tokio::task::spawn_blocking(move || {
-        let base = harmony_core::worktree::default_branch(&repo_path).unwrap_or_else(|_| "main".into());
+        let base =
+            harmony_core::worktree::default_branch(&repo_path).unwrap_or_else(|_| "main".into());
         harmony_core::github::diff(&path, &base)
     })
     .await
@@ -1530,7 +1736,9 @@ async fn add_diff_comment(
 ) -> Result<i64, String> {
     state
         .store
-        .add_diff_comment(ticket_id, &target, &anchor, &file_path, line, end_line, &side, &body)
+        .add_diff_comment(
+            ticket_id, &target, &anchor, &file_path, line, end_line, &side, &body,
+        )
         .await
         .map_err(|e| e.to_string())
 }
@@ -1538,9 +1746,16 @@ async fn add_diff_comment(
 /// Send all open review comments (any surface) to Claude: spawn an autonomous "address" session
 /// that folds them into its prompt, addresses them, and (on finish) commits + pushes.
 #[tauri::command]
-async fn address_feedback(app: AppHandle, state: State<'_, AppState>, ticket_id: i64) -> Result<i64, String> {
+async fn address_feedback(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ticket_id: i64,
+) -> Result<i64, String> {
     let mgr = SessionManager::new(Arc::new(state.store.clone()), HOOK_PORT);
-    let handle = mgr.start_address(ticket_id).await.map_err(|e| e.to_string())?;
+    let handle = mgr
+        .start_address(ticket_id)
+        .await
+        .map_err(|e| e.to_string())?;
     wire_session(&app, &state, handle, ticket_id)
 }
 
@@ -1557,10 +1772,19 @@ async fn apply_proposed_spec(store: &Store, ticket_id: i64) -> Result<(), String
     }
     let f = harmony_core::spec::parse_spec(&ticket.proposed_spec);
     store
-        .set_ticket_spec_fields(ticket_id, &f.spec, &f.acceptance_criteria, &f.relevant_paths, &f.constraints)
+        .set_ticket_spec_fields(
+            ticket_id,
+            &f.spec,
+            &f.acceptance_criteria,
+            &f.relevant_paths,
+            &f.constraints,
+        )
         .await
         .map_err(|e| e.to_string())?;
-    store.set_ticket_proposed_spec(ticket_id, "").await.map_err(|e| e.to_string())
+    store
+        .set_ticket_proposed_spec(ticket_id, "")
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Accept Claude's proposed spec update: parse it into the first-class fields, write it as the
@@ -1580,7 +1804,10 @@ async fn accept_proposed_spec_and_implement(
 ) -> Result<i64, String> {
     apply_proposed_spec(&state.store, ticket_id).await?;
     let mgr = SessionManager::new(Arc::new(state.store.clone()), HOOK_PORT);
-    let handle = mgr.start_implement_spec(ticket_id).await.map_err(|e| e.to_string())?;
+    let handle = mgr
+        .start_implement_spec(ticket_id)
+        .await
+        .map_err(|e| e.to_string())?;
     wire_session(&app, &state, handle, ticket_id)
 }
 
@@ -1599,7 +1826,11 @@ async fn proposed_spec_diff(state: State<'_, AppState>, ticket_id: i64) -> Resul
 /// Reject Claude's proposed spec update (discard it; the live spec is unchanged).
 #[tauri::command]
 async fn reject_proposed_spec(state: State<'_, AppState>, ticket_id: i64) -> Result<(), String> {
-    state.store.set_ticket_proposed_spec(ticket_id, "").await.map_err(|e| e.to_string())
+    state
+        .store
+        .set_ticket_proposed_spec(ticket_id, "")
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1658,7 +1889,11 @@ async fn ensure_ticket_repo(
     } else {
         return Err("ticket has no repo; choose one".into());
     };
-    state.store.set_ticket_repo(ticket_id, repo_id).await.map_err(|e| e.to_string())?;
+    state
+        .store
+        .set_ticket_repo(ticket_id, repo_id)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -1700,7 +1935,10 @@ async fn start_spec_session(
         None => None,
     };
     let mgr = SessionManager::new(Arc::new(state.store.clone()), HOOK_PORT);
-    let handle = mgr.start_spec_session(ticket_id, seed).await.map_err(|e| e.to_string())?;
+    let handle = mgr
+        .start_spec_session(ticket_id, seed)
+        .await
+        .map_err(|e| e.to_string())?;
     wire_session(&app, &state, handle, ticket_id)
 }
 
@@ -1738,11 +1976,15 @@ fn wire_session(
         });
     }
 
-    state
-        .sessions
-        .lock()
-        .unwrap()
-        .insert(session_id, SessionIo { master, writer, killer, ticket_id });
+    state.sessions.lock().unwrap().insert(
+        session_id,
+        SessionIo {
+            master,
+            writer,
+            killer,
+            ticket_id,
+        },
+    );
 
     // Wait for exit -> mark ended (or failed), clear draft flag, drop handles, notify UI
     {
@@ -1775,7 +2017,12 @@ fn wire_session(
             sessions.lock().unwrap().remove(&session_id);
             let _ = app.emit(
                 "session-exit",
-                SessionExit { session_id, ticket_id, ok: ok || user_stopped, code },
+                SessionExit {
+                    session_id,
+                    ticket_id,
+                    ok: ok || user_stopped,
+                    code,
+                },
             );
         });
     }
@@ -1787,7 +2034,9 @@ fn wire_session(
 fn send_input(state: State<'_, AppState>, session_id: i64, data: String) -> Result<(), String> {
     let mut map = state.sessions.lock().unwrap();
     if let Some(io) = map.get_mut(&session_id) {
-        io.writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
+        io.writer
+            .write_all(data.as_bytes())
+            .map_err(|e| e.to_string())?;
         io.writer.flush().map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -1808,7 +2057,14 @@ fn answer_question(
     custom_text: Option<String>,
     multi_select: bool,
 ) -> Result<(), String> {
-    deliver_answer(&state, session_id, option_count, selected, custom_text, multi_select)
+    deliver_answer(
+        &state,
+        session_id,
+        option_count,
+        selected,
+        custom_text,
+        multi_select,
+    )
 }
 
 /// Translate an AskUserQuestion answer into TUI keystrokes and write them to the session's PTY.
@@ -1858,7 +2114,9 @@ fn deliver_answer(
     }
     let mut map = state.sessions.lock().unwrap();
     if let Some(io) = map.get_mut(&session_id) {
-        io.writer.write_all(keys.as_bytes()).map_err(|e| e.to_string())?;
+        io.writer
+            .write_all(keys.as_bytes())
+            .map_err(|e| e.to_string())?;
         io.writer.flush().map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -1882,7 +2140,12 @@ fn resize(state: State<'_, AppState>, session_id: i64, cols: u16, rows: u16) -> 
     let map = state.sessions.lock().unwrap();
     if let Some(io) = map.get(&session_id) {
         io.master
-            .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
             .map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -1902,13 +2165,24 @@ async fn build_ctx(state: &AppState, ticket: &Ticket) -> Ctx {
         let map = state.sessions.lock().unwrap();
         map.values().any(|io| io.ticket_id == ticket.id)
     };
-    let wt = state.store.primary_worktree_for_ticket(ticket.id).await.ok().flatten();
+    let wt = state
+        .store
+        .primary_worktree_for_ticket(ticket.id)
+        .await
+        .ok()
+        .flatten();
     let has_worktree = wt.is_some();
 
     // git/gh facts (blocking + network) — only meaningful once a worktree exists.
     let (has_changes, review_current, pr) = if let Some(wt) = wt.as_ref() {
         let path = wt.path.clone();
-        let repo_path = state.store.get_repo(wt.repo_id).await.ok().flatten().map(|r| r.path);
+        let repo_path = state
+            .store
+            .get_repo(wt.repo_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|r| r.path);
         let reviewed = ticket.reviewed == 1;
         let reviewed_sha = ticket.reviewed_sha.clone();
         tokio::task::spawn_blocking(move || {
@@ -1966,7 +2240,11 @@ fn ci_triage_failing(json: &str) -> bool {
     }
     serde_json::from_str::<serde_json::Value>(json)
         .ok()
-        .and_then(|v| v.get("failing_checks").and_then(|f| f.as_array()).map(|a| !a.is_empty()))
+        .and_then(|v| {
+            v.get("failing_checks")
+                .and_then(|f| f.as_array())
+                .map(|a| !a.is_empty())
+        })
         .unwrap_or(false)
 }
 
@@ -1974,7 +2252,11 @@ fn ci_triage_failing(json: &str) -> bool {
 fn prev_activity_category(json: &str) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(json)
         .ok()
-        .and_then(|v| v.get("category").and_then(|c| c.as_str()).map(|s| s.to_string()))
+        .and_then(|v| {
+            v.get("category")
+                .and_then(|c| c.as_str())
+                .map(|s| s.to_string())
+        })
 }
 
 /// Recompute the ticket's derived activity status, persist it, emit `ticket-updated`, and — when the
@@ -1987,7 +2269,12 @@ async fn store_activity(app: &AppHandle, state: &AppState, ticket_id: i64) {
         _ => return,
     };
     let ctx = build_ctx(state, &ticket).await;
-    let session_kind = state.store.active_session_kind_for_ticket(ticket_id).await.ok().flatten();
+    let session_kind = state
+        .store
+        .active_session_kind_for_ticket(ticket_id)
+        .await
+        .ok()
+        .flatten();
     let input = harmony_core::activity::ActivityInput {
         from: ctx.from,
         has_repo: ctx.has_repo,
@@ -2025,7 +2312,11 @@ async fn store_activity(app: &AppHandle, state: &AppState, ticket_id: i64) {
             .detail
             .clone()
             .unwrap_or_else(|| "Needs your attention.".to_string());
-        notify(app, &format!("{} — {}", ticket.title, activity.label), &body);
+        notify(
+            app,
+            &format!("{} — {}", ticket.title, activity.label),
+            &body,
+        );
     }
 }
 
@@ -2082,7 +2373,11 @@ async fn apply_event(
         run_action(app, state, &ticket, *action, force).await?;
     }
     let target = decision.target.as_status();
-    state.store.set_ticket_status(ticket_id, target).await.map_err(|e| e.to_string())?;
+    state
+        .store
+        .set_ticket_status(ticket_id, target)
+        .await
+        .map_err(|e| e.to_string())?;
     apply_jira_column(state, ticket_id, target).await;
     let _ = app.emit("ticket-updated", ticket_id);
 
@@ -2095,7 +2390,14 @@ async fn apply_event(
         tauri::async_runtime::spawn(async move {
             match open_pr_for(&store, ticket_id).await {
                 Ok(_url) => {
-                    let _ = app.emit("pr-done", PrDone { ticket_id, ok: true, error: None });
+                    let _ = app.emit(
+                        "pr-done",
+                        PrDone {
+                            ticket_id,
+                            ok: true,
+                            error: None,
+                        },
+                    );
                 }
                 Err(e) => {
                     // Only revert if the user hasn't since moved the ticket elsewhere.
@@ -2106,7 +2408,14 @@ async fn apply_event(
                                 .await;
                         }
                     }
-                    let _ = app.emit("pr-done", PrDone { ticket_id, ok: false, error: Some(e) });
+                    let _ = app.emit(
+                        "pr-done",
+                        PrDone {
+                            ticket_id,
+                            ok: false,
+                            error: Some(e),
+                        },
+                    );
                     let _ = app.emit("ticket-updated", ticket_id);
                 }
             }
@@ -2131,7 +2440,10 @@ async fn run_action(
     match action {
         Action::StartGrill => {
             let seed = jira_seed(ticket).await;
-            let handle = mgr().start_spec_session(id, seed).await.map_err(|e| e.to_string())?;
+            let handle = mgr()
+                .start_spec_session(id, seed)
+                .await
+                .map_err(|e| e.to_string())?;
             wire_session(app, state, handle, id)?;
         }
         // The paired `StartImplement` (via `SessionManager::start`) ensures the worktree; nothing
@@ -2149,19 +2461,27 @@ async fn run_action(
         }
         // Commit the agent's working changes (harmony owns version control). A no-op when clean.
         Action::CommitChanges => {
-            if let Some(wt) =
-                state.store.primary_worktree_for_ticket(id).await.map_err(|e| e.to_string())?
+            if let Some(wt) = state
+                .store
+                .primary_worktree_for_ticket(id)
+                .await
+                .map_err(|e| e.to_string())?
             {
                 let (path, msg) = (wt.path.clone(), commit_message(ticket));
-                let _ = tokio::task::spawn_blocking(move || harmony_core::github::commit_all(&path, &msg))
-                    .await;
+                let _ = tokio::task::spawn_blocking(move || {
+                    harmony_core::github::commit_all(&path, &msg)
+                })
+                .await;
             }
         }
         // Push the branch (re-triggers CI / updates the PR). When a PR exists, refresh its
         // description if the change made it stale (respects the `pr_desc_autoupdate` kill-switch).
         Action::PushBranch => {
-            if let Some(wt) =
-                state.store.primary_worktree_for_ticket(id).await.map_err(|e| e.to_string())?
+            if let Some(wt) = state
+                .store
+                .primary_worktree_for_ticket(id)
+                .await
+                .map_err(|e| e.to_string())?
             {
                 let (path, branch) = (wt.path.clone(), wt.branch.clone());
                 let pushed = tokio::task::spawn_blocking(move || {
@@ -2179,8 +2499,11 @@ async fn run_action(
         // moves again (`flow::Ctx.review_current`). The review prose itself is captured live by the
         // hook server (the `/review` skill's plan-file write — see `core/src/hooks.rs`).
         Action::MarkReviewed => {
-            if let Some(wt) =
-                state.store.primary_worktree_for_ticket(id).await.map_err(|e| e.to_string())?
+            if let Some(wt) = state
+                .store
+                .primary_worktree_for_ticket(id)
+                .await
+                .map_err(|e| e.to_string())?
             {
                 let path = wt.path.clone();
                 if let Ok(Ok(sha)) =
@@ -2252,7 +2575,14 @@ async fn jira_seed(ticket: &Ticket) -> Option<String> {
 /// Mirror a column onto the linked Jira issue (best-effort), reused by `apply_event` and the
 /// `jira_apply_column` command.
 async fn apply_jira_column(state: &AppState, ticket_id: i64, status: &str) {
-    let key = match state.store.get_ticket(ticket_id).await.ok().flatten().and_then(|t| t.jira_key) {
+    let key = match state
+        .store
+        .get_ticket(ticket_id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|t| t.jira_key)
+    {
         Some(k) => k,
         None => return,
     };
@@ -2285,7 +2615,11 @@ async fn transition_ticket(
 
 /// The Todo "build spec / grill me" button.
 #[tauri::command]
-async fn grill_ticket(app: AppHandle, state: State<'_, AppState>, ticket_id: i64) -> Result<(), String> {
+async fn grill_ticket(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ticket_id: i64,
+) -> Result<(), String> {
     let _ = ensure_ticket_repo(&state, ticket_id, None).await;
     apply_event(&app, &state, ticket_id, Event::GrillRequested, false).await
 }
@@ -2293,7 +2627,11 @@ async fn grill_ticket(app: AppHandle, state: State<'_, AppState>, ticket_id: i64
 /// The Review tab's "Request review" button: re-run `/review` on demand, even if HEAD hasn't
 /// changed since the last review.
 #[tauri::command]
-async fn request_review(app: AppHandle, state: State<'_, AppState>, ticket_id: i64) -> Result<(), String> {
+async fn request_review(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ticket_id: i64,
+) -> Result<(), String> {
     apply_event(&app, &state, ticket_id, Event::ReviewRequested, false).await
 }
 
@@ -2319,7 +2657,8 @@ pub fn run() {
                 let (tx, mut rx) =
                     tokio::sync::mpsc::unbounded_channel::<harmony_core::hooks::SystemEvent>();
                 let _ =
-                    harmony_core::hooks::spawn_server(Arc::new(store.clone()), HOOK_PORT, Some(tx)).await;
+                    harmony_core::hooks::spawn_server(Arc::new(store.clone()), HOOK_PORT, Some(tx))
+                        .await;
                 handle.manage(AppState {
                     store,
                     sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -2335,15 +2674,29 @@ pub fn run() {
                     // all gating (pending question, `auto_end_idle`). No event-specific side paths.
                     while let Some(ev) = rx.recv().await {
                         let (ticket_id, event) = match ev {
-                            SystemEvent::GrillFinished { ticket_id } => (ticket_id, Event::GrillFinished),
-                            SystemEvent::WorkFinished { ticket_id } => (ticket_id, Event::WorkFinished),
-                            SystemEvent::ReviewFinished { ticket_id } => (ticket_id, Event::ReviewFinished),
-                            SystemEvent::FixFinished { ticket_id } => (ticket_id, Event::FixFinished),
-                            SystemEvent::AddressFinished { ticket_id } => (ticket_id, Event::AddressFinished),
-                            SystemEvent::SessionIdle { ticket_id } => (ticket_id, Event::SessionIdle),
+                            SystemEvent::GrillFinished { ticket_id } => {
+                                (ticket_id, Event::GrillFinished)
+                            }
+                            SystemEvent::WorkFinished { ticket_id } => {
+                                (ticket_id, Event::WorkFinished)
+                            }
+                            SystemEvent::ReviewFinished { ticket_id } => {
+                                (ticket_id, Event::ReviewFinished)
+                            }
+                            SystemEvent::FixFinished { ticket_id } => {
+                                (ticket_id, Event::FixFinished)
+                            }
+                            SystemEvent::AddressFinished { ticket_id } => {
+                                (ticket_id, Event::AddressFinished)
+                            }
+                            SystemEvent::SessionIdle { ticket_id } => {
+                                (ticket_id, Event::SessionIdle)
+                            }
                         };
                         let state = ev_handle.state::<AppState>();
-                        if let Err(e) = apply_event(&ev_handle, &state, ticket_id, event, false).await {
+                        if let Err(e) =
+                            apply_event(&ev_handle, &state, ticket_id, event, false).await
+                        {
                             eprintln!("[flow] {event:?} for #{ticket_id} failed: {e}");
                         }
                     }
@@ -2352,7 +2705,8 @@ pub fn run() {
                 // Background poller: watch PR-stage tickets' CI and auto-fix PR-caused failures.
                 let poll_handle = handle.clone();
                 tauri::async_runtime::spawn(async move {
-                    let mut tick = tokio::time::interval(std::time::Duration::from_secs(CI_POLL_SECS));
+                    let mut tick =
+                        tokio::time::interval(std::time::Duration::from_secs(CI_POLL_SECS));
                     loop {
                         tick.tick().await;
                         let state = poll_handle.state::<AppState>();

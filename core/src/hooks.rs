@@ -52,11 +52,17 @@ struct HookCtx {
 fn log_event(line: &str) {
     use std::io::Write;
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    let path = std::path::Path::new(&home).join(".harmony").join("harmony.log");
+    let path = std::path::Path::new(&home)
+        .join(".harmony")
+        .join("harmony.log");
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let _ = writeln!(f, "{line}");
     }
 }
@@ -75,9 +81,14 @@ fn extract_plan(v: &Value, tool: Option<&str>) -> Option<String> {
             .or_else(|| v.get("tool_input").map(|ti| ti.to_string())),
         Some("Write") => {
             let ti = v.get("tool_input");
-            let path = ti.and_then(|t| t.get("file_path")).and_then(|x| x.as_str()).unwrap_or("");
+            let path = ti
+                .and_then(|t| t.get("file_path"))
+                .and_then(|x| x.as_str())
+                .unwrap_or("");
             if path.contains("/.claude/plans/") {
-                ti.and_then(|t| t.get("content")).and_then(|x| x.as_str()).map(|s| s.to_string())
+                ti.and_then(|t| t.get("content"))
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string())
             } else {
                 None
             }
@@ -119,11 +130,7 @@ pub async fn serve_forever(
     Ok(())
 }
 
-async fn handle(
-    Path(event): Path<String>,
-    State(ctx): State<HookCtx>,
-    body: Bytes,
-) -> Json<Value> {
+async fn handle(Path(event): Path<String>, State(ctx): State<HookCtx>, body: Bytes) -> Json<Value> {
     let store = &ctx.store;
     let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     let cwd = v.get("cwd").and_then(|x| x.as_str()).unwrap_or("");
@@ -272,7 +279,9 @@ async fn handle(
                     // Tell the executor the spec is ready (it stops the grill and, if the ticket
                     // is In Progress, starts the implement session).
                     if let Some(tx) = &ctx.events {
-                        let _ = tx.send(SystemEvent::GrillFinished { ticket_id: sess.ticket_id });
+                        let _ = tx.send(SystemEvent::GrillFinished {
+                            ticket_id: sess.ticket_id,
+                        });
                     }
                 }
             }
@@ -299,7 +308,9 @@ async fn handle(
                 if let Some(plan) = extract_plan(&v, tool) {
                     let _ = store.set_ticket_review_text(sess.ticket_id, &plan).await;
                     if let Some(tx) = &ctx.events {
-                        let _ = tx.send(SystemEvent::ReviewFinished { ticket_id: sess.ticket_id });
+                        let _ = tx.send(SystemEvent::ReviewFinished {
+                            ticket_id: sess.ticket_id,
+                        });
                     }
                 }
             }
@@ -311,7 +322,9 @@ async fn handle(
                 tool.unwrap_or("-")
             ));
         }
-        Ok(None) => log_event(&format!("[hook] {event} (no live session for cwd={cwd_canon})")),
+        Ok(None) => log_event(&format!(
+            "[hook] {event} (no live session for cwd={cwd_canon})"
+        )),
         Err(e) => log_event(&format!("[hook] {event} store error: {e}")),
     }
 

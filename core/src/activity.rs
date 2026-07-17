@@ -73,16 +73,32 @@ pub struct ActivityInput {
 }
 
 fn working(label: &str) -> Activity {
-    Activity { category: Category::Working, label: label.into(), detail: None }
+    Activity {
+        category: Category::Working,
+        label: label.into(),
+        detail: None,
+    }
 }
 fn waiting_you(label: &str) -> Activity {
-    Activity { category: Category::WaitingOnYou, label: label.into(), detail: None }
+    Activity {
+        category: Category::WaitingOnYou,
+        label: label.into(),
+        detail: None,
+    }
 }
 fn waiting_external(label: &str) -> Activity {
-    Activity { category: Category::WaitingExternal, label: label.into(), detail: None }
+    Activity {
+        category: Category::WaitingExternal,
+        label: label.into(),
+        detail: None,
+    }
 }
 fn idle(label: &str) -> Activity {
-    Activity { category: Category::Idle, label: label.into(), detail: None }
+    Activity {
+        category: Category::Idle,
+        label: label.into(),
+        detail: None,
+    }
 }
 
 /// Derive the ticket's [`Activity`] from its facts. Pure; pinned by the tests below.
@@ -193,7 +209,12 @@ mod tests {
 
     // Sensible defaults: a repo is assigned, caps at 3.
     fn base() -> ActivityInput {
-        ActivityInput { has_repo: true, review_fix_max: 3, ci_fix_max: 3, ..Default::default() }
+        ActivityInput {
+            has_repo: true,
+            review_fix_max: 3,
+            ci_fix_max: 3,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -229,8 +250,21 @@ mod tests {
 
     #[test]
     fn todo_needs_repo() {
-        assert_eq!(cat(&ActivityInput { from: Column::Todo, has_repo: false, ..base() }), Category::WaitingOnYou);
-        assert_eq!(cat(&ActivityInput { from: Column::Todo, ..base() }), Category::Idle);
+        assert_eq!(
+            cat(&ActivityInput {
+                from: Column::Todo,
+                has_repo: false,
+                ..base()
+            }),
+            Category::WaitingOnYou
+        );
+        assert_eq!(
+            cat(&ActivityInput {
+                from: Column::Todo,
+                ..base()
+            }),
+            Category::Idle
+        );
     }
 
     #[test]
@@ -318,11 +352,19 @@ mod tests {
     #[test]
     fn approved_pr_auto_merge_off_vs_on() {
         let off = classify(&ActivityInput {
-            from: Column::Pr, pr_exists: true, pr_approved: true, auto_merge: false, ..base()
+            from: Column::Pr,
+            pr_exists: true,
+            pr_approved: true,
+            auto_merge: false,
+            ..base()
         });
         assert_eq!(off.category, Category::WaitingOnYou);
         let on = classify(&ActivityInput {
-            from: Column::Pr, pr_exists: true, pr_approved: true, auto_merge: true, ..base()
+            from: Column::Pr,
+            pr_exists: true,
+            pr_approved: true,
+            auto_merge: true,
+            ..base()
         });
         assert_eq!(on.category, Category::Working);
         assert_eq!(on.label, "Merging…");
@@ -331,29 +373,53 @@ mod tests {
     #[test]
     fn ci_failing_autofix_on_vs_off() {
         let on = classify(&ActivityInput {
-            from: Column::Pr, pr_exists: true, ci_failing: true, ci_autofix: true, ci_fix_attempts: 1, ..base()
+            from: Column::Pr,
+            pr_exists: true,
+            ci_failing: true,
+            ci_autofix: true,
+            ci_fix_attempts: 1,
+            ..base()
         });
         assert_eq!(on.category, Category::Working);
         let exhausted = classify(&ActivityInput {
-            from: Column::Pr, pr_exists: true, ci_failing: true, ci_autofix: true, ci_fix_attempts: 3, ..base()
+            from: Column::Pr,
+            pr_exists: true,
+            ci_failing: true,
+            ci_autofix: true,
+            ci_fix_attempts: 3,
+            ..base()
         });
         assert_eq!(exhausted.category, Category::WaitingOnYou);
         let off = classify(&ActivityInput {
-            from: Column::Pr, pr_exists: true, ci_failing: true, ci_autofix: false, ..base()
+            from: Column::Pr,
+            pr_exists: true,
+            ci_failing: true,
+            ci_autofix: false,
+            ..base()
         });
         assert_eq!(off.category, Category::WaitingOnYou);
     }
 
     #[test]
     fn done_is_idle() {
-        assert_eq!(cat(&ActivityInput { from: Column::Done, ..base() }), Category::Idle);
+        assert_eq!(
+            cat(&ActivityInput {
+                from: Column::Done,
+                ..base()
+            }),
+            Category::Idle
+        );
     }
 
     #[test]
     fn same_state_flips_with_autonomy_setting() {
         // The whole point: identical facts read as auto vs needs-you depending on the setting.
         let facts = |auto_merge| ActivityInput {
-            from: Column::Pr, pr_exists: true, pr_approved: true, auto_merge, ..base()
+            from: Column::Pr,
+            pr_exists: true,
+            pr_approved: true,
+            auto_merge,
+            ..base()
         };
         assert_eq!(cat(&facts(true)), Category::Working);
         assert_eq!(cat(&facts(false)), Category::WaitingOnYou);

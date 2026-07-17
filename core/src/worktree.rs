@@ -9,7 +9,11 @@ use std::process::Command;
 use crate::models::Ticket;
 
 fn git(repo: &str, args: &[&str]) -> Result<String> {
-    let out = Command::new("git").arg("-C").arg(repo).args(args).output()?;
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()?;
     if !out.status.success() {
         return Err(anyhow!(
             "git {:?} failed: {}",
@@ -22,14 +26,19 @@ fn git(repo: &str, args: &[&str]) -> Result<String> {
 
 /// Best-effort default branch: prefer `origin/HEAD`, else current `HEAD`.
 pub fn default_branch(repo: &str) -> Result<String> {
-    if let Ok(s) = git(repo, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]) {
+    if let Ok(s) = git(
+        repo,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    ) {
         if let Some(b) = s.trim().strip_prefix("origin/") {
             if !b.is_empty() {
                 return Ok(b.to_string());
             }
         }
     }
-    Ok(git(repo, &["rev-parse", "--abbrev-ref", "HEAD"])?.trim().to_string())
+    Ok(git(repo, &["rev-parse", "--abbrev-ref", "HEAD"])?
+        .trim()
+        .to_string())
 }
 
 pub fn slugify(s: &str) -> String {
@@ -59,7 +68,9 @@ pub fn worktree_root() -> PathBuf {
 
 pub fn worktree_path(repo_name: &str, branch: &str) -> PathBuf {
     // branch contains '/', which we flatten for the directory name
-    worktree_root().join(repo_name).join(branch.replace('/', "__"))
+    worktree_root()
+        .join(repo_name)
+        .join(branch.replace('/', "__"))
 }
 
 /// Create a worktree for `branch`, fetching first (best-effort). Creates the branch off
@@ -73,7 +84,16 @@ pub fn create(repo: &str, base: &str, branch: &str, dest: &Path) -> Result<()> {
     // Clean up any stale worktree registration pointing at a since-removed dir.
     let _ = git(repo, &["worktree", "prune"]);
 
-    let branch_exists = git(repo, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_ok();
+    let branch_exists = git(
+        repo,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
+    )
+    .is_ok();
     let dest = dest.to_string_lossy();
     if branch_exists {
         git(repo, &["worktree", "add", &dest, branch])?;
@@ -84,7 +104,10 @@ pub fn create(repo: &str, base: &str, branch: &str, dest: &Path) -> Result<()> {
 }
 
 pub fn remove(repo: &str, dest: &Path) -> Result<()> {
-    git(repo, &["worktree", "remove", &dest.to_string_lossy(), "--force"])?;
+    git(
+        repo,
+        &["worktree", "remove", &dest.to_string_lossy(), "--force"],
+    )?;
     Ok(())
 }
 

@@ -65,7 +65,10 @@ async fn acli(args: &[&str]) -> Result<String> {
             crate::cmd_err::spawn_error("acli", &e)
         })?;
     if !out.status.success() {
-        return Err(crate::cmd_err::classify("acli", &String::from_utf8_lossy(&out.stderr)));
+        return Err(crate::cmd_err::classify(
+            "acli",
+            &String::from_utf8_lossy(&out.stderr),
+        ));
     }
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
@@ -100,7 +103,11 @@ pub fn install_via_brew() -> Result<String> {
             .env("PATH", bin_path())
             .output()?;
         if !out.status.success() {
-            return Err(anyhow!("brew {:?} failed: {}", args, String::from_utf8_lossy(&out.stderr).trim()));
+            return Err(anyhow!(
+                "brew {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
         }
         Ok(())
     };
@@ -151,7 +158,11 @@ fn extract_site(text: &str) -> Option<String> {
     text.split_whitespace()
         .map(|t| t.trim_matches(|c: char| !c.is_ascii_graphic() || c == ',' || c == '"'))
         .find(|t| t.contains(".atlassian.net"))
-        .map(|t| t.trim_start_matches("https://").trim_start_matches("http://").to_string())
+        .map(|t| {
+            t.trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .to_string()
+        })
 }
 
 // ---- read ----------------------------------------------------------------
@@ -195,7 +206,16 @@ pub async fn get_issue(key: &str) -> Result<JiraIssue> {
 // ---- write (opt-in) ------------------------------------------------------
 
 pub async fn transition(key: &str, status: &str) -> Result<()> {
-    acli(&["jira", "workitem", "transition", "--key", key, "--status", status]).await?;
+    acli(&[
+        "jira",
+        "workitem",
+        "transition",
+        "--key",
+        key,
+        "--status",
+        status,
+    ])
+    .await?;
     Ok(())
 }
 
@@ -204,9 +224,17 @@ pub async fn transition(key: &str, status: &str) -> Result<()> {
 /// status exists in the issue's workflow". Best-effort, used for board-column sync.
 pub async fn transition_to_any(key: &str, candidates: &[&str]) -> Result<bool> {
     for status in candidates {
-        if acli(&["jira", "workitem", "transition", "--key", key, "--status", status])
-            .await
-            .is_ok()
+        if acli(&[
+            "jira",
+            "workitem",
+            "transition",
+            "--key",
+            key,
+            "--status",
+            status,
+        ])
+        .await
+        .is_ok()
         {
             return Ok(true);
         }
@@ -215,7 +243,10 @@ pub async fn transition_to_any(key: &str, candidates: &[&str]) -> Result<bool> {
 }
 
 pub async fn add_comment(key: &str, body: &str) -> Result<()> {
-    acli(&["jira", "workitem", "comment", "create", "--key", key, "--body", body]).await?;
+    acli(&[
+        "jira", "workitem", "comment", "create", "--key", key, "--body", body,
+    ])
+    .await?;
     Ok(())
 }
 
@@ -227,7 +258,10 @@ pub async fn open_in_browser(key: &str) -> Result<()> {
 
 /// Fetch the issue's comments (oldest-first as Jira returns them). Defensive JSON parsing.
 pub async fn comments(key: &str) -> Result<Vec<JiraComment>> {
-    let json = acli(&["jira", "workitem", "comment", "list", "--key", key, "--json"]).await?;
+    let json = acli(&[
+        "jira", "workitem", "comment", "list", "--key", key, "--json",
+    ])
+    .await?;
     let v: Value = serde_json::from_str(json.trim())
         .map_err(|e| anyhow!("could not parse acli comments JSON ({e})"))?;
     let arr: Vec<Value> = if let Some(a) = v.as_array() {
@@ -273,8 +307,12 @@ fn node_text(node: Option<&Value>) -> String {
 // ---- JSON parsing (defensive) --------------------------------------------
 
 fn parse_issues(json: &str) -> Result<Vec<JiraIssue>> {
-    let v: Value = serde_json::from_str(json.trim())
-        .map_err(|e| anyhow!("could not parse acli JSON ({e}); first 200 chars: {}", &json.chars().take(200).collect::<String>()))?;
+    let v: Value = serde_json::from_str(json.trim()).map_err(|e| {
+        anyhow!(
+            "could not parse acli JSON ({e}); first 200 chars: {}",
+            &json.chars().take(200).collect::<String>()
+        )
+    })?;
     let arr: Vec<Value> = if let Some(a) = v.as_array() {
         a.clone()
     } else {
@@ -292,11 +330,20 @@ fn item_to_issue(it: &Value) -> JiraIssue {
     let summary = str_at(it, &[&["fields", "summary"], &["summary"]]).unwrap_or_default();
     let status = str_at(
         it,
-        &[&["fields", "status", "name"], &["status", "name"], &["status"]],
+        &[
+            &["fields", "status", "name"],
+            &["status", "name"],
+            &["status"],
+        ],
     )
     .unwrap_or_default();
     let description = description_text(it);
-    JiraIssue { key, summary, description, status }
+    JiraIssue {
+        key,
+        summary,
+        description,
+        status,
+    }
 }
 
 /// First non-empty string found at any of the given key paths.

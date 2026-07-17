@@ -25,14 +25,22 @@ fn skip(reason: &str) {
 #[tokio::test]
 #[ignore = "live: needs `acli jira auth login`"]
 async fn live_jira_readonly_roundtrip() {
-    assert!(jira::cli_installed(), "acli must be installed for live tests");
+    assert!(
+        jira::cli_installed(),
+        "acli must be installed for live tests"
+    );
 
     let site = jira::connected_site().await;
-    assert!(site.is_some(), "must be authenticated (`acli jira auth login`)");
+    assert!(
+        site.is_some(),
+        "must be authenticated (`acli jira auth login`)"
+    );
     eprintln!("connected site: {}", site.unwrap());
 
     // search_assigned → the production query, now `--paginate`d.
-    let issues = jira::search_assigned().await.expect("search_assigned failed");
+    let issues = jira::search_assigned()
+        .await
+        .expect("search_assigned failed");
     eprintln!("search_assigned returned {} issue(s)", issues.len());
     for i in &issues {
         // Every row must at least have a key and a status (summary can be empty in theory).
@@ -47,7 +55,11 @@ async fn live_jira_readonly_roundtrip() {
     // get_issue → single-issue fetch incl. ADF description.
     let issue = jira::get_issue(&first.key).await.expect("get_issue failed");
     assert_eq!(issue.key, first.key);
-    assert!(!issue.summary.is_empty(), "get_issue summary empty for {}", issue.key);
+    assert!(
+        !issue.summary.is_empty(),
+        "get_issue summary empty for {}",
+        issue.key
+    );
     eprintln!(
         "get_issue {} — summary {:?}, description {} chars",
         issue.key,
@@ -74,14 +86,19 @@ async fn live_jira_write_roundtrip() {
         return skip("HARMONY_LIVE_JIRA_WRITE_KEY unset — not mutating any real issue");
     };
     let marker = "harmony live-call validation — safe to delete";
-    jira::add_comment(&key, marker).await.expect("add_comment failed");
+    jira::add_comment(&key, marker)
+        .await
+        .expect("add_comment failed");
 
     let comments = jira::comments(&key).await.expect("comments failed");
     assert!(
         comments.iter().any(|c| c.body.contains(marker)),
         "posted comment did not round-trip back via comments()"
     );
-    eprintln!("comment round-trip on {key} OK ({} comments)", comments.len());
+    eprintln!(
+        "comment round-trip on {key} OK ({} comments)",
+        comments.len()
+    );
 }
 
 // ---- GitHub (read-only) --------------------------------------------------

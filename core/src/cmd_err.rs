@@ -91,7 +91,11 @@ mod tests {
     #[test]
     fn classifies_auth_failures() {
         // gh's typical logged-out message, and a generic acli auth-expired one.
-        let gh = classify("gh", "gh: To get started with GitHub CLI, please run: gh auth login").to_string();
+        let gh = classify(
+            "gh",
+            "gh: To get started with GitHub CLI, please run: gh auth login",
+        )
+        .to_string();
         assert!(gh.contains("not authenticated"));
         assert!(gh.contains("gh auth login"));
         let acli = classify("acli", "Error: you are not logged in").to_string();
@@ -116,6 +120,8 @@ mod tests {
         let msg = classify("git", "fatal: not a git repository").to_string();
         assert!(msg.contains("not a git repository"));
         // Empty stderr still produces a sensible message rather than a bare "failed:".
-        assert!(classify("gh", "   ").to_string().contains("no error output"));
+        assert!(classify("gh", "   ")
+            .to_string()
+            .contains("no error output"));
     }
 }

@@ -12,7 +12,10 @@ fn run(cmd: &str, args: &[&str], cwd: &str) -> Result<String> {
         .output()
         .map_err(|e| crate::cmd_err::spawn_error(cmd, &e))?;
     if !out.status.success() {
-        return Err(crate::cmd_err::classify(cmd, &String::from_utf8_lossy(&out.stderr)));
+        return Err(crate::cmd_err::classify(
+            cmd,
+            &String::from_utf8_lossy(&out.stderr),
+        ));
     }
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
@@ -51,14 +54,20 @@ pub fn generated_pr_body(
 
 /// `gh pr view --json …` for the branch's PR (Err if there's no PR).
 pub fn pr_view_json(worktree: &str) -> Result<String> {
-    run("gh", &["pr", "view", "--json", "number,title,url,state,isDraft"], worktree)
+    run(
+        "gh",
+        &["pr", "view", "--json", "number,title,url,state,isDraft"],
+        worktree,
+    )
 }
 
 /// The branch PR's current description body (`gh pr view --json body`). None when there's no PR.
 pub fn pr_body(worktree: &str) -> Option<String> {
     let json = run("gh", &["pr", "view", "--json", "body"], worktree).ok()?;
     let v: serde_json::Value = serde_json::from_str(&json).ok()?;
-    v.get("body").and_then(|x| x.as_str()).map(|s| s.to_string())
+    v.get("body")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string())
 }
 
 /// Replace the branch PR's description (`gh pr edit --body`).
@@ -77,7 +86,10 @@ pub fn pr_checks_json(worktree: &str) -> Result<String> {
         .map_err(|e| crate::cmd_err::spawn_error("gh", &e))?;
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     if stdout.trim().is_empty() {
-        return Err(crate::cmd_err::classify("gh", &String::from_utf8_lossy(&out.stderr)));
+        return Err(crate::cmd_err::classify(
+            "gh",
+            &String::from_utf8_lossy(&out.stderr),
+        ));
     }
     Ok(stdout)
 }
@@ -85,16 +97,24 @@ pub fn pr_checks_json(worktree: &str) -> Result<String> {
 /// The branch's HEAD commit SHA — used to fingerprint "the current change-set" so `/review`
 /// isn't re-run when nothing has changed since the last review.
 pub fn head_sha(worktree: &str) -> Result<String> {
-    Ok(run("git", &["rev-parse", "HEAD"], worktree)?.trim().to_string())
+    Ok(run("git", &["rev-parse", "HEAD"], worktree)?
+        .trim()
+        .to_string())
 }
 
 /// SHA a ref resolves to. Tries the remote-tracking `origin/<ref>` first (so a bare base-branch
 /// name resolves to the commit CI actually ran against), then the bare ref.
 pub fn rev_parse(worktree: &str, refname: &str) -> Result<String> {
-    if let Ok(s) = run("git", &["rev-parse", &format!("origin/{refname}")], worktree) {
+    if let Ok(s) = run(
+        "git",
+        &["rev-parse", &format!("origin/{refname}")],
+        worktree,
+    ) {
         return Ok(s.trim().to_string());
     }
-    Ok(run("git", &["rev-parse", refname], worktree)?.trim().to_string())
+    Ok(run("git", &["rev-parse", refname], worktree)?
+        .trim()
+        .to_string())
 }
 
 /// Workflow runs for `branch` (`gh run list --json …`) — used to map a failing PR check to the
@@ -103,8 +123,14 @@ pub fn run_list_json(worktree: &str, branch: &str) -> Result<String> {
     run(
         "gh",
         &[
-            "run", "list", "--branch", branch, "--limit", "40",
-            "--json", "databaseId,headSha,conclusion,status,name,workflowName",
+            "run",
+            "list",
+            "--branch",
+            branch,
+            "--limit",
+            "40",
+            "--json",
+            "databaseId,headSha,conclusion,status,name,workflowName",
         ],
         worktree,
     )
@@ -122,7 +148,10 @@ pub fn failed_logs(worktree: &str, run_id: i64) -> Result<String> {
         .map_err(|e| crate::cmd_err::spawn_error("gh", &e))?;
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     if stdout.trim().is_empty() && !out.status.success() {
-        return Err(crate::cmd_err::classify("gh", &String::from_utf8_lossy(&out.stderr)));
+        return Err(crate::cmd_err::classify(
+            "gh",
+            &String::from_utf8_lossy(&out.stderr),
+        ));
     }
     Ok(stdout)
 }
@@ -133,7 +162,11 @@ pub fn failed_logs(worktree: &str, run_id: i64) -> Result<String> {
 pub fn check_runs_json(worktree: &str, sha: &str) -> Result<String> {
     run(
         "gh",
-        &["api", &format!("repos/{{owner}}/{{repo}}/commits/{sha}/check-runs"), "--paginate"],
+        &[
+            "api",
+            &format!("repos/{{owner}}/{{repo}}/commits/{sha}/check-runs"),
+            "--paginate",
+        ],
         worktree,
     )
 }
@@ -143,7 +176,10 @@ pub fn check_runs_json(worktree: &str, sha: &str) -> Result<String> {
 pub fn required_checks_json(worktree: &str, base: &str) -> Result<String> {
     run(
         "gh",
-        &["api", &format!("repos/{{owner}}/{{repo}}/branches/{base}/protection/required_status_checks")],
+        &[
+            "api",
+            &format!("repos/{{owner}}/{{repo}}/branches/{base}/protection/required_status_checks"),
+        ],
         worktree,
     )
 }
@@ -170,10 +206,14 @@ pub fn commit_all(worktree: &str, message: &str) -> Result<bool> {
 /// Number of commits the branch is ahead of `base` (`git rev-list --count <base>..HEAD`).
 /// Used to refuse opening an empty PR with a clear message instead of a cryptic `gh` failure.
 pub fn commits_ahead(worktree: &str, base: &str) -> usize {
-    run("git", &["rev-list", "--count", &format!("{base}..HEAD")], worktree)
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(0)
+    run(
+        "git",
+        &["rev-list", "--count", &format!("{base}..HEAD")],
+        worktree,
+    )
+    .ok()
+    .and_then(|s| s.trim().parse().ok())
+    .unwrap_or(0)
 }
 
 /// PR status for the worktree's branch. `exists` is false when there is no PR (or `gh` can't
@@ -194,7 +234,12 @@ pub struct PrStatus {
 pub fn pr_status(worktree: &str) -> PrStatus {
     match run(
         "gh",
-        &["pr", "view", "--json", "number,state,isDraft,url,reviewDecision"],
+        &[
+            "pr",
+            "view",
+            "--json",
+            "number,state,isDraft,url,reviewDecision",
+        ],
         worktree,
     ) {
         Ok(json) => parse_pr_status(&json),
@@ -209,9 +254,17 @@ fn parse_pr_status(json: &str) -> PrStatus {
     PrStatus {
         exists,
         approved: v.get("reviewDecision").and_then(|x| x.as_str()) == Some("APPROVED"),
-        state: v.get("state").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        state: v
+            .get("state")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
         is_draft: v.get("isDraft").and_then(|x| x.as_bool()).unwrap_or(false),
-        url: v.get("url").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        url: v
+            .get("url")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
     }
 }
 
@@ -252,13 +305,22 @@ pub fn parse_priority(body: &str) -> String {
     for key in ["priority", "severity"] {
         if let Some(i) = b.find(key) {
             let w = &b[i..(i + 48).min(b.len())];
-            if ["high", "critical", "blocker", "major"].iter().any(|k| w.contains(k)) {
+            if ["high", "critical", "blocker", "major"]
+                .iter()
+                .any(|k| w.contains(k))
+            {
                 return "high".into();
             }
-            if ["medium", "moderate", "warning"].iter().any(|k| w.contains(k)) {
+            if ["medium", "moderate", "warning"]
+                .iter()
+                .any(|k| w.contains(k))
+            {
                 return "medium".into();
             }
-            if ["low", "minor", "trivial", "nit"].iter().any(|k| w.contains(k)) {
+            if ["low", "minor", "trivial", "nit"]
+                .iter()
+                .any(|k| w.contains(k))
+            {
                 return "low".into();
             }
         }
@@ -294,13 +356,22 @@ pub fn pr_comments(worktree: &str) -> Vec<PrComment> {
         return vec![];
     };
     let mut out = Vec::new();
-    if let Ok(j) = gh_api(worktree, &format!("repos/{{owner}}/{{repo}}/issues/{n}/comments")) {
+    if let Ok(j) = gh_api(
+        worktree,
+        &format!("repos/{{owner}}/{{repo}}/issues/{n}/comments"),
+    ) {
         out.extend(parse_issue_comments(&j));
     }
-    if let Ok(j) = gh_api(worktree, &format!("repos/{{owner}}/{{repo}}/pulls/{n}/reviews")) {
+    if let Ok(j) = gh_api(
+        worktree,
+        &format!("repos/{{owner}}/{{repo}}/pulls/{n}/reviews"),
+    ) {
         out.extend(parse_reviews(&j));
     }
-    if let Ok(j) = gh_api(worktree, &format!("repos/{{owner}}/{{repo}}/pulls/{n}/comments")) {
+    if let Ok(j) = gh_api(
+        worktree,
+        &format!("repos/{{owner}}/{{repo}}/pulls/{n}/comments"),
+    ) {
         out.extend(parse_review_comments(&j));
     }
     let mut out = dedup_comments(out);
@@ -317,7 +388,10 @@ fn dedup_comments(comments: Vec<PrComment>) -> Vec<PrComment> {
         .into_iter()
         .filter(|c| {
             let key = if c.url.is_empty() {
-                format!("{}\u{1}{}\u{1}{}\u{1}{}", c.author, c.kind, c.created_at, c.body)
+                format!(
+                    "{}\u{1}{}\u{1}{}\u{1}{}",
+                    c.author, c.kind, c.created_at, c.body
+                )
             } else {
                 c.url.clone()
             };
@@ -333,10 +407,17 @@ fn as_array(json: &str) -> Vec<serde_json::Value> {
         .unwrap_or_default()
 }
 fn str_at(v: &serde_json::Value, key: &str) -> String {
-    v.get(key).and_then(|x| x.as_str()).unwrap_or("").to_string()
+    v.get(key)
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 fn login(v: &serde_json::Value) -> String {
-    v.get("user").and_then(|u| u.get("login")).and_then(|x| x.as_str()).unwrap_or("").to_string()
+    v.get("user")
+        .and_then(|u| u.get("login"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 /// Conversation thread comments (`…/issues/{n}/comments`).
@@ -429,7 +510,11 @@ pub fn parse_review_comments(json: &str) -> Vec<PrComment> {
 /// Squash-merge the branch's PR and delete the remote branch (on the move to Done, once the PR
 /// is approved on GitHub). harmony only merges here — never mid-flow.
 pub fn merge_pr(worktree: &str) -> Result<()> {
-    run("gh", &["pr", "merge", "--squash", "--delete-branch"], worktree)?;
+    run(
+        "gh",
+        &["pr", "merge", "--squash", "--delete-branch"],
+        worktree,
+    )?;
     Ok(())
 }
 
@@ -589,7 +674,13 @@ mod tests {
     }
 
     fn git(dir: &std::path::Path, args: &[&str]) {
-        assert!(Command::new("git").arg("-C").arg(dir).args(args).status().unwrap().success());
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
     }
 
     #[test]
