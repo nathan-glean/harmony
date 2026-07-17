@@ -310,7 +310,7 @@ fn parse_issues(json: &str) -> Result<Vec<JiraIssue>> {
     let v: Value = serde_json::from_str(json.trim()).map_err(|e| {
         anyhow!(
             "could not parse acli JSON ({e}); first 200 chars: {}",
-            &json.chars().take(200).collect::<String>()
+            json.chars().take(200).collect::<String>()
         )
     })?;
     let arr: Vec<Value> = if let Some(a) = v.as_array() {
