@@ -3,6 +3,8 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { onAction } from "@tauri-apps/plugin-notification";
+import { check } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import { Board } from "./components/Board";
 import { Sessions } from "./components/Sessions";
 import { Worktrees } from "./components/Worktrees";
@@ -278,6 +280,29 @@ export function App() {
         if (ids.length) refresh();
       })
       .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Auto-update on launch: check the latest GitHub Release; if a newer signed build exists, ask
+  // once, then download + install + relaunch. Best-effort — any failure never blocks startup.
+  useEffect(() => {
+    (async () => {
+      try {
+        const update = await check();
+        if (!update) return;
+        const ok = await confirm(
+          `harmony ${update.version} is available (you're on ${update.currentVersion}). Install and restart now?`,
+          { title: "Update available", kind: "info" },
+        );
+        if (!ok) return;
+        flash(`Downloading harmony ${update.version}…`);
+        await update.downloadAndInstall();
+        flash("Update installed — restarting…");
+        await relaunch();
+      } catch {
+        /* offline / no release / signature mismatch — stay on the current version */
+      }
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

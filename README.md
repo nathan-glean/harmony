@@ -16,6 +16,11 @@ React/Vite frontend.
    xattr -cr /Applications/harmony.app
    ```
 
+That one-time install is the last manual step: harmony **auto-updates**. On launch it checks the
+latest release and, if a newer (Tauri-signed) build exists, asks to install it and restarts — no
+reinstall per version. (The update is Tauri-signature-verified but not yet Apple-notarized, so a
+future macOS could still show a Gatekeeper prompt on an update; notarization is the planned fix.)
+
 > Requires an Apple Silicon Mac (M-series). Runtime features expect `gh` (GitHub) and, for Jira,
 > the Atlassian CLI `acli` on your PATH.
 
