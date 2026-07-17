@@ -34,21 +34,22 @@ task tauri:build           # build the macOS bundle locally
 
 ## Releasing
 
-CI (`.github/workflows/ci.yml`) runs `task ci` on every push/PR. Releases are built and published by
-`.github/workflows/release.yml` on a `v*` tag:
+CI (`.github/workflows/ci.yml`) runs `task ci` on every push/PR. Releases are cut deliberately (never
+per-PR) and built + published by `.github/workflows/release.yml` on a `v*` tag.
 
-1. Bump the version in the **four** files that must stay in sync — `app/src-tauri/tauri.conf.json`
-   (authoritative for the bundle), `app/src-tauri/Cargo.toml`, `core/Cargo.toml`, and
-   `app/package.json`.
-2. Commit as `Release vX.Y.Z`.
-3. Tag and push:
+Bump the version and tag with one command (semantic versioning — `patch` | `minor` | `major`, or an
+explicit `X.Y.Z`):
 
-   ```sh
-   git tag vX.Y.Z && git push origin vX.Y.Z
-   ```
+```sh
+task release -- minor      # bumps every version file in lockstep, commits "Release vX.Y.Z", tags vX.Y.Z
+git push --follow-tags     # review first, then push to publish the release
+```
 
-The workflow builds the Apple-Silicon `.dmg` and attaches it to a new GitHub Release. (A manual
-**Run workflow** / `workflow_dispatch` builds without publishing — a dry run.)
+`task release` updates all version spots together (`tauri.conf.json`, both `Cargo.toml`,
+`package.json` + `package-lock.json`, and `Cargo.lock`) so the tag, the bundle, and the auto-update
+manifest always agree; it stops before pushing so you can review. The tag push builds the Apple-Silicon
+`.dmg` and attaches it to a new GitHub Release (a CI guard rejects a tag that doesn't match the app
+version). A manual **Run workflow** / `workflow_dispatch` builds without publishing — a dry run.
 
 The DMG is unsigned; to ship a notarized, double-click-installable build later, add a `bundle.macOS`
 signing block to `tauri.conf.json` and the Apple signing secrets to the release workflow.
