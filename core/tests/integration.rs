@@ -364,6 +364,36 @@ async fn upsert_jira_ticket_inserts_then_updates_title_only() {
 }
 
 #[tokio::test]
+async fn clear_all_questions_and_drafting_drops_stale_session_state() {
+    let dir = TempDir::new("clearq");
+    let store = open_store(&dir).await;
+    let a = store
+        .add_ticket(None, "local", "A", "", None)
+        .await
+        .unwrap();
+    let b = store
+        .add_ticket(None, "local", "B", "", None)
+        .await
+        .unwrap();
+    store
+        .set_ticket_question(a, r#"{"session_id":1}"#)
+        .await
+        .unwrap();
+    store.set_ticket_drafting(a, true).await.unwrap();
+
+    // Startup reconciliation clears both stale flags; a ticket without them is untouched.
+    store.clear_all_questions().await.unwrap();
+    store.clear_all_drafting().await.unwrap();
+    let ta = store.get_ticket(a).await.unwrap().unwrap();
+    assert_eq!(ta.pending_question, "");
+    assert_eq!(ta.drafting, 0);
+    assert_eq!(
+        store.get_ticket(b).await.unwrap().unwrap().pending_question,
+        ""
+    );
+}
+
+#[tokio::test]
 async fn worktree_crud_primary_and_alternate() {
     let dir = TempDir::new("wt");
     let store = open_store(&dir).await;

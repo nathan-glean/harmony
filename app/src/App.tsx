@@ -446,9 +446,12 @@ export function App() {
   // The selected ticket, but kept fresh from the poll (so live todos/status update).
   const liveTicket = selected ? tickets.find((t) => t.id === selected.id) ?? selected : null;
 
-  // Claude's pending AskUserQuestion for the selected ticket, parsed for the question card.
+  // Claude's pending AskUserQuestion for the selected ticket, parsed for the question card. Only
+  // shown while the session is actually live — a question can't be answered once its PTY is gone, so
+  // a stale one left by an ended/crashed session must not linger (the backend also clears it on exit).
   const pendingQuestion: PendingQuestion | null = (() => {
     if (!liveTicket?.pending_question) return null;
+    if (!selected || !liveSessions[selected.id]) return null;
     try {
       return JSON.parse(liveTicket.pending_question);
     } catch {
