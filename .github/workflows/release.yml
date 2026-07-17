@@ -21,6 +21,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # A v* tag must match the app version (kept in lockstep by `task release`), so the built
+      # bundle + updater manifest carry the version the tag advertises. Fail fast on a mismatch.
+      - name: Verify tag matches app version
+        if: github.ref_type == 'tag'
+        run: |
+          conf=$(grep -m1 '"version"' app/src-tauri/tauri.conf.json | sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/')
+          tag="${GITHUB_REF_NAME#v}"
+          [ "$conf" = "$tag" ] || { echo "::error::tag v$tag != tauri.conf.json version $conf — run 'task release' to bump in lockstep"; exit 1; }
+
       - uses: actions/setup-node@v4
         with:
           node-version: "24.16.0"

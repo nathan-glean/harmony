@@ -64,6 +64,11 @@ tasks:
     cmds:
       - '{{.WITH_CARGO}}; UPDATE_FLOW_DOC=1 cargo test -p harmony-core --test flow_doc'
 
+  release:
+    desc: 'Bump version in lockstep + commit + tag (does not push). E.g. `task release -- minor` (or patch|major|X.Y.Z), then `git push --follow-tags`.'
+    cmds:
+      - 'node scripts/release.mjs {{.CLI_ARGS}}'
+
   # ---- Frontend (Vite / React) ----
 
   app:install:
