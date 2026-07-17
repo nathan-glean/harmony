@@ -201,6 +201,10 @@ button:disabled { opacity: 0.5; cursor: default; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .modal-head .jira-open { padding: 2px 8px; font-size: 12px; }
+.modal-head .modal-repo-assign {
+  padding: 2px 8px; font-size: 12px; border-radius: 6px;
+  border: 1px solid #f7768e; color: #f7768e; background: var(--bg); cursor: pointer;
+}
 .modal-head .close { line-height: 1; padding: 2px 9px; font-size: 18px; }
 .modal .actions { padding: 10px 16px; border-bottom: 1px solid var(--border); }
 

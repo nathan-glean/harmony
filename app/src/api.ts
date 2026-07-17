@@ -12,6 +12,8 @@ export const api = {
   renameRepo: (id: number, name: string) => invoke<void>("rename_repo", { id, name }),
   deleteRepo: (id: number) => invoke<void>("delete_repo", { id }),
   getTicket: (id: number) => invoke<Ticket | null>("get_ticket", { id }),
+  assignTicketRepo: (ticketId: number, repoId: number) =>
+    invoke<void>("assign_ticket_repo", { ticketId, repoId }),
   listSessions: () => invoke<SessionView[]>("list_sessions"),
   liveSessions: () => invoke<[number, number][]>("live_sessions"),
   liveProgress: () => invoke<SessionProgress[]>("live_progress"),

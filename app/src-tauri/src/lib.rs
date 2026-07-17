@@ -149,6 +149,32 @@ async fn get_ticket(state: State<'_, AppState>, id: i64) -> Result<Option<Ticket
     state.store.get_ticket(id).await.map_err(|e| e.to_string())
 }
 
+/// Manually assign a ticket to a repo (for tickets that didn't auto-pick one — e.g. a Jira project
+/// with no default repo, or a local ticket). Refreshes the derived activity pill so the "Assign a
+/// repo" state clears immediately.
+#[tauri::command]
+async fn assign_ticket_repo(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ticket_id: i64,
+    repo_id: i64,
+) -> Result<(), String> {
+    // Validate the repo exists (guards against a stale UI id).
+    state
+        .store
+        .get_repo(repo_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("no such repo")?;
+    state
+        .store
+        .set_ticket_repo(ticket_id, repo_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    store_activity(&app, &state, ticket_id).await;
+    Ok(())
+}
+
 #[tauri::command]
 async fn list_sessions(state: State<'_, AppState>) -> Result<Vec<SessionView>, String> {
     state.store.list_sessions().await.map_err(|e| e.to_string())
@@ -2735,6 +2761,7 @@ pub fn run() {
             get_permission_mode,
             set_permission_mode,
             get_ticket,
+            assign_ticket_repo,
             list_sessions,
             live_sessions,
             live_progress,

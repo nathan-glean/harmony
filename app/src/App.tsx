@@ -684,6 +684,32 @@ export function App() {
                     ↗ Jira
                   </button>
                 )}
+                {(liveTicket ?? selected).repo_id == null && (
+                  <select
+                    className="modal-repo-assign"
+                    value=""
+                    title="Assign a repo to this ticket"
+                    onChange={(e) => {
+                      const rid = Number(e.target.value);
+                      if (!rid) return;
+                      api
+                        .assignTicketRepo(selected.id, rid)
+                        .then(() =>
+                          flash(`Assigned repo to ${selected.jira_key ?? `#${selected.id}`}`),
+                        )
+                        .catch((err) => flash(String(err)));
+                    }}
+                  >
+                    <option value="" disabled>
+                      {repos.length ? "⚠ Assign repo…" : "⚠ no repo — add one in Settings"}
+                    </option>
+                    {repos.map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {r.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
                 <button className="close" title="Close (Esc)" onClick={() => setSelected(null)}>
                   ×
                 </button>
