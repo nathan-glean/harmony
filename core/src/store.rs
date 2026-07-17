@@ -692,6 +692,15 @@ impl Store {
     /// Insert or update a ticket from a Jira issue. Returns (id, inserted). On update we
     /// refresh the title only — never the harmony status or the locally-authored spec.
     pub async fn upsert_jira_ticket(&self, key: &str, title: &str) -> Result<(i64, bool)> {
+        // Map the Jira project key (the `DNA` in `DNA-1685`) to its default repo, if one is set, so a
+        // synced ticket lands on the right repo immediately instead of showing "no repo" until a
+        // session starts. Missing/unknown project → no default (leave repo unassigned).
+        let project = key.split('-').next().unwrap_or("");
+        let default_repo_id = if project.is_empty() {
+            None
+        } else {
+            self.default_repo_for_key(project).await?.map(|r| r.id)
+        };
         if let Some(t) = self.get_ticket_by_key(key).await? {
             sqlx::query("UPDATE tickets SET title = ?, updated_at = ? WHERE id = ?")
                 .bind(title)
@@ -699,9 +708,17 @@ impl Store {
                 .bind(t.id)
                 .execute(&self.pool)
                 .await?;
+            // Backfill a missing repo from the project default (never override a repo the user set).
+            if t.repo_id.is_none() {
+                if let Some(rid) = default_repo_id {
+                    self.set_ticket_repo(t.id, rid).await?;
+                }
+            }
             Ok((t.id, false))
         } else {
-            let id = self.add_ticket(Some(key), "jira", title, "", None).await?;
+            let id = self
+                .add_ticket(Some(key), "jira", title, "", default_repo_id)
+                .await?;
             Ok((id, true))
         }
     }
