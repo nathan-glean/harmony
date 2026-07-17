@@ -41,6 +41,10 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signs the updater artifacts so clients can verify auto-updates. The key was
+          # generated with an empty password, so the password is an empty literal (not a secret).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         with:
           projectPath: app
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
@@ -48,6 +52,8 @@ jobs:
           releaseDraft: false
           prerelease: false
           args: ""
+          # Publish latest.json (the updater manifest) alongside the .dmg + signed .app.tar.gz.
+          includeUpdaterJson: true
           releaseBody: |
             ### Install (macOS, Apple Silicon)
 
@@ -60,3 +66,6 @@ jobs:
             ```
             xattr -cr /Applications/harmony.app
             ```
+
+            Once installed, harmony **auto-updates** on launch — future versions install
+            themselves (with your confirmation), no reinstall needed.
