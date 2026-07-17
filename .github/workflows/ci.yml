@@ -1,0 +1,42 @@
+name: CI
+
+# Runs the same quality gate as `task ci` (fmt → clippy -D warnings → cargo test
+# --workspace [incl. the docs/flow.md drift guard] → tsc) on every push to main and
+# every PR. Runs on macOS (the app's target OS) so no Linux WebKit deps are needed.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  ci:
+    name: task ci (macOS)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.16.0"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # `task ci` runs `npx tsc --noEmit`, which needs node_modules.
+      - name: Install frontend deps
+        working-directory: app
+        run: npm ci
+
+      - name: Run CI gate
+        run: task ci
