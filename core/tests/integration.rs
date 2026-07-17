@@ -1347,6 +1347,10 @@ fn sample_ticket() -> harmony_core::models::Ticket {
         orchestrator_note: "".into(),
         orchestrator_seen: "".into(),
         restart_attempts: 0,
+        proof: String::new(),
+        proof_artifacts: String::new(),
+        proof_sha: String::new(),
+        proof_attempts: 0,
     }
 }
 

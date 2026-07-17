@@ -25,6 +25,9 @@ const CI_POLL_SECS: u64 = 60;
 const MAX_CI_FIX_ATTEMPTS: i64 = 3;
 /// Max automatic review-fix attempts (review→fix→re-review cycles) before we stop and escalate.
 const MAX_REVIEW_FIX_ATTEMPTS: i64 = 3;
+/// Max proof-generation attempts per reviewed HEAD before we stop retrying (anti-loop when capture
+/// keeps failing). The change still advances — proof is best-effort.
+const MAX_PROOF_ATTEMPTS: i64 = 2;
 /// Max times the orchestrator auto-restarts a crashed session for a ticket before escalating.
 const MAX_RESTART_ATTEMPTS: i64 = 2;
 
@@ -642,6 +645,13 @@ async fn open_pr_for(store: &Store, ticket_id: i64) -> Result<String, String> {
         repo.path.clone(),
     );
     let commit_msg = commit_message(&ticket);
+    // Proof of work (evidence the change functions) → posted as a PR comment so teammates review the
+    // output, not the diff. Empty when no proof was produced (disabled, or nothing to evidence).
+    let (proof_report, proof_artifacts_json, proof_tid) = (
+        ticket.proof.clone(),
+        ticket.proof_artifacts.clone(),
+        ticket_id,
+    );
 
     let url = tokio::task::spawn_blocking(move || -> Result<String, String> {
         // Commit any leftover uncommitted work (e.g. edits made directly during human review) so
@@ -660,8 +670,19 @@ async fn open_pr_for(store: &Store, ticket_id: i64) -> Result<String, String> {
             &fallback,
         );
         harmony_core::github::push_branch(&path, &branch).map_err(|e| e.to_string())?;
-        harmony_core::github::create_draft_pr(&path, &title, &body, &branch)
-            .map_err(|e| e.to_string())
+        let url = harmony_core::github::create_draft_pr(&path, &title, &body, &branch)
+            .map_err(|e| e.to_string())?;
+
+        // Best-effort proof comment: host any media (fills in URLs), render, and post. Never fails
+        // the PR — proof is supplementary.
+        let mut artifacts: Vec<harmony_core::proof::ProofArtifact> =
+            serde_json::from_str(&proof_artifacts_json).unwrap_or_default();
+        if !proof_report.trim().is_empty() || !artifacts.is_empty() {
+            harmony_core::github::host_proof_artifacts(&path, proof_tid, &mut artifacts);
+            let comment = harmony_core::proof::render_pr_comment(&proof_report, &artifacts);
+            let _ = harmony_core::github::post_pr_comment(&path, &comment);
+        }
+        Ok(url)
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -858,6 +879,61 @@ async fn poll_review_loop_once(app: &AppHandle, state: &AppState) {
                 "[review-loop] start_review_fix for #{} failed: {e}",
                 ticket.id
             ),
+        }
+    }
+}
+
+/// One poll pass for proof-of-work generation (the review-stage sibling of `poll_review_loop_once`).
+/// For each pre-PR `For Your Review` ticket whose change has passed review, capture proof once per
+/// reviewed HEAD (the `proof_sha` fingerprint): spawn a proof session that records evidence the
+/// change works. Gated by `proof`; capped by `MAX_PROOF_ATTEMPTS`; skips live sessions. When the
+/// review loop is on, waits for its judge to PASS this HEAD before evidencing (so proof reflects the
+/// final, accepted state); when it's off, evidences any current review.
+async fn poll_proof_loop_once(app: &AppHandle, state: &AppState) {
+    if !proof_enabled(state).await {
+        return;
+    }
+    let review_loop = review_loop_enabled(state).await;
+    let tickets = match state.store.list_tickets().await {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    for ticket in tickets {
+        // Pre-PR review stage only, reviewed at least once, never mid-session, under the cap.
+        if ticket.status != harmony_core::status::WAITING
+            || ticket.reviewed != 1
+            || ticket.proof_attempts >= MAX_PROOF_ATTEMPTS
+            || has_live_session(state, ticket.id)
+        {
+            continue;
+        }
+        let wt = match state.store.primary_worktree_for_ticket(ticket.id).await {
+            Ok(Some(wt)) => wt,
+            _ => continue,
+        };
+        let path = wt.path.clone();
+        let head = tokio::task::spawn_blocking(move || {
+            harmony_core::github::head_sha(&path).unwrap_or_default()
+        })
+        .await
+        .unwrap_or_default();
+        // Only evidence a CURRENT review (proof reflects the reviewed HEAD), and only once per HEAD.
+        if head.is_empty() || head != ticket.reviewed_sha || head == ticket.proof_sha {
+            continue;
+        }
+        // With the review loop on, don't evidence until its judge has PASSED this exact HEAD.
+        if review_loop && (ticket.judged_sha != head || ticket.review_verdict != "pass") {
+            continue;
+        }
+
+        let mgr = SessionManager::new(Arc::new(state.store.clone()), HOOK_PORT);
+        match mgr.start_proof(ticket.id).await {
+            Ok(handle) => {
+                let _ = wire_session(app, state, handle, ticket.id);
+                let _ = state.store.bump_proof_attempts(ticket.id).await;
+                store_activity(app, state, ticket.id).await;
+            }
+            Err(e) => eprintln!("[proof] start_proof for #{} failed: {e}", ticket.id),
         }
     }
 }
@@ -1540,6 +1616,34 @@ async fn set_review_loop(state: State<'_, AppState>, enabled: bool) -> Result<()
     state
         .store
         .set_setting("review_loop", if enabled { "on" } else { "off" })
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Proof-of-work generation toggle (default ON). When on, once a change passes review harmony runs a
+/// proof session that captures evidence it works (video/screenshots/report), shown in the Proof tab
+/// and posted to the PR. Read by `poll_proof_loop_once`.
+async fn proof_enabled(state: &AppState) -> bool {
+    state
+        .store
+        .get_setting("proof")
+        .await
+        .ok()
+        .flatten()
+        .map(|v| v != "off")
+        .unwrap_or(true)
+}
+
+#[tauri::command]
+async fn get_proof_enabled(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(proof_enabled(&state).await)
+}
+
+#[tauri::command]
+async fn set_proof_enabled(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+    state
+        .store
+        .set_setting("proof", if enabled { "on" } else { "off" })
         .await
         .map_err(|e| e.to_string())
 }
@@ -2356,6 +2460,9 @@ async fn apply_event(
     if event == Event::WorkFinished {
         let _ = state.store.reset_review_loop(ticket_id).await;
         let _ = state.store.reset_restart_attempts(ticket_id).await;
+        // Fresh work cycle → the prior proof no longer describes the change; regenerate it after the
+        // upcoming review settles.
+        let _ = state.store.reset_proof(ticket_id).await;
     }
     let ctx = build_ctx(state, &ticket).await;
     let decision = flow::decide(event, &ctx);
@@ -2511,6 +2618,32 @@ async fn run_action(
                 {
                     let _ = state.store.mark_reviewed(id, &sha).await;
                 }
+            }
+        }
+        // A proof session finished: fingerprint the evidenced HEAD (so the proof poller won't
+        // regenerate until the branch moves) and collect the media it wrote to the artifact dir. The
+        // prose report itself is captured live by the hook server (the proof session's plan-file
+        // write). Proof is best-effort — a missing/empty artifact dir just yields no artifacts.
+        Action::MarkProofDone => {
+            if let Some(wt) = state
+                .store
+                .primary_worktree_for_ticket(id)
+                .await
+                .map_err(|e| e.to_string())?
+            {
+                let path = wt.path.clone();
+                let sha =
+                    tokio::task::spawn_blocking(move || harmony_core::github::head_sha(&path))
+                        .await
+                        .ok()
+                        .and_then(|r| r.ok())
+                        .unwrap_or_default();
+                let dir = harmony_core::settings::proof_artifact_dir(id)
+                    .to_string_lossy()
+                    .to_string();
+                let artifacts = harmony_core::proof::scan_artifacts(&dir);
+                let json = serde_json::to_string(&artifacts).unwrap_or_else(|_| "[]".into());
+                let _ = state.store.mark_proof_done(id, &sha, &json).await;
             }
         }
         // `OpenPr` is handled asynchronously by `apply_event` (so the card moves immediately with
@@ -2683,6 +2816,9 @@ pub fn run() {
                             SystemEvent::ReviewFinished { ticket_id } => {
                                 (ticket_id, Event::ReviewFinished)
                             }
+                            SystemEvent::ProofFinished { ticket_id } => {
+                                (ticket_id, Event::ProofFinished)
+                            }
                             SystemEvent::FixFinished { ticket_id } => {
                                 (ticket_id, Event::FixFinished)
                             }
@@ -2716,6 +2852,8 @@ pub fn run() {
                         poll_ci_once(&poll_handle, &state).await;
                         poll_reviews_once(&poll_handle, &state).await;
                         poll_review_loop_once(&poll_handle, &state).await;
+                        // After the review loop settles, evidence passed changes (proof of work).
+                        poll_proof_loop_once(&poll_handle, &state).await;
                         poll_auto_merge_once(&poll_handle, &state).await;
                         // Last: refresh each ticket's activity pill from the (now-current) facts.
                         poll_activity_once(&poll_handle, &state).await;
@@ -2771,6 +2909,8 @@ pub fn run() {
             set_auto_end_idle,
             get_review_loop,
             set_review_loop,
+            get_proof_enabled,
+            set_proof_enabled,
             get_auto_merge,
             set_auto_merge,
             get_orchestrator,

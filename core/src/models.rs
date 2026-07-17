@@ -90,6 +90,20 @@ pub struct Ticket {
     /// Number of times the orchestrator has auto-restarted a crashed session for this ticket; capped
     /// to avoid crash loops (reset when work legitimately progresses).
     pub restart_attempts: i64,
+    /// The proof-of-work report the proof session produced (markdown: what now works, how to see it,
+    /// verbatim verification output), captured from its plan-file write. Latest-only. "" until a
+    /// proof run completes. Surfaced in the Proof tab and posted to the PR comment.
+    pub proof: String,
+    /// The proof session's captured media/evidence artifacts, as a JSON array of
+    /// `{kind, path, caption}` (`kind` = image | video | cast | file). Built by scanning the proof
+    /// artifact dir when the session finishes. "" when none.
+    pub proof_artifacts: String,
+    /// The branch HEAD the proof last ran against (idempotency fingerprint, like `reviewed_sha`) — the
+    /// proof poller won't regenerate until the branch moves. "" until first produced.
+    pub proof_sha: String,
+    /// Number of proof-generation attempts for the current HEAD; capped to avoid a runaway loop when
+    /// capture keeps failing. Reset when fresh work lands.
+    pub proof_attempts: i64,
 }
 
 /// An isolated git worktree for a ticket. Per-ticket and reused; `is_alternate`
@@ -119,7 +133,8 @@ pub struct Session {
     pub ended_at: Option<i64>,
     /// Launch directory (worktree path for work sessions, repo root for spec sessions).
     pub cwd: Option<String>,
-    /// "work" | "spec" — a spec session runs the grill in plan mode without a worktree.
+    /// "work" | "spec" | "review" | "proof" | "fix" | "address" — a spec session runs the grill in
+    /// plan mode without a worktree; a proof session captures evidence the change works.
     pub kind: String,
 }
 
