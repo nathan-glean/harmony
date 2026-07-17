@@ -15,7 +15,7 @@
 
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub fn inject_hooks(worktree_path: &str, port: u16) -> Result<()> {
     let dir = Path::new(worktree_path).join(".claude");
@@ -117,6 +117,73 @@ pub fn remove_hooks(dir: &str, port: u16) -> Result<()> {
         std::fs::write(&file, serde_json::to_string_pretty(&root)?)?;
     }
     Ok(())
+}
+
+/// The central harmony home (`~/.harmony`), created if absent.
+fn harmony_home() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    Path::new(&home).join(".harmony")
+}
+
+/// The per-ticket proof artifact directory (`~/.harmony/proof/<ticket_id>`). Media the proof session
+/// captures lands here — OUTSIDE the target repo, so nothing is ever committed to it. Read back by
+/// the executor (to scan for artifacts) and by the UI (to serve them). Does not create the dir.
+pub fn proof_artifact_dir(ticket_id: i64) -> PathBuf {
+    harmony_home().join("proof").join(ticket_id.to_string())
+}
+
+/// Environment for a proof-capture session: the artifact output dir plus the shared toolchain env,
+/// so capture tools are provisioned once centrally (never per-repo) and reused across tickets.
+pub struct ProofEnv {
+    /// `~/.harmony/proof/<ticket_id>` — where the session must write all media. Created fresh.
+    pub artifact_dir: String,
+    /// Env vars to inject into the proof `claude` process (as `(name, value)` pairs).
+    pub env: Vec<(String, String)>,
+}
+
+/// Provision the central capture toolchain and return the env for a ticket's proof session.
+///
+/// "Zero-install per repo": the heavy bits live under `~/.harmony/tools` and are shared across every
+/// repo/ticket — a single Playwright browser cache (`PLAYWRIGHT_BROWSERS_PATH`) that `npx playwright`
+/// populates once and reuses, and a `~/.harmony/tools/bin` dir prepended to PATH for any
+/// harmony-provided helpers. The proof *methodology* is inlined into the session prompt (like the
+/// grill), so there is no skill to install anywhere. The per-run artifact dir is (re)created empty so
+/// each run's evidence is self-contained.
+pub fn provision_proof_env(ticket_id: i64) -> Result<ProofEnv> {
+    let home = harmony_home();
+    let tools = home.join("tools");
+    let browsers = tools.join("pw-browsers");
+    let bin = tools.join("bin");
+    std::fs::create_dir_all(&browsers)?;
+    std::fs::create_dir_all(&bin)?;
+
+    // Fresh, empty artifact dir per run.
+    let artifact_dir = proof_artifact_dir(ticket_id);
+    if artifact_dir.exists() {
+        let _ = std::fs::remove_dir_all(&artifact_dir);
+    }
+    std::fs::create_dir_all(&artifact_dir)?;
+
+    // Prepend our bin dir to PATH so any harmony-provided capture helpers win; keep the inherited PATH.
+    let path = match std::env::var("PATH") {
+        Ok(p) => format!("{}:{}", bin.to_string_lossy(), p),
+        Err(_) => bin.to_string_lossy().to_string(),
+    };
+
+    Ok(ProofEnv {
+        artifact_dir: artifact_dir.to_string_lossy().to_string(),
+        env: vec![
+            (
+                "PLAYWRIGHT_BROWSERS_PATH".to_string(),
+                browsers.to_string_lossy().to_string(),
+            ),
+            (
+                "HARMONY_PROOF_DIR".to_string(),
+                artifact_dir.to_string_lossy().to_string(),
+            ),
+            ("PATH".to_string(), path),
+        ],
+    })
 }
 
 #[cfg(test)]

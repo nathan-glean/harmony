@@ -16,29 +16,29 @@ stateDiagram-v2
     state "In PR Review" as Pr
     state "Done" as Done
     [*] --> Todo
-    Todo --> Todo : GrillRequested, GrillFinished, ReviewRequested, ReviewFinished, SessionIdle
+    Todo --> Todo : GrillRequested, GrillFinished, ReviewRequested, ReviewFinished, ProofFinished, SessionIdle
     Todo --> InProgress : Move
     Todo --> HumanReview : Move, AddressFinished
     Todo --> Pr : Move, FixFinished, AddressFinished
     Todo --> Done : Move
     InProgress --> Todo : Move
-    InProgress --> InProgress : GrillFinished, ReviewRequested, ReviewFinished, SessionIdle
+    InProgress --> InProgress : GrillFinished, ReviewRequested, ReviewFinished, ProofFinished, SessionIdle
     InProgress --> HumanReview : Move, WorkFinished, AddressFinished
     InProgress --> Pr : Move, FixFinished, AddressFinished
     InProgress --> Done : Move
     HumanReview --> Todo : Move
     HumanReview --> InProgress : Move
-    HumanReview --> HumanReview : Move, GrillFinished, ReviewRequested, ReviewFinished, AddressFinished, SessionIdle
+    HumanReview --> HumanReview : Move, GrillFinished, ReviewRequested, ReviewFinished, ProofFinished, AddressFinished, SessionIdle
     HumanReview --> Pr : Move, FixFinished, AddressFinished
     HumanReview --> Done : Move
     Pr --> Todo : Move
     Pr --> InProgress : Move
     Pr --> HumanReview : Move, AddressFinished
-    Pr --> Pr : GrillFinished, ReviewRequested, ReviewFinished, FixFinished, AddressFinished, SessionIdle
+    Pr --> Pr : GrillFinished, ReviewRequested, ReviewFinished, ProofFinished, FixFinished, AddressFinished, SessionIdle
     Pr --> Done : Move
     Done --> HumanReview : AddressFinished
     Done --> Pr : FixFinished, AddressFinished
-    Done --> Done : GrillFinished, ReviewRequested, ReviewFinished, SessionIdle
+    Done --> Done : GrillFinished, ReviewRequested, ReviewFinished, ProofFinished, SessionIdle
     Done --> [*]
 ```
 
@@ -89,6 +89,7 @@ Every distinct outcome of `decide`, grouped by the column the ticket is in. *Gua
 | ReviewRequested | has_repo & !session_live & has_changes | Todo | RunReview |  |
 | ReviewRequested | has_repo & session_live & has_changes | Todo | StopSession, RunReview |  |
 | ReviewFinished | (any) | Todo | StopSession, MarkReviewed |  |
+| ProofFinished | (any) | Todo | StopSession, MarkProofDone |  |
 | FixFinished | (any) | In PR Review | CommitChanges, PushBranch |  |
 | AddressFinished | !pr_exists | For Your Review | CommitChanges |  |
 | AddressFinished | pr_exists | In PR Review | CommitChanges, PushBranch |  |
@@ -135,6 +136,7 @@ Every distinct outcome of `decide`, grouped by the column the ticket is in. *Gua
 | ReviewRequested | has_repo & !session_live & has_changes | In Progress | RunReview |  |
 | ReviewRequested | has_repo & session_live & has_changes | In Progress | StopSession, RunReview |  |
 | ReviewFinished | (any) | In Progress | StopSession, MarkReviewed |  |
+| ProofFinished | (any) | In Progress | StopSession, MarkProofDone |  |
 | FixFinished | (any) | In PR Review | CommitChanges, PushBranch |  |
 | AddressFinished | !pr_exists | For Your Review | CommitChanges |  |
 | AddressFinished | pr_exists | In PR Review | CommitChanges, PushBranch |  |
@@ -179,6 +181,7 @@ Every distinct outcome of `decide`, grouped by the column the ticket is in. *Gua
 | ReviewRequested | has_repo & !session_live & has_changes | For Your Review | RunReview |  |
 | ReviewRequested | has_repo & session_live & has_changes | For Your Review | StopSession, RunReview |  |
 | ReviewFinished | (any) | For Your Review | StopSession, MarkReviewed |  |
+| ProofFinished | (any) | For Your Review | StopSession, MarkProofDone |  |
 | FixFinished | (any) | In PR Review | CommitChanges, PushBranch |  |
 | AddressFinished | !pr_exists | For Your Review | CommitChanges |  |
 | AddressFinished | pr_exists | In PR Review | CommitChanges, PushBranch |  |
@@ -218,6 +221,7 @@ Every distinct outcome of `decide`, grouped by the column the ticket is in. *Gua
 | ReviewRequested | has_repo & !session_live & has_changes | In PR Review | RunReview |  |
 | ReviewRequested | has_repo & session_live & has_changes | In PR Review | StopSession, RunReview |  |
 | ReviewFinished | (any) | In PR Review | StopSession, MarkReviewed |  |
+| ProofFinished | (any) | In PR Review | StopSession, MarkProofDone |  |
 | FixFinished | (any) | In PR Review | CommitChanges, PushBranch |  |
 | AddressFinished | !pr_exists | For Your Review | CommitChanges |  |
 | AddressFinished | pr_exists | In PR Review | CommitChanges, PushBranch |  |
@@ -241,6 +245,7 @@ Every distinct outcome of `decide`, grouped by the column the ticket is in. *Gua
 | ReviewRequested | has_repo & !session_live & has_changes | Done | RunReview |  |
 | ReviewRequested | has_repo & session_live & has_changes | Done | StopSession, RunReview |  |
 | ReviewFinished | (any) | Done | StopSession, MarkReviewed |  |
+| ProofFinished | (any) | Done | StopSession, MarkProofDone |  |
 | FixFinished | (any) | In PR Review | CommitChanges, PushBranch |  |
 | AddressFinished | !pr_exists | For Your Review | CommitChanges |  |
 | AddressFinished | pr_exists | In PR Review | CommitChanges, PushBranch |  |

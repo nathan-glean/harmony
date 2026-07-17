@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { api } from "../api";
-import type { CiTriage, Ticket } from "../types";
+import { parseProofArtifacts, type CiTriage, type ProofArtifact, type Ticket } from "../types";
+import { MarkdownView } from "./MarkdownView";
 
 // gh's check buckets: pass | fail | pending | skipping | cancel
 function checkClass(c: any): string {
@@ -47,7 +49,64 @@ function parseTriage(json: string): CiTriage | null {
 
 const MAX_CI_FIX_ATTEMPTS = 3;
 
-/** The Proof tab: the PR's CI check status plus harmony's auto-fix triage verdict. */
+/** One captured artifact: image inline, video in a player, terminal cast / other as a link. */
+function ProofArtifactView({ art }: { art: ProofArtifact }) {
+  const src = convertFileSrc(art.path);
+  if (art.kind === "image") {
+    return (
+      <figure className="proof-art">
+        <img src={src} alt={art.caption} loading="lazy" />
+        <figcaption>{art.caption}</figcaption>
+      </figure>
+    );
+  }
+  if (art.kind === "video") {
+    return (
+      <figure className="proof-art">
+        <video src={src} controls preload="metadata" />
+        <figcaption>{art.caption}</figcaption>
+      </figure>
+    );
+  }
+  // cast / file — link out (opens with the OS default; casts aren't playable inline).
+  return (
+    <a className="proof-art-link" href={src} target="_blank" rel="noreferrer">
+      {art.kind === "cast" ? "▶ " : "📄 "}
+      {art.caption}
+    </a>
+  );
+}
+
+/** The evidence section: the grounded proof report + any captured media (video/screenshots). */
+function ProofEvidence({ ticket }: { ticket: Ticket }) {
+  const artifacts = parseProofArtifacts(ticket.proof_artifacts);
+  const hasProof = ticket.proof.trim().length > 0 || artifacts.length > 0;
+  if (!hasProof) {
+    return (
+      <div className="proof-evidence empty">
+        <p className="empty">
+          No proof yet — harmony captures evidence the change works (a walkthrough, screenshots, or a
+          grounded report) once it passes review.
+        </p>
+      </div>
+    );
+  }
+  return (
+    <div className="proof-evidence">
+      {artifacts.length > 0 && (
+        <div className="proof-gallery">
+          {artifacts.map((a, i) => (
+            <ProofArtifactView key={i} art={a} />
+          ))}
+        </div>
+      )}
+      {ticket.proof.trim() && <MarkdownView markdown={ticket.proof} />}
+    </div>
+  );
+}
+
+/** The Proof tab: the captured proof-of-work (evidence the change works), plus the PR's CI check
+ *  status and harmony's auto-fix triage verdict. */
 export function ProofPane({ ticket }: { ticket: Ticket }) {
   const ticketId = ticket.id;
   const [checks, setChecks] = useState<any[]>([]);
@@ -129,6 +188,11 @@ export function ProofPane({ ticket }: { ticket: Ticket }) {
 
   return (
     <div className="proofpane">
+      <div className="diffpane-head">
+        <span>Proof of work</span>
+      </div>
+      <ProofEvidence ticket={ticket} />
+
       <div className="diffpane-head">
         <span>CI status</span>
         <div className="diffpane-actions">

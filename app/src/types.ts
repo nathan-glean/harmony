@@ -23,7 +23,29 @@ export type Ticket = {
   proposed_spec: string; // markdown of a spec update Claude proposed (propose & confirm), "" when none
   activity: string; // JSON of the derived Activity (what's happening), "" until first computed
   orchestrator_note: string; // the orchestrator's last action + why (audit line), "" when none
+  proof: string; // proof-of-work report (markdown), "" until a proof run completes
+  proof_artifacts: string; // JSON array of ProofArtifact (captured media), "" when none
+  proof_sha: string; // HEAD the proof last evidenced ("" when never)
 };
+
+// One captured proof-of-work artifact (matches harmony_core::proof::ProofArtifact).
+export type ProofArtifact = {
+  kind: "image" | "video" | "cast" | "file";
+  path: string; // absolute local path under ~/.harmony/proof/<ticket> (served via the asset protocol)
+  caption: string;
+  url: string; // teammate-reachable URL once hosted for the PR comment ("" locally)
+};
+
+/** Parse a ticket's `proof_artifacts` JSON into a list; [] when empty/unparseable. */
+export function parseProofArtifacts(json: string): ProofArtifact[] {
+  if (!json) return [];
+  try {
+    const v = JSON.parse(json);
+    return Array.isArray(v) ? (v as ProofArtifact[]) : [];
+  } catch {
+    return [];
+  }
+}
 
 // The backend-derived "what's happening" status (matches harmony_core::activity::Activity).
 export type ActivityCategory = "working" | "waiting_on_you" | "waiting_external" | "idle";

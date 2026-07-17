@@ -3,6 +3,7 @@
 
 use anyhow::{anyhow, Result};
 use serde::Serialize;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn run(cmd: &str, args: &[&str], cwd: &str) -> Result<String> {
@@ -534,6 +535,159 @@ pub fn create_draft_pr(worktree: &str, title: &str, body: &str, branch: &str) ->
         .find(|l| l.trim_start().starts_with("http"))
         .map(|l| l.trim().to_string())
         .ok_or_else(|| anyhow!("gh pr create did not return a PR URL: {}", out.trim()))
+}
+
+// ---- proof-of-work: git hygiene, PR comment, media hosting -------------------------------------
+
+/// Append ignore patterns to this worktree's *local* git exclude (`$GIT_DIR/info/exclude`),
+/// idempotently. This never touches the repo's tracked `.gitignore`, so harmony-injected files and
+/// proof-capture leftovers stay out of `git add -A` without creating a diff the agent/team sees.
+pub fn add_git_excludes(worktree: &str, patterns: &[&str]) -> Result<()> {
+    let rel = run(
+        "git",
+        &["rev-parse", "--git-path", "info/exclude"],
+        worktree,
+    )?;
+    let rel = rel.trim();
+    let full = if Path::new(rel).is_absolute() {
+        PathBuf::from(rel)
+    } else {
+        Path::new(worktree).join(rel)
+    };
+    if let Some(parent) = full.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let existing = std::fs::read_to_string(&full).unwrap_or_default();
+    let mut add = String::new();
+    for p in patterns {
+        if !existing.lines().any(|l| l.trim() == *p) {
+            add.push_str(p);
+            add.push('\n');
+        }
+    }
+    if !add.is_empty() {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&full)?;
+        write!(f, "{add}")?;
+    }
+    Ok(())
+}
+
+/// Post a comment on the branch's PR (`gh pr comment` resolves the PR from the current branch). The
+/// body is piped via a temp file to avoid arg-length/escaping issues with long markdown.
+pub fn post_pr_comment(worktree: &str, body: &str) -> Result<()> {
+    let tmp = std::env::temp_dir().join(format!("harmony-proof-comment-{}.md", std::process::id()));
+    std::fs::write(&tmp, body)?;
+    let res = run(
+        "gh",
+        &[
+            "pr",
+            "comment",
+            "--body-file",
+            tmp.to_str().unwrap_or_default(),
+        ],
+        worktree,
+    );
+    let _ = std::fs::remove_file(&tmp);
+    res?;
+    Ok(())
+}
+
+/// `owner/repo` for the worktree's repo, via `gh`.
+fn repo_nwo(worktree: &str) -> Result<String> {
+    Ok(run(
+        "gh",
+        &[
+            "repo",
+            "view",
+            "--json",
+            "nameWithOwner",
+            "-q",
+            ".nameWithOwner",
+        ],
+        worktree,
+    )?
+    .trim()
+    .to_string())
+}
+
+/// The shared prerelease that hosts proof media (one per repo; teammate-reachable URLs, zero repo
+/// pollution — no binaries committed).
+const PROOF_RELEASE_TAG: &str = "harmony-proof";
+
+/// Host proof media as assets on the shared `harmony-proof` prerelease and fill each artifact's
+/// `url`. Images then render inline in the PR comment from their asset URLs; video/other files are
+/// linked. Best-effort per file — a failed upload leaves that `url` empty (the artifact still shows
+/// in harmony's Proof tab). Never returns an error: proof must not block the PR.
+///
+/// (Inline-playing video in the comment would require GitHub's undocumented `user-attachments`
+/// upload, which needs a browser-session token `gh` does not expose; release-asset hosting is the
+/// robust path — inline images, linked video.)
+pub fn host_proof_artifacts(
+    worktree: &str,
+    ticket_id: i64,
+    artifacts: &mut [crate::proof::ProofArtifact],
+) {
+    if artifacts.is_empty() {
+        return;
+    }
+    // Ensure the release exists (idempotent — ignore "already exists").
+    let _ = run(
+        "gh",
+        &[
+            "release",
+            "create",
+            PROOF_RELEASE_TAG,
+            "--prerelease",
+            "--title",
+            "harmony proof artifacts",
+            "--notes",
+            "Auto-managed by harmony: media evidence attached to PRs. Safe to ignore.",
+        ],
+        worktree,
+    );
+    let nwo = match repo_nwo(worktree) {
+        Ok(n) if !n.is_empty() => n,
+        _ => return,
+    };
+    // Stage namespaced copies so asset names don't collide across tickets in the shared release.
+    let stage = std::env::temp_dir().join(format!(
+        "harmony-proof-stage-{ticket_id}-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::create_dir_all(&stage);
+    for a in artifacts.iter_mut() {
+        let base = Path::new(&a.path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("artifact");
+        let asset = format!("t{ticket_id}-{base}");
+        let staged = stage.join(&asset);
+        if std::fs::copy(&a.path, &staged).is_err() {
+            continue;
+        }
+        let staged_s = staged.to_string_lossy().to_string();
+        if run(
+            "gh",
+            &[
+                "release",
+                "upload",
+                PROOF_RELEASE_TAG,
+                &staged_s,
+                "--clobber",
+            ],
+            worktree,
+        )
+        .is_ok()
+        {
+            a.url =
+                format!("https://github.com/{nwo}/releases/download/{PROOF_RELEASE_TAG}/{asset}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&stage);
 }
 
 #[cfg(test)]

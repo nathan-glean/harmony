@@ -29,6 +29,8 @@ pub enum SystemEvent {
     WorkFinished { ticket_id: i64 },
     /// A `/review` session finished.
     ReviewFinished { ticket_id: i64 },
+    /// A proof-of-work session finished capturing evidence (fingerprint HEAD + collect artifacts).
+    ProofFinished { ticket_id: i64 },
     /// An autonomous CI-fix session finished (commit + push its changes to re-trigger CI).
     FixFinished { ticket_id: i64 },
     /// A feedback-addressing session finished (commit + push so the PR reflects the changes).
@@ -170,6 +172,7 @@ async fn handle(Path(event): Path<String>, State(ctx): State<HookCtx>, body: Byt
                         let ev = match sess.kind.as_str() {
                             "work" => SystemEvent::WorkFinished { ticket_id: id },
                             "review" => SystemEvent::ReviewFinished { ticket_id: id },
+                            "proof" => SystemEvent::ProofFinished { ticket_id: id },
                             "fix" => SystemEvent::FixFinished { ticket_id: id },
                             "address" => SystemEvent::AddressFinished { ticket_id: id },
                             // Any other kind (e.g. `spec`/grill) has no domain event to tear it
@@ -312,6 +315,17 @@ async fn handle(Path(event): Path<String>, State(ctx): State<HookCtx>, body: Byt
                             ticket_id: sess.ticket_id,
                         });
                     }
+                }
+            }
+
+            // Proof session: the grounded report is written to a plan file — capture it as the
+            // ticket's `proof` text. Unlike review, the proof session runs with execute perms (it
+            // records the app / runs tests), so it fires a real `Stop`; completion + artifact
+            // collection happens there (`ProofFinished`), not here — the session keeps running after
+            // the report write to finish any capture.
+            if sess.kind == "proof" && event == "PreToolUse" {
+                if let Some(plan) = extract_plan(&v, tool) {
+                    let _ = store.set_ticket_proof(sess.ticket_id, &plan).await;
                 }
             }
 

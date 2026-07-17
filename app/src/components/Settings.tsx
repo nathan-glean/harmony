@@ -31,6 +31,7 @@ export function Settings({
   const [autoEndIdle, setAutoEndIdle] = useState(false);
   const [autoReview, setAutoReview] = useState(true);
   const [reviewLoop, setReviewLoop] = useState(false);
+  const [proof, setProof] = useState(true);
   const [autoMerge, setAutoMerge] = useState(false);
   const [orchestrator, setOrchestrator] = useState(false);
   const [maxConcurrent, setMaxConcurrent] = useState(3);
@@ -40,6 +41,7 @@ export function Settings({
     api.getAutoEndIdle().then(setAutoEndIdle).catch(() => {});
     api.getAutoReview().then(setAutoReview).catch(() => {});
     api.getReviewLoop().then(setReviewLoop).catch(() => {});
+    api.getProofEnabled().then(setProof).catch(() => {});
     api.getAutoMerge().then(setAutoMerge).catch(() => {});
     api.getOrchestrator().then(setOrchestrator).catch(() => {});
     api.getMaxConcurrent().then(setMaxConcurrent).catch(() => {});
@@ -66,6 +68,12 @@ export function Settings({
     const next = !reviewLoop;
     setReviewLoop(next);
     api.setReviewLoop(next).catch(() => setReviewLoop(!next));
+  };
+
+  const toggleProof = () => {
+    const next = !proof;
+    setProof(next);
+    api.setProofEnabled(next).catch(() => setProof(!next));
   };
 
   const toggleAutoMerge = () => {
@@ -130,6 +138,10 @@ export function Settings({
         <label className="muted" title="Self-correcting review loop: when /review of a 'For Your Review' card finds blocking issues, automatically fix them and re-review until clean (capped, then notifies you). Stays in 'For Your Review' for you to open the PR.">
           <input type="checkbox" checked={reviewLoop} onChange={toggleReviewLoop} /> Auto-fix review
           findings and re-review until clean
+        </label>
+        <label className="muted" title="Proof of work: once a change passes review, harmony runs a session that captures evidence it works — a walkthrough video, screenshots, or a grounded report with real command output — shown in the Proof tab and posted as a PR comment. Adds one session per ticket; degrades to a report when capture isn't possible.">
+          <input type="checkbox" checked={proof} onChange={toggleProof} /> Generate proof of work
+          (evidence the change works)
         </label>
         <label className="muted" title="When a PR is approved on GitHub and CI is green, automatically merge it and move the card to Done — no manual drag. Merges to your default branch; the agent never self-approves.">
           <input type="checkbox" checked={autoMerge} onChange={toggleAutoMerge} /> Auto-merge PRs once
