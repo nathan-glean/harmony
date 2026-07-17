@@ -76,7 +76,11 @@ pub fn parse_failing_checks(checks_json: &str) -> Vec<String> {
                 || state.eq_ignore_ascii_case("failure")
                 || state.eq_ignore_ascii_case("error")
         })
-        .filter_map(|c| c.get("name").and_then(|x| x.as_str()).map(|s| s.to_string()))
+        .filter_map(|c| {
+            c.get("name")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string())
+        })
         .collect()
 }
 
@@ -111,11 +115,19 @@ pub fn parse_base_red_checks(check_runs_json: &str) -> HashSet<String> {
         .iter()
         .filter(|c| {
             matches!(
-                c.get("conclusion").and_then(|x| x.as_str()).unwrap_or("").to_ascii_lowercase().as_str(),
+                c.get("conclusion")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase()
+                    .as_str(),
                 "failure" | "timed_out" | "startup_failure" | "action_required"
             )
         })
-        .filter_map(|c| c.get("name").and_then(|x| x.as_str()).map(|s| s.to_string()))
+        .filter_map(|c| {
+            c.get("name")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string())
+        })
         .collect()
 }
 
@@ -182,10 +194,20 @@ pub fn decide(
         return (false, "no attribution verdict available".into());
     };
     match v.category {
-        CiCategory::PrCaused if v.confidence >= threshold => {
-            (true, format!("PR-caused failure on a required check ({:.0}% confidence)", v.confidence * 100.0))
-        }
-        CiCategory::PrCaused => (false, format!("PR-caused but low confidence ({:.0}%)", v.confidence * 100.0)),
+        CiCategory::PrCaused if v.confidence >= threshold => (
+            true,
+            format!(
+                "PR-caused failure on a required check ({:.0}% confidence)",
+                v.confidence * 100.0
+            ),
+        ),
+        CiCategory::PrCaused => (
+            false,
+            format!(
+                "PR-caused but low confidence ({:.0}%)",
+                v.confidence * 100.0
+            ),
+        ),
         other => (false, format!("attributed as {other:?}, not auto-fixing")),
     }
 }
@@ -228,9 +250,14 @@ pub fn ci_verdict(worktree: &str, diff: &str, failing: &[String], logs: &str) ->
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(stdin_body.as_bytes());
     }
-    let out = child.wait_with_output().map_err(|e| crate::cmd_err::spawn_error("claude", &e))?;
+    let out = child
+        .wait_with_output()
+        .map_err(|e| crate::cmd_err::spawn_error("claude", &e))?;
     if !out.status.success() {
-        return Err(crate::cmd_err::classify("claude", &String::from_utf8_lossy(&out.stderr)));
+        return Err(crate::cmd_err::classify(
+            "claude",
+            &String::from_utf8_lossy(&out.stderr),
+        ));
     }
     parse_verdict(&String::from_utf8_lossy(&out.stdout))
         .ok_or_else(|| anyhow::anyhow!("could not parse CI verdict from claude output"))
@@ -277,7 +304,12 @@ fn truncate(s: &str, max: usize) -> String {
     }
     // For logs the tail (the actual error) is most useful; for diffs the head. We keep the tail
     // for logs by caller convention — here keep the head on a char boundary plus a marker.
-    let cut = s.char_indices().take_while(|(i, _)| *i <= max).last().map(|(i, _)| i).unwrap_or(0);
+    let cut = s
+        .char_indices()
+        .take_while(|(i, _)| *i <= max)
+        .last()
+        .map(|(i, _)| i)
+        .unwrap_or(0);
     format!("{}\n…(truncated)…", &s[..cut])
 }
 
@@ -323,7 +355,13 @@ pub fn triage(worktree: &str, base: &str, diff: &str) -> Result<CiTriage> {
         ci_verdict(worktree, diff, &failing, &logs).ok()
     };
 
-    let (actionable, reason) = decide(&failing, required.as_ref(), &base_red, verdict.as_ref(), CONFIDENCE_THRESHOLD);
+    let (actionable, reason) = decide(
+        &failing,
+        required.as_ref(),
+        &base_red,
+        verdict.as_ref(),
+        CONFIDENCE_THRESHOLD,
+    );
     Ok(CiTriage {
         head_sha: head,
         failing_checks: failing,
@@ -359,7 +397,12 @@ mod tests {
     use super::*;
 
     fn verdict(cat: CiCategory, conf: f32) -> CiVerdict {
-        CiVerdict { category: cat, confidence: conf, rationale: "r".into(), proposed_fix: "".into() }
+        CiVerdict {
+            category: cat,
+            confidence: conf,
+            rationale: "r".into(),
+            proposed_fix: "".into(),
+        }
     }
     fn set(items: &[&str]) -> HashSet<String> {
         items.iter().map(|s| s.to_string()).collect()
@@ -404,7 +447,11 @@ mod tests {
 
     #[test]
     fn decide_skips_unrelated_or_flaky() {
-        for cat in [CiCategory::UnrelatedInfra, CiCategory::Flaky, CiCategory::Undetermined] {
+        for cat in [
+            CiCategory::UnrelatedInfra,
+            CiCategory::Flaky,
+            CiCategory::Undetermined,
+        ] {
             let (act, _) = decide(
                 &["build".into()],
                 None,
@@ -483,10 +530,17 @@ mod tests {
 
     #[test]
     fn parse_required_checks_both_shapes() {
-        let new_shape = r#"{"checks":[{"context":"build","app_id":1},{"context":"test","app_id":2}]}"#;
-        assert_eq!(parse_required_checks(new_shape).unwrap(), set(&["build", "test"]));
+        let new_shape =
+            r#"{"checks":[{"context":"build","app_id":1},{"context":"test","app_id":2}]}"#;
+        assert_eq!(
+            parse_required_checks(new_shape).unwrap(),
+            set(&["build", "test"])
+        );
         let old_shape = r#"{"contexts":["build","lint"]}"#;
-        assert_eq!(parse_required_checks(old_shape).unwrap(), set(&["build", "lint"]));
+        assert_eq!(
+            parse_required_checks(old_shape).unwrap(),
+            set(&["build", "lint"])
+        );
         assert!(parse_required_checks("not json").is_none());
     }
 

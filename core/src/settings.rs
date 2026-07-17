@@ -93,7 +93,11 @@ pub fn remove_hooks(dir: &str, port: u16) -> Result<()> {
             for event in events {
                 if let Some(arr) = hooks.get_mut(&event).and_then(|a| a.as_array_mut()) {
                     let before = arr.len();
-                    arr.retain(|e| !serde_json::to_string(e).unwrap_or_default().contains(&needle));
+                    arr.retain(|e| {
+                        !serde_json::to_string(e)
+                            .unwrap_or_default()
+                            .contains(&needle)
+                    });
                     if arr.len() != before {
                         changed = true;
                     }
@@ -124,7 +128,8 @@ mod tests {
 
     fn temp_dir() -> std::path::PathBuf {
         let n = N.fetch_add(1, Ordering::SeqCst);
-        let p = std::env::temp_dir().join(format!("harmony-settings-test-{}-{n}", std::process::id()));
+        let p =
+            std::env::temp_dir().join(format!("harmony-settings-test-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&p).unwrap();
         p
     }

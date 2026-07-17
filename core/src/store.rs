@@ -127,9 +127,10 @@ impl Store {
         let _ = sqlx::query("ALTER TABLE sessions ADD COLUMN transcript_path TEXT")
             .execute(&self.pool)
             .await;
-        let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN pending_question TEXT NOT NULL DEFAULT ''")
-            .execute(&self.pool)
-            .await;
+        let _ =
+            sqlx::query("ALTER TABLE tickets ADD COLUMN pending_question TEXT NOT NULL DEFAULT ''")
+                .execute(&self.pool)
+                .await;
         let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN planned INTEGER NOT NULL DEFAULT 0")
             .execute(&self.pool)
             .await;
@@ -145,12 +146,15 @@ impl Store {
         let _ = sqlx::query("ALTER TABLE sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'work'")
             .execute(&self.pool)
             .await;
-        let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN acceptance_criteria TEXT NOT NULL DEFAULT ''")
-            .execute(&self.pool)
-            .await;
-        let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN relevant_paths TEXT NOT NULL DEFAULT ''")
-            .execute(&self.pool)
-            .await;
+        let _ = sqlx::query(
+            "ALTER TABLE tickets ADD COLUMN acceptance_criteria TEXT NOT NULL DEFAULT ''",
+        )
+        .execute(&self.pool)
+        .await;
+        let _ =
+            sqlx::query("ALTER TABLE tickets ADD COLUMN relevant_paths TEXT NOT NULL DEFAULT ''")
+                .execute(&self.pool)
+                .await;
         let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN constraints TEXT NOT NULL DEFAULT ''")
             .execute(&self.pool)
             .await;
@@ -163,51 +167,67 @@ impl Store {
         let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN review_text TEXT NOT NULL DEFAULT ''")
             .execute(&self.pool)
             .await;
-        let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN ci_triaged_sha TEXT NOT NULL DEFAULT ''")
-            .execute(&self.pool)
-            .await;
-        let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN ci_fix_attempts INTEGER NOT NULL DEFAULT 0")
-            .execute(&self.pool)
-            .await;
+        let _ =
+            sqlx::query("ALTER TABLE tickets ADD COLUMN ci_triaged_sha TEXT NOT NULL DEFAULT ''")
+                .execute(&self.pool)
+                .await;
+        let _ = sqlx::query(
+            "ALTER TABLE tickets ADD COLUMN ci_fix_attempts INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&self.pool)
+        .await;
         let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN ci_triage TEXT NOT NULL DEFAULT ''")
             .execute(&self.pool)
             .await;
-        let _ = sqlx::query("ALTER TABLE diff_comments ADD COLUMN end_line INTEGER NOT NULL DEFAULT 0")
-            .execute(&self.pool)
-            .await;
-        let _ = sqlx::query("ALTER TABLE diff_comments ADD COLUMN target TEXT NOT NULL DEFAULT 'diff'")
-            .execute(&self.pool)
-            .await;
+        let _ =
+            sqlx::query("ALTER TABLE diff_comments ADD COLUMN end_line INTEGER NOT NULL DEFAULT 0")
+                .execute(&self.pool)
+                .await;
+        let _ =
+            sqlx::query("ALTER TABLE diff_comments ADD COLUMN target TEXT NOT NULL DEFAULT 'diff'")
+                .execute(&self.pool)
+                .await;
         let _ = sqlx::query("ALTER TABLE diff_comments ADD COLUMN anchor TEXT NOT NULL DEFAULT ''")
             .execute(&self.pool)
             .await;
-        let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN proposed_spec TEXT NOT NULL DEFAULT ''")
-            .execute(&self.pool)
-            .await;
-        let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN review_verdict TEXT NOT NULL DEFAULT ''")
-            .execute(&self.pool)
-            .await;
-        let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN review_findings TEXT NOT NULL DEFAULT ''")
-            .execute(&self.pool)
-            .await;
+        let _ =
+            sqlx::query("ALTER TABLE tickets ADD COLUMN proposed_spec TEXT NOT NULL DEFAULT ''")
+                .execute(&self.pool)
+                .await;
+        let _ =
+            sqlx::query("ALTER TABLE tickets ADD COLUMN review_verdict TEXT NOT NULL DEFAULT ''")
+                .execute(&self.pool)
+                .await;
+        let _ =
+            sqlx::query("ALTER TABLE tickets ADD COLUMN review_findings TEXT NOT NULL DEFAULT ''")
+                .execute(&self.pool)
+                .await;
         let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN judged_sha TEXT NOT NULL DEFAULT ''")
             .execute(&self.pool)
             .await;
-        let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN review_fix_attempts INTEGER NOT NULL DEFAULT 0")
-            .execute(&self.pool)
-            .await;
+        let _ = sqlx::query(
+            "ALTER TABLE tickets ADD COLUMN review_fix_attempts INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&self.pool)
+        .await;
         let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN activity TEXT NOT NULL DEFAULT ''")
             .execute(&self.pool)
             .await;
-        let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN orchestrator_note TEXT NOT NULL DEFAULT ''")
-            .execute(&self.pool)
-            .await;
-        let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN orchestrator_seen TEXT NOT NULL DEFAULT ''")
-            .execute(&self.pool)
-            .await;
-        let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN restart_attempts INTEGER NOT NULL DEFAULT 0")
-            .execute(&self.pool)
-            .await;
+        let _ = sqlx::query(
+            "ALTER TABLE tickets ADD COLUMN orchestrator_note TEXT NOT NULL DEFAULT ''",
+        )
+        .execute(&self.pool)
+        .await;
+        let _ = sqlx::query(
+            "ALTER TABLE tickets ADD COLUMN orchestrator_seen TEXT NOT NULL DEFAULT ''",
+        )
+        .execute(&self.pool)
+        .await;
+        let _ = sqlx::query(
+            "ALTER TABLE tickets ADD COLUMN restart_attempts INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&self.pool)
+        .await;
         Ok(())
     }
 
@@ -269,13 +289,18 @@ impl Store {
             .fetch_one(&self.pool)
             .await?;
         if count > 0 {
-            return Err(anyhow::anyhow!("repo still has {count} worktree(s) — delete those first"));
+            return Err(anyhow::anyhow!(
+                "repo still has {count} worktree(s) — delete those first"
+            ));
         }
         sqlx::query("UPDATE tickets SET repo_id = NULL WHERE repo_id = ?")
             .bind(id)
             .execute(&self.pool)
             .await?;
-        sqlx::query("DELETE FROM repos WHERE id = ?").bind(id).execute(&self.pool).await?;
+        sqlx::query("DELETE FROM repos WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -411,8 +436,14 @@ impl Store {
     /// Delete a worktree row and its sessions (DB only; git worktree removal is the
     /// caller's job via `worktree::remove`).
     pub async fn delete_worktree(&self, id: i64) -> Result<()> {
-        sqlx::query("DELETE FROM sessions WHERE worktree_id = ?").bind(id).execute(&self.pool).await?;
-        sqlx::query("DELETE FROM worktrees WHERE id = ?").bind(id).execute(&self.pool).await?;
+        sqlx::query("DELETE FROM sessions WHERE worktree_id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM worktrees WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -431,9 +462,18 @@ impl Store {
     /// this only removes the local record — the Jira issue is untouched (and a later
     /// `sync` will re-add it).
     pub async fn delete_ticket(&self, id: i64) -> Result<()> {
-        sqlx::query("DELETE FROM sessions WHERE ticket_id = ?").bind(id).execute(&self.pool).await?;
-        sqlx::query("DELETE FROM worktrees WHERE ticket_id = ?").bind(id).execute(&self.pool).await?;
-        sqlx::query("DELETE FROM tickets WHERE id = ?").bind(id).execute(&self.pool).await?;
+        sqlx::query("DELETE FROM sessions WHERE ticket_id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM worktrees WHERE ticket_id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM tickets WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -484,7 +524,10 @@ impl Store {
 
     /// Latest known transcript path for any of a ticket's sessions (resumed sessions
     /// share the same Claude session id → same transcript file).
-    pub async fn latest_transcript_path_for_ticket(&self, ticket_id: i64) -> Result<Option<String>> {
+    pub async fn latest_transcript_path_for_ticket(
+        &self,
+        ticket_id: i64,
+    ) -> Result<Option<String>> {
         Ok(sqlx::query_scalar::<_, String>(
             "SELECT transcript_path FROM sessions
              WHERE ticket_id = ? AND transcript_path IS NOT NULL
@@ -518,12 +561,14 @@ impl Store {
 
     /// Update session state; keeps the previous `last_tool` when `tool` is None.
     pub async fn set_session_state(&self, id: i64, state: &str, tool: Option<&str>) -> Result<()> {
-        sqlx::query("UPDATE sessions SET state = ?, last_tool = COALESCE(?, last_tool) WHERE id = ?")
-            .bind(state)
-            .bind(tool)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "UPDATE sessions SET state = ?, last_tool = COALESCE(?, last_tool) WHERE id = ?",
+        )
+        .bind(state)
+        .bind(tool)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -618,7 +663,10 @@ impl Store {
     /// Most recent Claude session id for a ticket's **work** session, for `--resume`. Spec/grill
     /// sessions are excluded: the work session must start fresh from the captured spec, never
     /// resume (and continue) the grill interview's conversation.
-    pub async fn latest_claude_session_id_for_ticket(&self, ticket_id: i64) -> Result<Option<String>> {
+    pub async fn latest_claude_session_id_for_ticket(
+        &self,
+        ticket_id: i64,
+    ) -> Result<Option<String>> {
         Ok(sqlx::query_scalar::<_, String>(
             "SELECT claude_session_id FROM sessions
              WHERE ticket_id = ? AND claude_session_id IS NOT NULL AND kind = 'work'
@@ -795,10 +843,12 @@ impl Store {
 
     /// Increment the auto review-fix attempt counter (capped against runaway loops by the caller).
     pub async fn bump_review_fix_attempts(&self, id: i64) -> Result<()> {
-        sqlx::query("UPDATE tickets SET review_fix_attempts = review_fix_attempts + 1 WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "UPDATE tickets SET review_fix_attempts = review_fix_attempts + 1 WHERE id = ?",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -1024,7 +1074,10 @@ impl Store {
 
     /// Open (un-sent, un-resolved) comments for a ticket — the feedback to inject into
     /// Claude's next resume prompt.
-    pub async fn pending_diff_comments_for_ticket(&self, ticket_id: i64) -> Result<Vec<DiffComment>> {
+    pub async fn pending_diff_comments_for_ticket(
+        &self,
+        ticket_id: i64,
+    ) -> Result<Vec<DiffComment>> {
         Ok(sqlx::query_as::<_, DiffComment>(
             "SELECT * FROM diff_comments WHERE ticket_id = ? AND status = 'open'
              ORDER BY file_path ASC, line ASC, id ASC",
@@ -1036,10 +1089,12 @@ impl Store {
 
     /// Mark a ticket's open comments as sent (handed to Claude) so they aren't re-injected.
     pub async fn mark_diff_comments_sent(&self, ticket_id: i64) -> Result<()> {
-        sqlx::query("UPDATE diff_comments SET status = 'sent' WHERE ticket_id = ? AND status = 'open'")
-            .bind(ticket_id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "UPDATE diff_comments SET status = 'sent' WHERE ticket_id = ? AND status = 'open'",
+        )
+        .bind(ticket_id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 }

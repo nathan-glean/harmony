@@ -134,9 +134,9 @@ pub struct DiffComment {
     pub id: i64,
     pub ticket_id: i64,
     pub file_path: String,
-    pub line: i64,      // first line of the commented range (start)
-    pub end_line: i64,  // last line of the range; == line for a single-line comment
-    pub side: String,   // "new" | "old"
+    pub line: i64,     // first line of the commented range (start)
+    pub end_line: i64, // last line of the range; == line for a single-line comment
+    pub side: String,  // "new" | "old"
     pub body: String,
     pub status: String, // "open" | "sent" | "resolved"
     pub created_at: i64,

@@ -59,8 +59,7 @@ pub fn parse_spec(markdown: &str) -> SpecFields {
         let t = line.trim();
         let is_hash = t.starts_with('#');
         // A short bold (`**…**`) or colon-terminated line can also act as a section label.
-        let is_label =
-            (t.starts_with("**") && t.ends_with("**")) || t.ends_with(':');
+        let is_label = (t.starts_with("**") && t.ends_with("**")) || t.ends_with(':');
         let looks_like_heading = is_hash || (is_label && t.split_whitespace().count() <= 6);
 
         if looks_like_heading {
@@ -215,7 +214,8 @@ mod tests {
 
     #[test]
     fn tolerates_bold_and_colon_labels() {
-        let md = "Overview here.\n\n**Acceptance criteria**\n- works\n\nConstraints:\nkeep it small";
+        let md =
+            "Overview here.\n\n**Acceptance criteria**\n- works\n\nConstraints:\nkeep it small";
         let f = parse_spec(md);
         assert_eq!(f.acceptance_criteria, "- works");
         assert_eq!(f.constraints, "keep it small");
@@ -238,7 +238,10 @@ mod tests {
 
     #[test]
     fn proposed_diff_empty_when_no_proposal() {
-        let t = ticket_with(SpecFields { spec: "Body.".into(), ..Default::default() });
+        let t = ticket_with(SpecFields {
+            spec: "Body.".into(),
+            ..Default::default()
+        });
         assert_eq!(proposed_spec_diff(&t), "");
     }
 
@@ -252,7 +255,10 @@ mod tests {
         // Proposed spec changes the body and an acceptance criterion.
         t.proposed_spec = "Build the gadget.\n\n## Acceptance criteria\n- it works well".into();
         let diff = proposed_spec_diff(&t);
-        assert!(diff.starts_with("diff --git a/spec.md b/spec.md\n"), "diff: {diff}");
+        assert!(
+            diff.starts_with("diff --git a/spec.md b/spec.md\n"),
+            "diff: {diff}"
+        );
         assert!(diff.contains("--- a/spec.md"));
         assert!(diff.contains("+++ b/spec.md"));
         assert!(diff.contains("-Build the widget."));

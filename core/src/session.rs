@@ -87,7 +87,9 @@ impl SessionManager {
             .await?
             .ok_or_else(|| anyhow!("repo #{repo_id} missing"))?;
 
-        let wt = self.ensure_primary_worktree(&ticket, repo_id, &repo).await?;
+        let wt = self
+            .ensure_primary_worktree(&ticket, repo_id, &repo)
+            .await?;
 
         crate::settings::inject_hooks(&wt.path, self.hook_port)?;
 
@@ -98,16 +100,26 @@ impl SessionManager {
         let resume = if ticket.planned == 0 {
             None
         } else {
-            self.store.latest_claude_session_id_for_ticket(ticket_id).await?
+            self.store
+                .latest_claude_session_id_for_ticket(ticket_id)
+                .await?
         };
         // Autonomy (DESIGN Q1): map the configured setting to a real Claude permission mode.
         // Default is fully autonomous (`bypassPermissions`) — the worktree is isolated and the
         // run is unattended, so it must never stall on a permission prompt.
-        let mode = claude_mode(&self.store.get_setting("permission_mode").await?.unwrap_or_default());
+        let mode = claude_mode(
+            &self
+                .store
+                .get_setting("permission_mode")
+                .await?
+                .unwrap_or_default(),
+        );
         // On resume, fold any open reviewer comments left on the diff into the opening turn so
         // Claude addresses them; otherwise just continue. A fresh first run implements from spec.
         let pending = if resume.is_some() {
-            self.store.pending_diff_comments_for_ticket(ticket_id).await?
+            self.store
+                .pending_diff_comments_for_ticket(ticket_id)
+                .await?
         } else {
             Vec::new()
         };
@@ -156,7 +168,11 @@ impl SessionManager {
     /// and it inherits the repo's trust (an empty non-git scratch dir would hit Claude's
     /// interactive trust gate and never start). Plan mode keeps it read-only — it explores the
     /// checkout but makes no commits — and the later work session reuses the same worktree.
-    pub async fn start_spec_session(&self, ticket_id: i64, seed: Option<String>) -> Result<SessionHandle> {
+    pub async fn start_spec_session(
+        &self,
+        ticket_id: i64,
+        seed: Option<String>,
+    ) -> Result<SessionHandle> {
         let ticket = self
             .store
             .get_ticket(ticket_id)
@@ -171,7 +187,9 @@ impl SessionManager {
             .await?
             .ok_or_else(|| anyhow!("repo #{repo_id} missing"))?;
 
-        let wt = self.ensure_primary_worktree(&ticket, repo_id, &repo).await?;
+        let wt = self
+            .ensure_primary_worktree(&ticket, repo_id, &repo)
+            .await?;
         crate::settings::inject_hooks(&wt.path, self.hook_port)?;
         // Self-heal: an earlier version injected harmony's hooks into the repo root — remove
         // them so the user's own `claude` sessions in that repo stop reporting to harmony.
@@ -183,7 +201,10 @@ impl SessionManager {
 
         // worktree_id = 0: the spec session stays worktree-less in the DB (kept out of the
         // Sessions view); correlation is by cwd, which is now the unique worktree path.
-        let session_id = self.store.add_session(ticket_id, 0, &wt.path, "spec").await?;
+        let session_id = self
+            .store
+            .add_session(ticket_id, 0, &wt.path, "spec")
+            .await?;
         self.store.set_ticket_drafting(ticket_id, true).await?;
 
         Ok(SessionHandle {
@@ -211,14 +232,23 @@ impl SessionManager {
             .await?
             .ok_or_else(|| anyhow!("repo #{repo_id} missing"))?;
 
-        let wt = self.ensure_primary_worktree(&ticket, repo_id, &repo).await?;
+        let wt = self
+            .ensure_primary_worktree(&ticket, repo_id, &repo)
+            .await?;
         crate::settings::inject_hooks(&wt.path, self.hook_port)?;
 
         let prompt = render_review_prompt(&ticket);
         let (master, child) = spawn_claude(&wt.path, &prompt, None, "plan")?;
 
-        let session_id = self.store.add_session(ticket_id, wt.id, &wt.path, "review").await?;
-        Ok(SessionHandle { session_id, master, child })
+        let session_id = self
+            .store
+            .add_session(ticket_id, wt.id, &wt.path, "review")
+            .await?;
+        Ok(SessionHandle {
+            session_id,
+            master,
+            child,
+        })
     }
 
     /// Start an autonomous session to fix a failing CI check. Runs in the ticket's worktree with
@@ -240,15 +270,26 @@ impl SessionManager {
             .await?
             .ok_or_else(|| anyhow!("repo #{repo_id} missing"))?;
 
-        let wt = self.ensure_primary_worktree(&ticket, repo_id, &repo).await?;
+        let wt = self
+            .ensure_primary_worktree(&ticket, repo_id, &repo)
+            .await?;
         crate::settings::inject_hooks(&wt.path, self.hook_port)?;
 
         let prompt = render_ci_fix_prompt(context);
         let (master, child) = spawn_claude(&wt.path, &prompt, None, "bypassPermissions")?;
 
-        let session_id = self.store.add_session(ticket_id, wt.id, &wt.path, "fix").await?;
-        self.store.set_ticket_status(ticket_id, crate::status::WORKING).await?;
-        Ok(SessionHandle { session_id, master, child })
+        let session_id = self
+            .store
+            .add_session(ticket_id, wt.id, &wt.path, "fix")
+            .await?;
+        self.store
+            .set_ticket_status(ticket_id, crate::status::WORKING)
+            .await?;
+        Ok(SessionHandle {
+            session_id,
+            master,
+            child,
+        })
     }
 
     /// Start an autonomous session to fix the blocking issues the review-loop judge flagged. The
@@ -278,16 +319,31 @@ impl SessionManager {
             return Err(anyhow!("no review findings to address"));
         }
 
-        let wt = self.ensure_primary_worktree(&ticket, repo_id, &repo).await?;
+        let wt = self
+            .ensure_primary_worktree(&ticket, repo_id, &repo)
+            .await?;
         crate::settings::inject_hooks(&wt.path, self.hook_port)?;
 
-        let resume = self.store.latest_claude_session_id_for_ticket(ticket_id).await?;
+        let resume = self
+            .store
+            .latest_claude_session_id_for_ticket(ticket_id)
+            .await?;
         let prompt = crate::review::render_review_fix_prompt(&findings, &ticket);
-        let (master, child) = spawn_claude(&wt.path, &prompt, resume.as_deref(), "bypassPermissions")?;
+        let (master, child) =
+            spawn_claude(&wt.path, &prompt, resume.as_deref(), "bypassPermissions")?;
 
-        let session_id = self.store.add_session(ticket_id, wt.id, &wt.path, "address").await?;
-        self.store.set_ticket_status(ticket_id, crate::status::WORKING).await?;
-        Ok(SessionHandle { session_id, master, child })
+        let session_id = self
+            .store
+            .add_session(ticket_id, wt.id, &wt.path, "address")
+            .await?;
+        self.store
+            .set_ticket_status(ticket_id, crate::status::WORKING)
+            .await?;
+        Ok(SessionHandle {
+            session_id,
+            master,
+            child,
+        })
     }
 
     /// Start an autonomous session to address review feedback (comments from any surface) and
@@ -309,22 +365,40 @@ impl SessionManager {
             .await?
             .ok_or_else(|| anyhow!("repo #{repo_id} missing"))?;
 
-        let pending = self.store.pending_diff_comments_for_ticket(ticket_id).await?;
+        let pending = self
+            .store
+            .pending_diff_comments_for_ticket(ticket_id)
+            .await?;
         if pending.is_empty() {
             return Err(anyhow!("no pending feedback to address"));
         }
 
-        let wt = self.ensure_primary_worktree(&ticket, repo_id, &repo).await?;
+        let wt = self
+            .ensure_primary_worktree(&ticket, repo_id, &repo)
+            .await?;
         crate::settings::inject_hooks(&wt.path, self.hook_port)?;
 
-        let resume = self.store.latest_claude_session_id_for_ticket(ticket_id).await?;
+        let resume = self
+            .store
+            .latest_claude_session_id_for_ticket(ticket_id)
+            .await?;
         let prompt = render_feedback_prompt(&pending, &ticket);
-        let (master, child) = spawn_claude(&wt.path, &prompt, resume.as_deref(), "bypassPermissions")?;
+        let (master, child) =
+            spawn_claude(&wt.path, &prompt, resume.as_deref(), "bypassPermissions")?;
         self.store.mark_diff_comments_sent(ticket_id).await?;
 
-        let session_id = self.store.add_session(ticket_id, wt.id, &wt.path, "address").await?;
-        self.store.set_ticket_status(ticket_id, crate::status::WORKING).await?;
-        Ok(SessionHandle { session_id, master, child })
+        let session_id = self
+            .store
+            .add_session(ticket_id, wt.id, &wt.path, "address")
+            .await?;
+        self.store
+            .set_ticket_status(ticket_id, crate::status::WORKING)
+            .await?;
+        Ok(SessionHandle {
+            session_id,
+            master,
+            child,
+        })
     }
 
     /// Start a session to implement a just-accepted spec revision. The user accepted Claude's
@@ -348,16 +422,31 @@ impl SessionManager {
             .await?
             .ok_or_else(|| anyhow!("repo #{repo_id} missing"))?;
 
-        let wt = self.ensure_primary_worktree(&ticket, repo_id, &repo).await?;
+        let wt = self
+            .ensure_primary_worktree(&ticket, repo_id, &repo)
+            .await?;
         crate::settings::inject_hooks(&wt.path, self.hook_port)?;
 
-        let resume = self.store.latest_claude_session_id_for_ticket(ticket_id).await?;
+        let resume = self
+            .store
+            .latest_claude_session_id_for_ticket(ticket_id)
+            .await?;
         let prompt = render_implement_spec_prompt(&ticket);
-        let (master, child) = spawn_claude(&wt.path, &prompt, resume.as_deref(), "bypassPermissions")?;
+        let (master, child) =
+            spawn_claude(&wt.path, &prompt, resume.as_deref(), "bypassPermissions")?;
 
-        let session_id = self.store.add_session(ticket_id, wt.id, &wt.path, "address").await?;
-        self.store.set_ticket_status(ticket_id, crate::status::WORKING).await?;
-        Ok(SessionHandle { session_id, master, child })
+        let session_id = self
+            .store
+            .add_session(ticket_id, wt.id, &wt.path, "address")
+            .await?;
+        self.store
+            .set_ticket_status(ticket_id, crate::status::WORKING)
+            .await?;
+        Ok(SessionHandle {
+            session_id,
+            master,
+            child,
+        })
     }
 
     pub async fn end_session(&self, session_id: i64) -> Result<()> {
@@ -540,7 +629,10 @@ fn render_grill_prompt(t: &Ticket, seed: Option<&str>) -> String {
     let seed = if idea.trim().is_empty() {
         format!("We're scoping a new task: {}", t.title)
     } else {
-        format!("We're scoping a new task — \"{}\".\n\nInitial idea / context:\n{}", t.title, idea)
+        format!(
+            "We're scoping a new task — \"{}\".\n\nInitial idea / context:\n{}",
+            t.title, idea
+        )
     };
     format!(
         "{seed}\n\n\
@@ -575,7 +667,9 @@ pub fn render_transcript(path: &str) -> Result<String> {
             .and_then(|m| m.get("role"))
             .and_then(|x| x.as_str())
             .unwrap_or(typ);
-        let content_node = msg.and_then(|m| m.get("content")).or_else(|| v.get("content"));
+        let content_node = msg
+            .and_then(|m| m.get("content"))
+            .or_else(|| v.get("content"));
         let text = extract_blocks(content_node);
         let text = text.trim();
         if text.is_empty() {
@@ -639,7 +733,10 @@ pub fn latest_progress(path: &str) -> Option<TranscriptProgress> {
             Err(_) => continue,
         };
         let msg = v.get("message");
-        let role = msg.and_then(|m| m.get("role")).and_then(|x| x.as_str()).unwrap_or("");
+        let role = msg
+            .and_then(|m| m.get("role"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
         if role != "assistant" {
             continue;
         }
@@ -816,15 +913,30 @@ mod tests {
         // Every spawned session must pass --strict-mcp-config so a fresh worktree can't hang on the
         // MCP trust prompt / a slow MCP connection at startup.
         let a = claude_args("do it", None, "bypassPermissions");
-        assert!(a.iter().any(|s| s == "--strict-mcp-config"), "missing --strict-mcp-config: {a:?}");
-        assert_eq!(a.windows(2).find(|w| w[0] == "--permission-mode").map(|w| &w[1]), Some(&"bypassPermissions".to_string()));
-        assert_eq!(a.last().unwrap(), "do it", "prompt must be the final positional arg");
+        assert!(
+            a.iter().any(|s| s == "--strict-mcp-config"),
+            "missing --strict-mcp-config: {a:?}"
+        );
+        assert_eq!(
+            a.windows(2)
+                .find(|w| w[0] == "--permission-mode")
+                .map(|w| &w[1]),
+            Some(&"bypassPermissions".to_string())
+        );
+        assert_eq!(
+            a.last().unwrap(),
+            "do it",
+            "prompt must be the final positional arg"
+        );
         assert!(!a.iter().any(|s| s == "--resume"));
 
         // Resume threads the id through and still disables MCP.
         let r = claude_args("go", Some("sess-123"), "plan");
         assert!(r.iter().any(|s| s == "--strict-mcp-config"));
-        assert_eq!(r.windows(2).find(|w| w[0] == "--resume").map(|w| &w[1]), Some(&"sess-123".to_string()));
+        assert_eq!(
+            r.windows(2).find(|w| w[0] == "--resume").map(|w| &w[1]),
+            Some(&"sess-123".to_string())
+        );
         assert_eq!(r.last().unwrap(), "go");
     }
 
@@ -833,8 +945,20 @@ mod tests {
         let comments = vec![
             dc("general", "", "", 0, "rename the module"),
             dc("diff", "", "src/x.rs", 42, "off by one"),
-            dc("review", "the funnel is wrong", "", 0, "disagree, see below"),
-            dc("pr_comment", "alice: \"nit: naming\"", "", 0, "ignore this one"),
+            dc(
+                "review",
+                "the funnel is wrong",
+                "",
+                0,
+                "disagree, see below",
+            ),
+            dc(
+                "pr_comment",
+                "alice: \"nit: naming\"",
+                "",
+                0,
+                "ignore this one",
+            ),
         ];
         let out = render_feedback_prompt(&comments, &ticket(""));
         assert!(out.contains("General comments:"));
@@ -849,7 +973,10 @@ mod tests {
 
     #[test]
     fn feedback_prompt_includes_spec_reconcile_block() {
-        let out = render_feedback_prompt(&[dc("general", "", "", 0, "x")], &ticket("Must support CSV export."));
+        let out = render_feedback_prompt(
+            &[dc("general", "", "", 0, "x")],
+            &ticket("Must support CSV export."),
+        );
         assert!(out.contains("# Spec"));
         assert!(out.contains("Must support CSV export."));
         assert!(out.contains("do NOT silently"));

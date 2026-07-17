@@ -92,7 +92,10 @@ pub fn judge(worktree: &str, review_text: &str, diff: &str) -> Result<Judgement>
         .wait_with_output()
         .map_err(|e| crate::cmd_err::spawn_error("claude", &e))?;
     if !out.status.success() {
-        return Err(crate::cmd_err::classify("claude", &String::from_utf8_lossy(&out.stderr)));
+        return Err(crate::cmd_err::classify(
+            "claude",
+            &String::from_utf8_lossy(&out.stderr),
+        ));
     }
     Ok(parse_judgement(&String::from_utf8_lossy(&out.stdout)))
 }
@@ -101,9 +104,16 @@ pub fn judge(worktree: &str, review_text: &str, diff: &str) -> Result<Judgement>
 /// the auto-fix loop — anything else (incl. `PASS`, an empty or unparseable reply) is treated as
 /// `Pass` so the loop never spins on garbage; the change just waits for the human.
 fn parse_judgement(raw: &str) -> Judgement {
-    let first = raw.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    let first = raw
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
     if !first.eq_ignore_ascii_case(CHANGES_REQUESTED) {
-        return Judgement { verdict: Verdict::Pass, findings: vec![] };
+        return Judgement {
+            verdict: Verdict::Pass,
+            findings: vec![],
+        };
     }
     let findings: Vec<String> = raw
         .lines()
@@ -112,7 +122,10 @@ fn parse_judgement(raw: &str) -> Judgement {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
-    Judgement { verdict: Verdict::ChangesRequested, findings }
+    Judgement {
+        verdict: Verdict::ChangesRequested,
+        findings,
+    }
 }
 
 /// Render the autonomous review-fix session's prompt from the judge's must-fix findings. The
@@ -188,7 +201,12 @@ mod tests {
     #[test]
     fn unparseable_is_failsafe_pass() {
         // Garbage / empty must not trigger the fix loop.
-        for raw in ["", "   \n\n", "I think this is mostly fine?", "VERDICT: maybe"] {
+        for raw in [
+            "",
+            "   \n\n",
+            "I think this is mostly fine?",
+            "VERDICT: maybe",
+        ] {
             assert_eq!(parse_judgement(raw).verdict, Verdict::Pass, "raw={raw:?}");
         }
     }

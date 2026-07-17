@@ -171,7 +171,11 @@ pub struct Decision {
 impl Decision {
     /// A refusal that leaves the ticket where it was.
     pub fn blocked(from: Column, reason: &'static str) -> Decision {
-        Decision { target: from, actions: Vec::new(), blocked: Some(reason) }
+        Decision {
+            target: from,
+            actions: Vec::new(),
+            blocked: Some(reason),
+        }
     }
 }
 
@@ -196,7 +200,11 @@ pub fn decide(event: Event, ctx: &Ctx) -> Decision {
         if ctx.has_changes && !ctx.review_current {
             actions.push(RunReview);
         }
-        Decision { target: HumanReview, actions, blocked: None }
+        Decision {
+            target: HumanReview,
+            actions,
+            blocked: None,
+        }
     };
 
     match event {
@@ -204,7 +212,11 @@ pub fn decide(event: Event, ctx: &Ctx) -> Decision {
             // Re-moving to the current column is a no-op (incl. Done → Done — handled before the
             // terminal-Done guard so it isn't reported as blocked).
             if to == ctx.from {
-                return Decision { target: ctx.from, actions: vec![], blocked: None };
+                return Decision {
+                    target: ctx.from,
+                    actions: vec![],
+                    blocked: None,
+                };
             }
             // Done is terminal.
             if ctx.from == Done {
@@ -215,16 +227,32 @@ pub fn decide(event: Event, ctx: &Ctx) -> Decision {
                 return Decision::blocked(ctx.from, "assign a repo first");
             }
             match to {
-                Todo => Decision { target: Todo, actions: stop_if_live(), blocked: None },
+                Todo => Decision {
+                    target: Todo,
+                    actions: stop_if_live(),
+                    blocked: None,
+                },
                 InProgress => {
                     if ctx.drafting {
                         Decision::blocked(ctx.from, "finish the interview first")
                     } else if !ctx.has_spec {
-                        Decision { target: InProgress, actions: vec![StartGrill], blocked: None }
+                        Decision {
+                            target: InProgress,
+                            actions: vec![StartGrill],
+                            blocked: None,
+                        }
                     } else if ctx.planned {
-                        Decision { target: InProgress, actions: vec![ResumeWork], blocked: None }
+                        Decision {
+                            target: InProgress,
+                            actions: vec![ResumeWork],
+                            blocked: None,
+                        }
                     } else {
-                        Decision { target: InProgress, actions: vec![EnsureWorktree, StartImplement], blocked: None }
+                        Decision {
+                            target: InProgress,
+                            actions: vec![EnsureWorktree, StartImplement],
+                            blocked: None,
+                        }
                     }
                 }
                 HumanReview => enter_human_review(),
@@ -239,7 +267,11 @@ pub fn decide(event: Event, ctx: &Ctx) -> Decision {
                         if !ctx.pr_exists {
                             actions.push(OpenPr);
                         }
-                        Decision { target: Pr, actions, blocked: None }
+                        Decision {
+                            target: Pr,
+                            actions,
+                            blocked: None,
+                        }
                     }
                 }
                 Done => {
@@ -250,7 +282,11 @@ pub fn decide(event: Event, ctx: &Ctx) -> Decision {
                     if ctx.has_worktree {
                         actions.push(DeleteWorktree);
                     }
-                    Decision { target: Done, actions, blocked: None }
+                    Decision {
+                        target: Done,
+                        actions,
+                        blocked: None,
+                    }
                 }
             }
         }
@@ -264,7 +300,11 @@ pub fn decide(event: Event, ctx: &Ctx) -> Decision {
             } else if ctx.drafting {
                 Decision::blocked(ctx.from, "already drafting a spec")
             } else {
-                Decision { target: Todo, actions: vec![StartGrill], blocked: None }
+                Decision {
+                    target: Todo,
+                    actions: vec![StartGrill],
+                    blocked: None,
+                }
             }
         }
 
@@ -276,7 +316,11 @@ pub fn decide(event: Event, ctx: &Ctx) -> Decision {
                 actions.push(EnsureWorktree);
                 actions.push(StartImplement);
             }
-            Decision { target: ctx.from, actions, blocked: None }
+            Decision {
+                target: ctx.from,
+                actions,
+                blocked: None,
+            }
         }
 
         // Autonomous work done → commit the changes, move to Human review and review them. A
@@ -285,17 +329,29 @@ pub fn decide(event: Event, ctx: &Ctx) -> Decision {
         // the user, so leave the session live in In Progress.
         Event::WorkFinished => {
             if ctx.from != InProgress {
-                return Decision { target: ctx.from, actions: vec![], blocked: None };
+                return Decision {
+                    target: ctx.from,
+                    actions: vec![],
+                    blocked: None,
+                };
             }
             if ctx.user_question_pending {
-                return Decision { target: InProgress, actions: vec![], blocked: None };
+                return Decision {
+                    target: InProgress,
+                    actions: vec![],
+                    blocked: None,
+                };
             }
             // Commit first so the review and the reviewed-SHA fingerprint see committed state.
             let mut actions = vec![CommitChanges, StopSession];
             if ctx.has_changes && !ctx.review_current {
                 actions.push(RunReview);
             }
-            Decision { target: HumanReview, actions, blocked: None }
+            Decision {
+                target: HumanReview,
+                actions,
+                blocked: None,
+            }
         }
 
         // User pressed "Request review": (re-)run `/review` in place, ignoring `review_current`
@@ -309,21 +365,29 @@ pub fn decide(event: Event, ctx: &Ctx) -> Decision {
             } else {
                 let mut actions = stop_if_live();
                 actions.push(RunReview);
-                Decision { target: ctx.from, actions, blocked: None }
+                Decision {
+                    target: ctx.from,
+                    actions,
+                    blocked: None,
+                }
             }
         }
 
         // The /review run finished: stop its session and fingerprint the reviewed HEAD (so the
         // column-entry review isn't re-run until the branch moves). The ticket stays where it is.
-        Event::ReviewFinished => {
-            Decision { target: ctx.from, actions: vec![StopSession, MarkReviewed], blocked: None }
-        }
+        Event::ReviewFinished => Decision {
+            target: ctx.from,
+            actions: vec![StopSession, MarkReviewed],
+            blocked: None,
+        },
 
         // An autonomous CI-fix session finished: commit + push its changes (re-triggers CI). The
         // card belongs in the PR column (that's the only stage CI-fixes run in).
-        Event::FixFinished => {
-            Decision { target: Pr, actions: vec![CommitChanges, PushBranch], blocked: None }
-        }
+        Event::FixFinished => Decision {
+            target: Pr,
+            actions: vec![CommitChanges, PushBranch],
+            blocked: None,
+        },
 
         // A feedback-addressing session finished: commit, and push only when a PR already exists
         // (so we don't create a remote branch pre-PR). Land back in the review column — PR if a PR
@@ -336,7 +400,11 @@ pub fn decide(event: Event, ctx: &Ctx) -> Decision {
             } else {
                 HumanReview
             };
-            Decision { target, actions, blocked: None }
+            Decision {
+                target,
+                actions,
+                blocked: None,
+            }
         }
 
         // An idle session came to rest with no domain event to tear it down. Free its PTY when
@@ -348,7 +416,11 @@ pub fn decide(event: Event, ctx: &Ctx) -> Decision {
             } else {
                 vec![]
             };
-            Decision { target: ctx.from, actions, blocked: None }
+            Decision {
+                target: ctx.from,
+                actions,
+                blocked: None,
+            }
         }
     }
 }

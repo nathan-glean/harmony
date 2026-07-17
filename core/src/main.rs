@@ -150,7 +150,11 @@ async fn main() -> Result<()> {
 
     match cli.cmd {
         Cmd::Repo { cmd } => match cmd {
-            RepoCmd::Add { name, path, project } => {
+            RepoCmd::Add {
+                name,
+                path,
+                project,
+            } => {
                 let id = store.add_repo(&name, &path, project.as_deref()).await?;
                 println!("added repo #{id}: {name}");
             }
@@ -171,7 +175,12 @@ async fn main() -> Result<()> {
             }
         },
         Cmd::Ticket { cmd } => match cmd {
-            TicketCmd::Add { title, key, spec, repo } => {
+            TicketCmd::Add {
+                title,
+                key,
+                spec,
+                repo,
+            } => {
                 let repo_id = match repo {
                     Some(n) => Some(
                         store
@@ -184,7 +193,13 @@ async fn main() -> Result<()> {
                 };
                 let source = if key.is_some() { "jira" } else { "local" };
                 let id = store
-                    .add_ticket(key.as_deref(), source, &title, spec.as_deref().unwrap_or(""), repo_id)
+                    .add_ticket(
+                        key.as_deref(),
+                        source,
+                        &title,
+                        spec.as_deref().unwrap_or(""),
+                        repo_id,
+                    )
                     .await?;
                 println!("added ticket #{id}");
             }
@@ -206,7 +221,9 @@ async fn main() -> Result<()> {
             }
             TicketCmd::Move { id, status } => {
                 if !harmony_core::status::is_valid(&status) {
-                    anyhow::bail!("invalid status '{status}' (todo|working|waiting|in_review|done)");
+                    anyhow::bail!(
+                        "invalid status '{status}' (todo|working|waiting|in_review|done)"
+                    );
                 }
                 store.set_ticket_status(id, &status).await?;
                 println!("moved #{id} → {status}");
@@ -222,17 +239,34 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             for s in store.list_sessions().await? {
-                let state = if s.ended_at.is_some() { "ended" } else { s.state.as_str() };
-                let key = s.jira_key.clone().unwrap_or_else(|| format!("local#{}", s.ticket_id));
-                let sid = s.claude_session_id.as_deref().map(|c| &c[..8.min(c.len())]).unwrap_or("-");
-                println!("#{:<3} {:<8} {:<12} {}  [{}]", s.id, state, key, s.ticket_title, sid);
+                let state = if s.ended_at.is_some() {
+                    "ended"
+                } else {
+                    s.state.as_str()
+                };
+                let key = s
+                    .jira_key
+                    .clone()
+                    .unwrap_or_else(|| format!("local#{}", s.ticket_id));
+                let sid = s
+                    .claude_session_id
+                    .as_deref()
+                    .map(|c| &c[..8.min(c.len())])
+                    .unwrap_or("-");
+                println!(
+                    "#{:<3} {:<8} {:<12} {}  [{}]",
+                    s.id, state, key, s.ticket_title, sid
+                );
             }
         }
         Cmd::Worktrees { delete } => {
             if let Some(id) = delete {
                 if let Some(wt) = store.get_worktree(id).await? {
                     if let Some(repo) = store.get_repo(wt.repo_id).await? {
-                        let _ = harmony_core::worktree::remove(&repo.path, std::path::Path::new(&wt.path));
+                        let _ = harmony_core::worktree::remove(
+                            &repo.path,
+                            std::path::Path::new(&wt.path),
+                        );
                     }
                 }
                 store.delete_worktree(id).await?;
@@ -240,11 +274,22 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             for w in store.list_worktrees().await? {
-                let key = w.jira_key.clone().unwrap_or_else(|| format!("local#{}", w.ticket_id));
-                println!("#{:<3} {:<12} {:<10} {:<28} {}", w.id, key, w.repo_name, w.branch, w.path);
+                let key = w
+                    .jira_key
+                    .clone()
+                    .unwrap_or_else(|| format!("local#{}", w.ticket_id));
+                println!(
+                    "#{:<3} {:<12} {:<10} {:<28} {}",
+                    w.id, key, w.repo_name, w.branch, w.path
+                );
             }
         }
-        Cmd::Start { ticket_id, repo, port, no_jira } => {
+        Cmd::Start {
+            ticket_id,
+            repo,
+            port,
+            no_jira,
+        } => {
             start_flow(store, ticket_id, repo, port, no_jira).await?;
         }
         Cmd::Jira { cmd } => match cmd {
@@ -271,7 +316,8 @@ async fn main() -> Result<()> {
                 let issues = harmony_core::jira::search_assigned().await?;
                 let (mut new, mut upd) = (0, 0);
                 for issue in &issues {
-                    let (_, inserted) = store.upsert_jira_ticket(&issue.key, &issue.summary).await?;
+                    let (_, inserted) =
+                        store.upsert_jira_ticket(&issue.key, &issue.summary).await?;
                     if inserted {
                         new += 1;
                     } else {
@@ -282,7 +328,12 @@ async fn main() -> Result<()> {
                 println!("synced {} issue(s): {new} new, {upd} updated", issues.len());
             }
         },
-        Cmd::Pr { ticket_id, title, no_writeback, no_summary } => {
+        Cmd::Pr {
+            ticket_id,
+            title,
+            no_writeback,
+            no_summary,
+        } => {
             pr_flow(&store, ticket_id, title, !no_writeback, !no_summary).await?;
         }
     }
@@ -316,7 +367,9 @@ async fn pr_flow(
     let wt = store
         .primary_worktree_for_ticket(ticket_id)
         .await?
-        .ok_or_else(|| anyhow!("ticket #{ticket_id} has no worktree — run `harmony start` first"))?;
+        .ok_or_else(|| {
+            anyhow!("ticket #{ticket_id} has no worktree — run `harmony start` first")
+        })?;
     let repo = store
         .get_repo(wt.repo_id)
         .await?
@@ -341,7 +394,9 @@ async fn pr_flow(
     harmony_core::github::push_branch(&wt.path, &wt.branch)?;
     println!("[pr] opening draft PR …");
     let url = harmony_core::github::create_draft_pr(&wt.path, &pr_title, &body, &wt.branch)?;
-    store.set_ticket_status(ticket_id, harmony_core::status::IN_REVIEW).await?;
+    store
+        .set_ticket_status(ticket_id, harmony_core::status::IN_REVIEW)
+        .await?;
     println!("[pr] {url}");
 
     if writeback {
@@ -350,7 +405,9 @@ async fn pr_flow(
                 Ok(()) => println!("[jira] {key} → In Review"),
                 Err(e) => eprintln!("[jira] transition skipped: {e}"),
             }
-            match harmony_core::jira::add_comment(key, &format!("PR opened by harmony: {url}")).await {
+            match harmony_core::jira::add_comment(key, &format!("PR opened by harmony: {url}"))
+                .await
+            {
                 Ok(()) => println!("[jira] PR link commented on {key}"),
                 Err(e) => eprintln!("[jira] comment skipped: {e}"),
             }
@@ -437,11 +494,20 @@ impl Drop for RawGuard {
 /// Shift+Tab, Ctrl-C, etc.) pass straight through to Claude instead of being
 /// interpreted/echoed by the shell. (The Phase 3 UI does this via xterm.js.)
 async fn bridge_and_wait(mgr: &SessionManager, handle: SessionHandle) -> Result<()> {
-    let SessionHandle { session_id, master, child } = handle;
+    let SessionHandle {
+        session_id,
+        master,
+        child,
+    } = handle;
 
     // Size the PTY to the real terminal, then go raw for the duration of the bridge.
     if let Ok((cols, rows)) = crossterm::terminal::size() {
-        let _ = master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+        let _ = master.resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
     }
     let _raw = RawGuard::enable();
 

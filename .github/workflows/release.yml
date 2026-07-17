@@ -1,0 +1,62 @@
+name: Release
+
+# Cut a GitHub Release with an installable macOS .dmg whenever a v* tag is pushed.
+# Flow: bump the version (tauri.conf.json + the two Cargo.toml + package.json), commit
+# "Release vX.Y.Z", then `git tag vX.Y.Z && git push --tags`. tauri-action builds the
+# bundle and uploads it. `workflow_dispatch` builds without publishing (a dry run).
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build + release (macOS, Apple Silicon)
+    # macos-14 runners are arm64, so the native build is aarch64 — no --target needed.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.16.0"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install frontend deps
+        working-directory: app
+        run: npm ci
+
+      # Builds the frontend (beforeBuildCommand) + the Tauri bundle (.app + .dmg), then
+      # on a tag push creates the release and uploads the .dmg. On workflow_dispatch the
+      # tag name is empty, so it only builds (no release) — a safe dry run.
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: app
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          releaseName: harmony ${{ github.ref_name }}
+          releaseDraft: false
+          prerelease: false
+          args: ""
+          releaseBody: |
+            ### Install (macOS, Apple Silicon)
+
+            Download **harmony_*_aarch64.dmg** below, open it, and drag **harmony** to
+            Applications.
+
+            The app is **unsigned**, so macOS quarantines it and may say it's "damaged" —
+            it isn't. Clear the quarantine flag once, then open it normally:
+
+            ```
+            xattr -cr /Applications/harmony.app
+            ```
