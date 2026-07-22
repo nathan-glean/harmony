@@ -214,9 +214,13 @@ impl SessionManager {
         })
     }
 
-    /// Start a read-only `/review` session in the ticket's worktree: Claude reviews the branch's
-    /// changes against the spec and prints suggestions, then ends (the executor stops it on the
-    /// review session's Stop). Plan mode keeps it strictly read-only — it never edits.
+    /// Start a `/review` session in the ticket's worktree: Claude reviews the branch's changes
+    /// against the spec and writes its verdict, then ends (the executor stops it on the review's
+    /// Stop, or the watchdog recovers it). Runs in the configured autonomous mode (default
+    /// `bypassPermissions`), NOT plan mode: plan mode prompts for approval on every bash command
+    /// (the review runs the test suite), which stalls the unattended run — and it made completion
+    /// depend on the fragile ExitPlanMode capture. Read-only is enforced by the prompt instead;
+    /// harmony never commits a review session's changes.
     pub async fn start_review(&self, ticket_id: i64) -> Result<SessionHandle> {
         let ticket = self
             .store
@@ -237,8 +241,16 @@ impl SessionManager {
             .await?;
         crate::settings::inject_hooks(&wt.path, self.hook_port)?;
 
+        // Same autonomy as work sessions — no approval prompts on the review's test/build commands.
+        let mode = claude_mode(
+            &self
+                .store
+                .get_setting("permission_mode")
+                .await?
+                .unwrap_or_default(),
+        );
         let prompt = render_review_prompt(&ticket);
-        let (master, child) = spawn_claude(&wt.path, &prompt, None, "plan")?;
+        let (master, child) = spawn_claude(&wt.path, &prompt, None, mode)?;
 
         let session_id = self
             .store
@@ -512,15 +524,22 @@ impl SessionManager {
 
 /// Opening prompt for a `/review` session (pre-PR human-review sanity check): run the project's
 /// review skill over this branch's changes and surface concrete suggestions for the user to read
-/// before they open a PR. Read-only (plan mode).
+/// before they open a PR. Runs autonomously (not plan mode), so read-only is enforced here: the
+/// review may READ files and RUN non-mutating checks (tests/build) but must not modify the repo. The
+/// verdict is captured from the session's final message (and any plan-file write), so it must be the
+/// last thing produced. `ExitPlanMode` is not used (not plan mode).
 fn render_review_prompt(t: &Ticket) -> String {
     format!(
         "Run the `/review` skill on the changes this branch makes versus its base. Review against \
          the ticket's intent below, and produce a concise, prioritised list of concerns \
          (correctness, edge cases, missing tests, scope creep) and any concrete fixes you'd \
-         suggest — this is a pre-PR sanity check for the human. Write your full review to your \
-         plan file as a single, complete document (this is how the review is surfaced to the \
-         human). Do not make any edits to the repo.\n\n\
+         suggest — this is a pre-PR sanity check for the human.\n\n\
+         This is a STRICTLY READ-ONLY review: you may read files and run non-mutating commands (e.g. \
+         the test suite, a type-check) to verify claims, but do NOT create, edit, or delete any \
+         files, and do NOT run `git add`/`commit`/`push` or `ExitPlanMode`. Work autonomously to \
+         completion — no human is watching, so do not ask for confirmation.\n\n\
+         When done, present your COMPLETE review as your final message (this is how it's surfaced to \
+         the human) — a single, self-contained document, not a pointer to something else.\n\n\
          # {}\n\n{}",
         t.title,
         crate::spec::compose_spec(t)
@@ -941,15 +960,18 @@ pub fn transcript_turn_state(path: &str) -> TurnState {
     }
     match msg.and_then(|m| m.get("content")) {
         Some(Value::Array(arr)) => {
-            let (mut has_text, mut has_tool, mut asks_question) = (false, false, false);
+            let (mut has_text, mut has_tool, mut asks_question, mut exits_plan) =
+                (false, false, false, false);
             for b in arr {
                 match b.get("type").and_then(|x| x.as_str()).unwrap_or("") {
-                    "tool_use" => {
-                        has_tool = true;
-                        if b.get("name").and_then(|x| x.as_str()) == Some("AskUserQuestion") {
-                            asks_question = true;
-                        }
-                    }
+                    "tool_use" => match b.get("name").and_then(|x| x.as_str()) {
+                        // User-gated tools: the turn is at rest waiting on the human, not mid-work.
+                        Some("AskUserQuestion") => asks_question = true,
+                        // Plan-mode sessions (grill/review) end by presenting their plan via
+                        // ExitPlanMode; nothing runs after it autonomously, so it IS the finish.
+                        Some("ExitPlanMode") => exits_plan = true,
+                        _ => has_tool = true,
+                    },
                     "text"
                         if b.get("text")
                             .and_then(|x| x.as_str())
@@ -963,6 +985,8 @@ pub fn transcript_turn_state(path: &str) -> TurnState {
             }
             if asks_question {
                 TurnState::WaitingOnQuestion
+            } else if exits_plan {
+                TurnState::Finished
             } else if has_tool {
                 TurnState::Working
             } else if has_text {
@@ -977,8 +1001,9 @@ pub fn transcript_turn_state(path: &str) -> TurnState {
     }
 }
 
-/// The full text of the last assistant message in the transcript (uncapped) — used to populate a
-/// review's text when the plan-file capture hook was missed. `None` if there's no assistant text.
+/// The deliverable text of the last assistant turn (uncapped) — used to populate a review's text when
+/// the plan-file/ExitPlanMode capture hook was missed. Prefers the plan an `ExitPlanMode` presented
+/// (for a plan-mode review that IS the full review), else the message's text blocks. `None` if empty.
 pub fn final_assistant_message(path: &str) -> Option<String> {
     for rec in tail_records(path).iter().rev() {
         let msg = rec.get("message");
@@ -989,27 +1014,43 @@ pub fn final_assistant_message(path: &str) -> Option<String> {
         if role != "assistant" {
             continue;
         }
-        let text = match msg.and_then(|m| m.get("content")) {
-            Some(Value::String(s)) => s.clone(),
+        let (mut text, mut plan) = (String::new(), String::new());
+        match msg.and_then(|m| m.get("content")) {
+            Some(Value::String(s)) => text = s.clone(),
             Some(Value::Array(arr)) => {
-                let mut out = String::new();
                 for b in arr {
-                    if b.get("type").and_then(|x| x.as_str()) == Some("text") {
-                        if let Some(t) = b.get("text").and_then(|x| x.as_str()) {
-                            if !out.is_empty() {
-                                out.push_str("\n\n");
+                    match b.get("type").and_then(|x| x.as_str()).unwrap_or("") {
+                        "text" => {
+                            if let Some(t) = b.get("text").and_then(|x| x.as_str()) {
+                                if !text.is_empty() {
+                                    text.push_str("\n\n");
+                                }
+                                text.push_str(t);
                             }
-                            out.push_str(t);
                         }
+                        "tool_use"
+                            if b.get("name").and_then(|x| x.as_str()) == Some("ExitPlanMode") =>
+                        {
+                            if let Some(p) = b
+                                .get("input")
+                                .or_else(|| b.get("tool_input"))
+                                .and_then(|i| i.get("plan"))
+                                .and_then(|x| x.as_str())
+                            {
+                                plan = p.to_string();
+                            }
+                        }
+                        _ => {}
                     }
                 }
-                out
             }
-            _ => String::new(),
-        };
-        let text = text.trim().to_string();
-        if !text.is_empty() {
-            return Some(text);
+            _ => {}
+        }
+        // The ExitPlanMode plan is the review's deliverable; fall back to the message's prose.
+        let chosen = if !plan.trim().is_empty() { plan } else { text };
+        let chosen = chosen.trim().to_string();
+        if !chosen.is_empty() {
+            return Some(chosen);
         }
     }
     None
@@ -1311,6 +1352,25 @@ mod tests {
         assert_eq!(
             transcript_turn_state(p.to_str().unwrap()),
             TurnState::WaitingOnQuestion
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn turn_state_finished_when_review_exits_plan_mode() {
+        // A plan-mode review ends by presenting its verdict via ExitPlanMode — that IS the finish,
+        // even though it's a trailing tool_use. (This is the review-stuck case.)
+        let p = write_transcript(&[
+            r#"{"message":{"role":"assistant","content":[{"type":"text","text":"Both green."},{"type":"tool_use","name":"ExitPlanMode","input":{"plan":"Verdict: ship it. The change is correct."}}]}}"#,
+        ]);
+        assert_eq!(
+            transcript_turn_state(p.to_str().unwrap()),
+            TurnState::Finished
+        );
+        // …and the review text comes from the plan, not a text block.
+        assert_eq!(
+            final_assistant_message(p.to_str().unwrap()).as_deref(),
+            Some("Verdict: ship it. The change is correct.")
         );
         let _ = std::fs::remove_file(&p);
     }

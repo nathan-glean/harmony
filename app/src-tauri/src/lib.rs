@@ -1204,7 +1204,7 @@ async fn poll_stuck_sessions_once(app: &AppHandle, state: &AppState) {
                 .await;
                 match verdict {
                     Ok(Ok(harmony_core::orchestrator::StuckVerdict::Done)) => {
-                        recover_finished_session(app, state, ticket_id, session_id, &path).await;
+                        recover_finished_session(app, state, ticket_id, session_id).await;
                     }
                     Ok(Ok(harmony_core::orchestrator::StuckVerdict::Escalate { reason })) => {
                         eprintln!("[watchdog] #{ticket_id} escalated: {reason}");
@@ -1226,21 +1226,20 @@ async fn poll_stuck_sessions_once(app: &AppHandle, state: &AppState) {
             }
             // Clear-cut: the turn finished but the completion event never arrived — re-fire it.
             TurnState::Finished => {
-                recover_finished_session(app, state, ticket_id, session_id, &path).await;
+                recover_finished_session(app, state, ticket_id, session_id).await;
             }
         }
     }
 }
 
 /// Re-fire the completion event a finished-but-stuck session missed: clear a stale pending question,
-/// backfill a review's text from the transcript if the plan-file capture was missed, then inject the
-/// kind's finish event through the normal executor. Marks the session recovered (de-dup).
+/// then inject the kind's finish event through the normal executor (which backfills a missed review's
+/// text from the transcript). Marks the session recovered (de-dup).
 async fn recover_finished_session(
     app: &AppHandle,
     state: &AppState,
     ticket_id: i64,
     session_id: i64,
-    transcript_path: &str,
 ) {
     let kind = state
         .store
@@ -1253,23 +1252,6 @@ async fn recover_finished_session(
     // A finished turn is not blocked on a question — clear any stale one so WorkFinished isn't a
     // no-op (the `user_question_pending` gate in flow::decide).
     let _ = state.store.clear_ticket_question(ticket_id).await;
-
-    // Review completion is normally captured from the plan-file write; if that hook was missed the
-    // Review tab is empty, so backfill from the transcript's final assistant message.
-    if kind == "review" {
-        if let Ok(Some(t)) = state.store.get_ticket(ticket_id).await {
-            if t.review_text.trim().is_empty() {
-                let path = transcript_path.to_string();
-                if let Ok(Some(msg)) = tokio::task::spawn_blocking(move || {
-                    harmony_core::session::final_assistant_message(&path)
-                })
-                .await
-                {
-                    let _ = state.store.set_ticket_review_text(ticket_id, &msg).await;
-                }
-            }
-        }
-    }
 
     state.watchdog_fired.lock().unwrap().insert(session_id);
     let event = finish_event_for_kind(&kind);
@@ -2679,6 +2661,25 @@ async fn apply_event(
         // Fresh work cycle → the prior proof no longer describes the change; regenerate it after the
         // upcoming review settles.
         let _ = state.store.reset_proof(ticket_id).await;
+    }
+    // Review completion is normally captured from the plan-file/ExitPlanMode PreToolUse hook, but a
+    // plan-mode `/review` presents its verdict via ExitPlanMode and that hook is sometimes missed —
+    // leaving the Review tab empty. Whatever fired ReviewFinished (hook Stop, plan write, or the
+    // watchdog), backfill the review text from the transcript if it's still empty, so it always lands.
+    if event == Event::ReviewFinished && ticket.review_text.trim().is_empty() {
+        if let Ok(Some(path)) = state
+            .store
+            .latest_transcript_path_for_ticket(ticket_id)
+            .await
+        {
+            if let Ok(Some(text)) = tokio::task::spawn_blocking(move || {
+                harmony_core::session::final_assistant_message(&path)
+            })
+            .await
+            {
+                let _ = state.store.set_ticket_review_text(ticket_id, &text).await;
+            }
+        }
     }
     let ctx = build_ctx(state, &ticket).await;
     let decision = flow::decide(event, &ctx);
