@@ -344,6 +344,20 @@ button:disabled { opacity: 0.5; cursor: default; }
   height: 320px; flex: none; background: var(--bg);
   border: 1px solid var(--border); border-radius: 10px; overflow: hidden;
 }
+
+/* Fallback shown by ErrorBoundary when a detail pane throws — keeps the board alive instead of
+   blanking the whole app. */
+.panel-error {
+  margin: 16px; padding: 16px; background: var(--bg);
+  border: 1px solid var(--red, #f7768e); border-radius: 10px;
+}
+.panel-error-head { font-weight: 600; color: var(--red, #f7768e); margin-bottom: 8px; }
+.panel-error-msg {
+  white-space: pre-wrap; word-break: break-word; font-size: 12px;
+  color: var(--muted); background: var(--panel, #0b0e14);
+  padding: 8px 10px; border-radius: 6px; margin: 0 0 12px;
+}
+.panel-error-actions { display: flex; gap: 8px; }
 /* The xterm mount is inset for breathing room; overlays (jump/search) position against .terminal. */
 .term-screen { position: absolute; inset: 8px 4px 8px 10px; }
 

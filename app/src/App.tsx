@@ -19,6 +19,7 @@ import { SpecEditor } from "./components/SpecEditor";
 import { ProofPane } from "./components/ProofPane";
 import { PrComments } from "./components/PrComments";
 import { ReviewFeedback } from "./components/ReviewFeedback";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { api } from "./api";
 import type { Ticket, Repo, SessionView, WorktreeView, PendingQuestion, SessionProgress, SessionExit, PrDone } from "./types";
 import { parseActivity } from "./types";
@@ -676,6 +677,7 @@ export function App() {
             }}
           >
             <div className="modal">
+              <ErrorBoundary resetKey={selected.id} onClose={() => setSelected(null)}>
               <div className="modal-head">
                 <span className="badge">{selected.status}</span>
                 {(() => {
@@ -1033,6 +1035,7 @@ export function App() {
                   </div>
                 )}
               </div>
+              </ErrorBoundary>
             </div>
           </div>
         )}
