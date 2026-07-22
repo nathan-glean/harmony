@@ -228,6 +228,10 @@ pub struct PrStatus {
     pub state: String,
     pub is_draft: bool,
     pub url: String,
+    /// GitHub `mergeable`: `MERGEABLE` | `CONFLICTING` | `UNKNOWN` (empty when no PR). `CONFLICTING`
+    /// means the branch has merge conflicts with its base; `UNKNOWN` is GitHub still computing (e.g.
+    /// just after a push) — treat as "don't act yet".
+    pub mergeable: String,
 }
 
 /// Read the branch's PR status + approval via `gh pr view`. No PR / `gh` unavailable → a
@@ -239,7 +243,7 @@ pub fn pr_status(worktree: &str) -> PrStatus {
             "pr",
             "view",
             "--json",
-            "number,state,isDraft,url,reviewDecision",
+            "number,state,isDraft,url,reviewDecision,mergeable",
         ],
         worktree,
     ) {
@@ -263,6 +267,11 @@ fn parse_pr_status(json: &str) -> PrStatus {
         is_draft: v.get("isDraft").and_then(|x| x.as_bool()).unwrap_or(false),
         url: v
             .get("url")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        mergeable: v
+            .get("mergeable")
             .and_then(|x| x.as_str())
             .unwrap_or("")
             .to_string(),
@@ -697,11 +706,12 @@ mod tests {
     #[test]
     fn parse_pr_status_approved() {
         let s = parse_pr_status(
-            r#"{"number":12,"state":"OPEN","isDraft":false,"url":"https://x/pr/12","reviewDecision":"APPROVED"}"#,
+            r#"{"number":12,"state":"OPEN","isDraft":false,"url":"https://x/pr/12","reviewDecision":"APPROVED","mergeable":"MERGEABLE"}"#,
         );
         assert!(s.exists && s.approved && !s.is_draft);
         assert_eq!(s.state, "OPEN");
         assert_eq!(s.url, "https://x/pr/12");
+        assert_eq!(s.mergeable, "MERGEABLE");
     }
 
     #[test]
@@ -710,6 +720,15 @@ mod tests {
             r#"{"number":3,"state":"OPEN","isDraft":true,"url":"u","reviewDecision":"REVIEW_REQUIRED"}"#,
         );
         assert!(s.exists && !s.approved && s.is_draft);
+    }
+
+    #[test]
+    fn parse_pr_status_conflicting() {
+        let s = parse_pr_status(
+            r#"{"number":7,"state":"OPEN","isDraft":false,"url":"u","reviewDecision":"","mergeable":"CONFLICTING"}"#,
+        );
+        assert!(s.exists);
+        assert_eq!(s.mergeable, "CONFLICTING");
     }
 
     #[test]

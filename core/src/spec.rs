@@ -188,6 +188,8 @@ mod tests {
             proof_artifacts: String::new(),
             proof_sha: String::new(),
             proof_attempts: 0,
+            conflict_fix_attempts: 0,
+            conflict_fingerprint: String::new(),
         }
     }
 

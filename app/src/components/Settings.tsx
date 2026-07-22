@@ -32,6 +32,7 @@ export function Settings({
   const [autoReview, setAutoReview] = useState(true);
   const [reviewLoop, setReviewLoop] = useState(false);
   const [proof, setProof] = useState(true);
+  const [conflictResolve, setConflictResolve] = useState(true);
   const [autoMerge, setAutoMerge] = useState(false);
   const [orchestrator, setOrchestrator] = useState(false);
   const [maxConcurrent, setMaxConcurrent] = useState(3);
@@ -42,6 +43,7 @@ export function Settings({
     api.getAutoReview().then(setAutoReview).catch(() => {});
     api.getReviewLoop().then(setReviewLoop).catch(() => {});
     api.getProofEnabled().then(setProof).catch(() => {});
+    api.getConflictResolve().then(setConflictResolve).catch(() => {});
     api.getAutoMerge().then(setAutoMerge).catch(() => {});
     api.getOrchestrator().then(setOrchestrator).catch(() => {});
     api.getMaxConcurrent().then(setMaxConcurrent).catch(() => {});
@@ -74,6 +76,12 @@ export function Settings({
     const next = !proof;
     setProof(next);
     api.setProofEnabled(next).catch(() => setProof(!next));
+  };
+
+  const toggleConflictResolve = () => {
+    const next = !conflictResolve;
+    setConflictResolve(next);
+    api.setConflictResolve(next).catch(() => setConflictResolve(!next));
   };
 
   const toggleAutoMerge = () => {
@@ -142,6 +150,10 @@ export function Settings({
         <label className="muted" title="Proof of work: once a change passes review, harmony runs a session that captures evidence it works — a walkthrough video, screenshots, or a grounded report with real command output — shown in the Proof tab and posted as a PR comment. Adds one session per ticket; degrades to a report when capture isn't possible.">
           <input type="checkbox" checked={proof} onChange={toggleProof} /> Generate proof of work
           (evidence the change works)
+        </label>
+        <label className="muted" title="When a PR develops merge conflicts with its base branch, automatically merge the base in and resolve the conflicts (capped, then escalates to you). Pushes a normal merge commit; the human still reviews the PR.">
+          <input type="checkbox" checked={conflictResolve} onChange={toggleConflictResolve} /> Auto-resolve
+          PR merge conflicts
         </label>
         <label className="muted" title="When a PR is approved on GitHub and CI is green, automatically merge it and move the card to Done — no manual drag. Merges to your default branch; the agent never self-approves.">
           <input type="checkbox" checked={autoMerge} onChange={toggleAutoMerge} /> Auto-merge PRs once

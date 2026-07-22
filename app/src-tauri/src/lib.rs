@@ -25,6 +25,8 @@ const CI_POLL_SECS: u64 = 60;
 const MAX_CI_FIX_ATTEMPTS: i64 = 3;
 /// Max automatic review-fix attempts (review→fix→re-review cycles) before we stop and escalate.
 const MAX_REVIEW_FIX_ATTEMPTS: i64 = 3;
+/// Max automatic merge-conflict-resolve attempts before we stop and escalate to a human.
+const MAX_CONFLICT_FIX_ATTEMPTS: i64 = 3;
 /// Max proof-generation attempts per reviewed HEAD before we stop retrying (anti-loop when capture
 /// keeps failing). The change still advances — proof is best-effort.
 const MAX_PROOF_ATTEMPTS: i64 = 2;
@@ -787,6 +789,112 @@ async fn poll_ci_once(app: &AppHandle, state: &AppState) {
     }
 }
 
+/// Auto-resolve-conflicts kill-switch (default on). `"off"` → never spawns a conflict resolver.
+async fn conflict_resolve_enabled(state: &AppState) -> bool {
+    state
+        .store
+        .get_setting("conflict_resolve")
+        .await
+        .ok()
+        .flatten()
+        .map(|v| v != "off")
+        .unwrap_or(true)
+}
+
+/// One poll pass: for each PR-stage ticket whose PR has merge conflicts with its base
+/// (`mergeable == CONFLICTING`), spawn an autonomous session that merges the base in and resolves
+/// them; harmony commits + pushes on `ConflictFinished`, updating the PR. Fingerprinted by
+/// `<base_sha>:<branch_head>` so the same state isn't retried, capped by `MAX_CONFLICT_FIX_ATTEMPTS`
+/// (then escalates once). Skips live sessions; gated by `conflict_resolve` (default on). A PR that's
+/// no longer conflicting resets the bookkeeping. `UNKNOWN` (GitHub still computing) is left alone.
+async fn poll_conflicts_once(app: &AppHandle, state: &AppState) {
+    if !conflict_resolve_enabled(state).await {
+        return;
+    }
+    let tickets = match state.store.list_tickets().await {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    for ticket in tickets {
+        if ticket.status != harmony_core::status::IN_REVIEW || has_live_session(state, ticket.id) {
+            continue;
+        }
+        let wt = match state.store.primary_worktree_for_ticket(ticket.id).await {
+            Ok(Some(wt)) => wt,
+            _ => continue,
+        };
+        let repo_path = match state.store.get_repo(wt.repo_id).await {
+            Ok(Some(r)) => r.path,
+            _ => continue,
+        };
+        // Off-thread: PR mergeability + the conflict-state fingerprint (base sha + branch head).
+        let (mergeable, base, base_sha, head) = {
+            let (path, repo_path) = (wt.path.clone(), repo_path.clone());
+            tokio::task::spawn_blocking(move || {
+                let mergeable = harmony_core::github::pr_status(&path).mergeable;
+                let base = harmony_core::worktree::default_branch(&repo_path)
+                    .unwrap_or_else(|_| "main".into());
+                let base_sha = harmony_core::github::rev_parse(&path, &base).unwrap_or_default();
+                let head = harmony_core::github::head_sha(&path).unwrap_or_default();
+                (mergeable, base, base_sha, head)
+            })
+            .await
+            .unwrap_or_default()
+        };
+
+        if mergeable != "CONFLICTING" {
+            // Resolved / clean / still-computing → clear any stale conflict bookkeeping.
+            if !ticket.conflict_fingerprint.is_empty() || ticket.conflict_fix_attempts != 0 {
+                let _ = state.store.reset_conflicts(ticket.id).await;
+            }
+            continue;
+        }
+
+        let fingerprint = format!("{base_sha}:{head}");
+        // Already attempted this exact state → don't respawn.
+        if ticket.conflict_fingerprint == fingerprint {
+            continue;
+        }
+        if ticket.conflict_fix_attempts >= MAX_CONFLICT_FIX_ATTEMPTS {
+            // Escalate once per distinct stuck state (the fingerprint gate above bounds re-notifies
+            // only loosely, so guard on a note fingerprint too).
+            let seen = state_fingerprint("conflict", &fingerprint);
+            if ticket.orchestrator_seen != seen {
+                let _ = state
+                    .store
+                    .set_orchestrator_note(
+                        ticket.id,
+                        "escalated: PR merge conflicts need you",
+                        &seen,
+                    )
+                    .await;
+                notify(
+                    app,
+                    &format!("{} — needs you", ticket.title),
+                    "PR has merge conflicts that couldn't be resolved automatically.",
+                );
+            }
+            continue;
+        }
+
+        let mgr = SessionManager::new(Arc::new(state.store.clone()), HOOK_PORT);
+        match mgr.start_conflict_resolve(ticket.id, &base).await {
+            Ok(handle) => {
+                let _ = wire_session(app, state, handle, ticket.id);
+                let _ = state
+                    .store
+                    .bump_conflict_fix_attempts(ticket.id, &fingerprint)
+                    .await;
+                store_activity(app, state, ticket.id).await;
+            }
+            Err(e) => eprintln!(
+                "[conflicts] start_conflict_resolve #{} failed: {e}",
+                ticket.id
+            ),
+        }
+    }
+}
+
 /// Auto re-review kill-switch (default on — the user opted into auto re-review). `"off"` → never
 /// auto-redoes a review (the manual "Request review" button still works).
 async fn auto_review_enabled(state: &AppState) -> bool {
@@ -1160,6 +1268,7 @@ fn finish_event_for_kind(kind: &str) -> Event {
         "work" => Event::WorkFinished,
         "review" => Event::ReviewFinished,
         "fix" => Event::FixFinished,
+        "conflict" => Event::ConflictFinished,
         "address" => Event::AddressFinished,
         "proof" => Event::ProofFinished,
         _ => Event::SessionIdle,
@@ -1812,6 +1921,20 @@ async fn set_ci_autofix(state: State<'_, AppState>, enabled: bool) -> Result<(),
     state
         .store
         .set_setting("ci_autofix", if enabled { "on" } else { "off" })
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_conflict_resolve(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(conflict_resolve_enabled(&state).await)
+}
+
+#[tauri::command]
+async fn set_conflict_resolve(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+    state
+        .store
+        .set_setting("conflict_resolve", if enabled { "on" } else { "off" })
         .await
         .map_err(|e| e.to_string())
 }
@@ -3271,6 +3394,9 @@ pub fn run() {
                             SystemEvent::FixFinished { ticket_id } => {
                                 (ticket_id, Event::FixFinished)
                             }
+                            SystemEvent::ConflictFinished { ticket_id } => {
+                                (ticket_id, Event::ConflictFinished)
+                            }
                             SystemEvent::AddressFinished { ticket_id } => {
                                 (ticket_id, Event::AddressFinished)
                             }
@@ -3303,6 +3429,8 @@ pub fn run() {
                         poll_review_loop_once(&poll_handle, &state).await;
                         // After the review loop settles, evidence passed changes (proof of work).
                         poll_proof_loop_once(&poll_handle, &state).await;
+                        // Resolve PR merge conflicts before the merge/merged checks run.
+                        poll_conflicts_once(&poll_handle, &state).await;
                         poll_auto_merge_once(&poll_handle, &state).await;
                         // Move a ticket to Done when its PR was merged on GitHub (always on).
                         poll_pr_merged_once(&poll_handle, &state).await;
@@ -3358,6 +3486,8 @@ pub fn run() {
             request_ci_fix,
             get_ci_autofix,
             set_ci_autofix,
+            get_conflict_resolve,
+            set_conflict_resolve,
             get_auto_review,
             set_auto_review,
             get_auto_end_idle,

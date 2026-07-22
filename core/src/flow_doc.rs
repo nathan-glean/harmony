@@ -79,6 +79,7 @@ fn events() -> Vec<(String, &'static str, Event)> {
         ("ReviewFinished", Event::ReviewFinished),
         ("ProofFinished", Event::ProofFinished),
         ("FixFinished", Event::FixFinished),
+        ("ConflictFinished", Event::ConflictFinished),
         ("AddressFinished", Event::AddressFinished),
         ("SessionIdle", Event::SessionIdle),
     ] {

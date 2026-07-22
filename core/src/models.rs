@@ -104,6 +104,12 @@ pub struct Ticket {
     /// Number of proof-generation attempts for the current HEAD; capped to avoid a runaway loop when
     /// capture keeps failing. Reset when fresh work lands.
     pub proof_attempts: i64,
+    /// Number of automatic merge-conflict-resolve attempts for the current conflict state; capped to
+    /// prevent a runaway loop. Reset when the PR is no longer conflicting.
+    pub conflict_fix_attempts: i64,
+    /// Fingerprint of the conflict state last attempted (`<base_sha>:<branch_head>`), so the resolver
+    /// doesn't respawn on an unchanged state. "" until first attempted; cleared when resolved.
+    pub conflict_fingerprint: String,
 }
 
 /// An isolated git worktree for a ticket. Per-ticket and reused; `is_alternate`

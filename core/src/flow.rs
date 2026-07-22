@@ -70,6 +70,9 @@ pub enum Event {
     ProofFinished,
     /// An autonomous CI-fix session finished — commit + push its changes (re-triggers CI).
     FixFinished,
+    /// An autonomous conflict-resolve session finished — commit (completing the merge) + push, which
+    /// updates the PR and clears the conflict.
+    ConflictFinished,
     /// A feedback-addressing session finished — commit (and push when a PR exists) so the change
     /// is reflected on the branch/PR.
     AddressFinished,
@@ -405,6 +408,14 @@ pub fn decide(event: Event, ctx: &Ctx) -> Decision {
         // An autonomous CI-fix session finished: commit + push its changes (re-triggers CI). The
         // card belongs in the PR column (that's the only stage CI-fixes run in).
         Event::FixFinished => Decision {
+            target: Pr,
+            actions: vec![CommitChanges, PushBranch],
+            blocked: None,
+        },
+
+        // An autonomous conflict-resolve session finished: commit (completing the base-merge) + push,
+        // updating the PR. Same shape as FixFinished; the card stays in the PR column.
+        Event::ConflictFinished => Decision {
             target: Pr,
             actions: vec![CommitChanges, PushBranch],
             blocked: None,

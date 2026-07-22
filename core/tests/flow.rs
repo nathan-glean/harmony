@@ -1140,6 +1140,24 @@ fn fix_finished_commits_pushes_and_stays_in_pr() {
 }
 
 #[test]
+fn conflict_finished_commits_pushes_and_stays_in_pr() {
+    // A conflict-resolve session finished: commit (completing the base-merge) + push, stay in PR.
+    let d = decide(
+        Event::ConflictFinished,
+        &Ctx {
+            from: Pr,
+            reviewed: true,
+            has_changes: true,
+            has_worktree: true,
+            pr_exists: true,
+            ..base()
+        },
+    );
+    assert_eq!(d.target, Pr);
+    assert_eq!(d.actions, vec![CommitChanges, PushBranch]);
+}
+
+#[test]
 fn address_finished_with_pr_commits_pushes_and_returns_to_pr() {
     let d = decide(
         Event::AddressFinished,
