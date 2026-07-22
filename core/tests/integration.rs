@@ -394,6 +394,106 @@ async fn clear_all_questions_and_drafting_drops_stale_session_state() {
 }
 
 #[tokio::test]
+async fn orchestrator_notes_append_to_decision_log() {
+    let dir = TempDir::new("orch");
+    let store = open_store(&dir).await;
+    let a = store
+        .add_ticket(Some("DNA-1"), "jira", "Alpha", "", None)
+        .await
+        .unwrap();
+    let b = store
+        .add_ticket(None, "local", "Beta", "", None)
+        .await
+        .unwrap();
+
+    // Each distinct decision appends one event; the ticket's latest note is also updated.
+    store
+        .set_orchestrator_note(a, "dispatched: started work", "seen1")
+        .await
+        .unwrap();
+    store
+        .set_orchestrator_note(b, "escalated: ambiguous scope", "seen2")
+        .await
+        .unwrap();
+    store
+        .set_orchestrator_note(a, "answered question — \"Postgres\"", "seen3")
+        .await
+        .unwrap();
+
+    let events = store.list_orchestrator_events(50).await.unwrap();
+    assert_eq!(events.len(), 3);
+    // Newest-first, joined to the ticket, and classified by kind.
+    assert_eq!(events[0].note, "answered question — \"Postgres\"");
+    assert_eq!(events[0].kind, "answer");
+    assert_eq!(events[0].ticket_id, a);
+    assert_eq!(events[0].jira_key.as_deref(), Some("DNA-1"));
+    assert_eq!(events[1].kind, "escalate");
+    assert_eq!(events[1].ticket_title, "Beta");
+    assert_eq!(events[2].kind, "dispatch");
+
+    // The limit caps the feed.
+    assert_eq!(store.list_orchestrator_events(1).await.unwrap().len(), 1);
+    // The ticket keeps only its latest note.
+    assert_eq!(
+        store
+            .get_ticket(a)
+            .await
+            .unwrap()
+            .unwrap()
+            .orchestrator_note,
+        "answered question — \"Postgres\""
+    );
+}
+
+#[tokio::test]
+async fn conflict_fix_bookkeeping_roundtrip() {
+    let dir = TempDir::new("conflict");
+    let store = open_store(&dir).await;
+    let id = store
+        .add_ticket(None, "local", "T", "", None)
+        .await
+        .unwrap();
+
+    // Defaults: never attempted.
+    let t = store.get_ticket(id).await.unwrap().unwrap();
+    assert_eq!(t.conflict_fix_attempts, 0);
+    assert_eq!(t.conflict_fingerprint, "");
+
+    // Attempt once against a conflict state fingerprint.
+    store
+        .bump_conflict_fix_attempts(id, "base123:head456")
+        .await
+        .unwrap();
+    let t = store.get_ticket(id).await.unwrap().unwrap();
+    assert_eq!(t.conflict_fix_attempts, 1);
+    assert_eq!(t.conflict_fingerprint, "base123:head456");
+
+    // Resolved → reset clears attempts + fingerprint.
+    store.reset_conflicts(id).await.unwrap();
+    let t = store.get_ticket(id).await.unwrap().unwrap();
+    assert_eq!(t.conflict_fix_attempts, 0);
+    assert_eq!(t.conflict_fingerprint, "");
+}
+
+#[tokio::test]
+async fn hook_maps_conflict_stop_to_conflict_finished() {
+    // A conflict-resolve session (kind "conflict") completing its Stop must emit ConflictFinished so
+    // harmony commits the merge + pushes.
+    let dir = TempDir::new("evconflict");
+    let (store, ticket_id, cwd) = seed_session(&dir, "conflict").await;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<hooks::SystemEvent>();
+    let port = spawn_hooks_with(store.clone(), Some(tx)).await;
+    let client = reqwest::Client::new();
+
+    post(&client, port, "Stop", &serde_json::json!({ "cwd": cwd })).await;
+
+    assert_eq!(
+        rx.recv().await.unwrap(),
+        hooks::SystemEvent::ConflictFinished { ticket_id }
+    );
+}
+
+#[tokio::test]
 async fn upsert_jira_ticket_maps_and_backfills_default_repo() {
     let dir = TempDir::new("jira-repo");
     let store = open_store(&dir).await;
@@ -1244,7 +1344,11 @@ async fn hook_emits_work_finished_even_when_question_pending() {
 }
 
 #[tokio::test]
-async fn hook_emits_review_finished_on_review_stop() {
+async fn hook_maps_review_stop_to_idle_not_finished() {
+    // A review runs in plan mode and completes only when it presents its verdict (ExitPlanMode /
+    // plan-file capture — see `hook_emits_review_finished_on_review_capture`). An interactive turn
+    // can yield mid-review, so a bare `Stop` must NOT emit ReviewFinished (that captured a partial
+    // review); it maps to a harmless SessionIdle instead.
     let dir = TempDir::new("evreview");
     let (store, ticket_id, cwd) = seed_session(&dir, "review").await;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<hooks::SystemEvent>();
@@ -1255,7 +1359,7 @@ async fn hook_emits_review_finished_on_review_stop() {
 
     assert_eq!(
         rx.recv().await.unwrap(),
-        hooks::SystemEvent::ReviewFinished { ticket_id }
+        hooks::SystemEvent::SessionIdle { ticket_id }
     );
 }
 
@@ -1443,6 +1547,8 @@ fn sample_ticket() -> harmony_core::models::Ticket {
         proof_artifacts: String::new(),
         proof_sha: String::new(),
         proof_attempts: 0,
+        conflict_fix_attempts: 0,
+        conflict_fingerprint: String::new(),
     }
 }
 

@@ -6,8 +6,32 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 use std::path::Path;
 
-use crate::models::{DiffComment, Repo, Session, SessionView, Ticket, Worktree, WorktreeView};
+use crate::models::{
+    DiffComment, OrchestratorEvent, Repo, Session, SessionView, Ticket, Worktree, WorktreeView,
+};
 use crate::now_unix;
+
+/// Classify an orchestrator note into a coarse `kind` for the UI (icon/colour), from its text — the
+/// note strings are authored by the orchestrator/watchdog and stable. Keeps the decision sites from
+/// having to thread a `kind` through every `set_orchestrator_note` call.
+fn orchestrator_kind(note: &str) -> &'static str {
+    let n = note.to_ascii_lowercase();
+    if n.starts_with("escalated") || n.contains("needs you") {
+        "escalate"
+    } else if n.starts_with("dispatched") {
+        "dispatch"
+    } else if n.starts_with("restarted") {
+        "restart"
+    } else if n.starts_with("answered") {
+        "answer"
+    } else if n.starts_with("accepted") {
+        "spec"
+    } else if n.starts_with("opened pr") {
+        "pr"
+    } else {
+        "info"
+    }
+}
 
 #[derive(Clone)]
 pub struct Store {
@@ -112,6 +136,13 @@ impl Store {
             created_at INTEGER NOT NULL,
             target TEXT NOT NULL DEFAULT 'diff',
             anchor TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS orchestrator_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticket_id INTEGER NOT NULL,
+            kind TEXT NOT NULL DEFAULT '',
+            note TEXT NOT NULL,
+            created_at INTEGER NOT NULL
         );
         "#;
         for stmt in DDL.split(';') {
@@ -242,6 +273,16 @@ impl Store {
             sqlx::query("ALTER TABLE tickets ADD COLUMN proof_attempts INTEGER NOT NULL DEFAULT 0")
                 .execute(&self.pool)
                 .await;
+        let _ = sqlx::query(
+            "ALTER TABLE tickets ADD COLUMN conflict_fix_attempts INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&self.pool)
+        .await;
+        let _ = sqlx::query(
+            "ALTER TABLE tickets ADD COLUMN conflict_fingerprint TEXT NOT NULL DEFAULT ''",
+        )
+        .execute(&self.pool)
+        .await;
         Ok(())
     }
 
@@ -360,7 +401,7 @@ impl Store {
 
     pub async fn get_ticket(&self, id: i64) -> Result<Option<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec, review_verdict, review_findings, judged_sha, review_fix_attempts, activity, orchestrator_note, orchestrator_seen, restart_attempts, proof, proof_artifacts, proof_sha, proof_attempts
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec, review_verdict, review_findings, judged_sha, review_fix_attempts, activity, orchestrator_note, orchestrator_seen, restart_attempts, proof, proof_artifacts, proof_sha, proof_attempts, conflict_fix_attempts, conflict_fingerprint
              FROM tickets WHERE id = ?",
         )
         .bind(id)
@@ -370,7 +411,7 @@ impl Store {
 
     pub async fn list_tickets(&self) -> Result<Vec<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec, review_verdict, review_findings, judged_sha, review_fix_attempts, activity, orchestrator_note, orchestrator_seen, restart_attempts, proof, proof_artifacts, proof_sha, proof_attempts
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec, review_verdict, review_findings, judged_sha, review_fix_attempts, activity, orchestrator_note, orchestrator_seen, restart_attempts, proof, proof_artifacts, proof_sha, proof_attempts, conflict_fix_attempts, conflict_fingerprint
              FROM tickets ORDER BY id",
         )
         .fetch_all(&self.pool)
@@ -695,7 +736,7 @@ impl Store {
 
     pub async fn get_ticket_by_key(&self, key: &str) -> Result<Option<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec, review_verdict, review_findings, judged_sha, review_fix_attempts, activity, orchestrator_note, orchestrator_seen, restart_attempts, proof, proof_artifacts, proof_sha, proof_attempts
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec, review_verdict, review_findings, judged_sha, review_fix_attempts, activity, orchestrator_note, orchestrator_seen, restart_attempts, proof, proof_artifacts, proof_sha, proof_attempts, conflict_fix_attempts, conflict_fingerprint
              FROM tickets WHERE jira_key = ?",
         )
         .bind(key)
@@ -913,7 +954,10 @@ impl Store {
     }
 
     /// Record the orchestrator's last action + rationale (human-facing audit line) and the "stuck
-    /// state" fingerprint it decided on (idempotency, so it doesn't re-decide the same state).
+    /// state" fingerprint it decided on (idempotency, so it doesn't re-decide the same state). Also
+    /// appends the action to `orchestrator_events` — the durable, cross-ticket decision log for the
+    /// Orchestrator tab. Callers invoke this exactly once per distinct decision (deduped by the
+    /// `seen` fingerprint), so the log has one row per real action, no duplicates.
     pub async fn set_orchestrator_note(&self, id: i64, note: &str, seen: &str) -> Result<()> {
         sqlx::query("UPDATE tickets SET orchestrator_note = ?, orchestrator_seen = ? WHERE id = ?")
             .bind(note)
@@ -921,7 +965,30 @@ impl Store {
             .bind(id)
             .execute(&self.pool)
             .await?;
+        sqlx::query(
+            "INSERT INTO orchestrator_events (ticket_id, kind, note, created_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(orchestrator_kind(note))
+        .bind(note)
+        .bind(now_unix())
+        .execute(&self.pool)
+        .await?;
         Ok(())
+    }
+
+    /// The orchestrator's decision log, newest-first, joined to each ticket for display. Capped by
+    /// `limit`.
+    pub async fn list_orchestrator_events(&self, limit: i64) -> Result<Vec<OrchestratorEvent>> {
+        Ok(sqlx::query_as::<_, OrchestratorEvent>(
+            "SELECT e.id, e.ticket_id, e.kind, e.note, e.created_at, t.title AS ticket_title, \
+             t.jira_key \
+             FROM orchestrator_events e JOIN tickets t ON t.id = e.ticket_id \
+             ORDER BY e.id DESC LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?)
     }
 
     /// Increment the orchestrator's crash-restart counter (capped against crash loops by the caller).
@@ -1020,6 +1087,32 @@ impl Store {
         sqlx::query(
             "UPDATE tickets SET proof = '', proof_artifacts = '', proof_sha = '', \
              proof_attempts = 0 WHERE id = ?",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Record the conflict state the resolver last attempted (`<base_sha>:<branch_head>`), and bump
+    /// the attempt counter (capped against a runaway loop by the caller).
+    pub async fn bump_conflict_fix_attempts(&self, id: i64, fingerprint: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE tickets SET conflict_fix_attempts = conflict_fix_attempts + 1, \
+             conflict_fingerprint = ? WHERE id = ?",
+        )
+        .bind(fingerprint)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Reset conflict-resolve state (attempts + fingerprint) — called when the PR is no longer
+    /// conflicting, so a future conflict is handled afresh.
+    pub async fn reset_conflicts(&self, id: i64) -> Result<()> {
+        sqlx::query(
+            "UPDATE tickets SET conflict_fix_attempts = 0, conflict_fingerprint = '' WHERE id = ?",
         )
         .bind(id)
         .execute(&self.pool)

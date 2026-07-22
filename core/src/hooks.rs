@@ -33,6 +33,8 @@ pub enum SystemEvent {
     ProofFinished { ticket_id: i64 },
     /// An autonomous CI-fix session finished (commit + push its changes to re-trigger CI).
     FixFinished { ticket_id: i64 },
+    /// An autonomous conflict-resolve session finished (commit the merge + push to update the PR).
+    ConflictFinished { ticket_id: i64 },
     /// A feedback-addressing session finished (commit + push so the PR reflects the changes).
     AddressFinished { ticket_id: i64 },
     /// A session came to rest in `waiting` after a `Stop` with no pending question, and the
@@ -143,6 +145,10 @@ async fn handle(Path(event): Path<String>, State(ctx): State<HookCtx>, body: Byt
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| cwd.to_string());
 
+    // The hook response. Default: no programmatic decision (supervised). The review arm below may
+    // set it to an auto-approve so a plan-mode review's bash never stalls on an approval prompt.
+    let mut response = json!({});
+
     match store.active_session_by_cwd(&cwd_canon).await {
         Ok(Some(sess)) => {
             if sess.claude_session_id.is_none() {
@@ -171,13 +177,16 @@ async fn handle(Path(event): Path<String>, State(ctx): State<HookCtx>, body: Byt
                         let id = sess.ticket_id;
                         let ev = match sess.kind.as_str() {
                             "work" => SystemEvent::WorkFinished { ticket_id: id },
-                            "review" => SystemEvent::ReviewFinished { ticket_id: id },
                             "proof" => SystemEvent::ProofFinished { ticket_id: id },
                             "fix" => SystemEvent::FixFinished { ticket_id: id },
+                            "conflict" => SystemEvent::ConflictFinished { ticket_id: id },
                             "address" => SystemEvent::AddressFinished { ticket_id: id },
-                            // Any other kind (e.g. `spec`/grill) has no domain event to tear it
-                            // down — it's an idle session. `decide` frees its PTY when
-                            // `auto_end_idle` is on and no question is pending.
+                            // A `review` (plan mode) completes when it presents its plan via
+                            // ExitPlanMode (the definitive capture below), NOT on a `Stop` — an
+                            // interactive turn can yield mid-review, and firing ReviewFinished then
+                            // would capture a partial review. So a review Stop is just an idle event.
+                            // Likewise `spec`/grill has no domain event to tear it down. `decide`
+                            // frees an idle PTY when `auto_end_idle` is on and no question is pending.
                             _ => SystemEvent::SessionIdle { ticket_id: id },
                         };
                         let _ = tx.send(ev);
@@ -299,14 +308,13 @@ async fn handle(Path(event): Path<String>, State(ctx): State<HookCtx>, body: Byt
                 }
             }
 
-            // Review session: the `/review` skill runs in plan mode and writes its verdict to the
-            // plan file — it never calls ExitPlanMode (review is a research task). The verdict IS
-            // the deliverable, so capturing it = completion. Plan-mode sessions don't reliably fire
-            // a `Stop` when they come to rest, so (like the grill's `GrillFinished` above) emit
-            // `ReviewFinished` here to tear the session down + fingerprint the reviewed HEAD, rather
-            // than waiting for a `Stop` that may never arrive. The `Stop` arm stays a safe fallback:
-            // a second `ReviewFinished` is idempotent, and a later plan-file write lands on an
-            // already-ended session (no live session → ignored).
+            // Review session (plan mode): completion is the moment it presents its verdict via
+            // `ExitPlanMode` (or, older Claude, a `/.claude/plans/` write) — captured by
+            // `extract_plan`. That plan IS the full review, so capturing it = completion: store it and
+            // emit `ReviewFinished` to tear the session down + fingerprint the reviewed HEAD. This is
+            // the single definitive signal (the review `Stop` is deliberately NOT mapped to
+            // ReviewFinished — an interactive turn can yield mid-review). Idempotent: a repeat lands
+            // on an already-ended session and is ignored.
             if sess.kind == "review" && event == "PreToolUse" {
                 if let Some(plan) = extract_plan(&v, tool) {
                     let _ = store.set_ticket_review_text(sess.ticket_id, &plan).await;
@@ -315,6 +323,19 @@ async fn handle(Path(event): Path<String>, State(ctx): State<HookCtx>, body: Byt
                             ticket_id: sess.ticket_id,
                         });
                     }
+                }
+                // Auto-approve the review's tool calls so plan mode doesn't stall on a bash approval
+                // prompt (it runs the test suite). Plan mode still blocks edits, so read-only holds.
+                // Exclude ExitPlanMode/AskUserQuestion — those are captured/surfaced above, not
+                // silently allowed (allowing ExitPlanMode would exit plan mode into edit mode).
+                if !matches!(tool, Some("ExitPlanMode") | Some("AskUserQuestion")) {
+                    response = json!({
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "permissionDecision": "allow",
+                            "permissionDecisionReason": "harmony: auto-approved read-only review tool call"
+                        }
+                    });
                 }
             }
 
@@ -342,5 +363,5 @@ async fn handle(Path(event): Path<String>, State(ctx): State<HookCtx>, body: Byt
         Err(e) => log_event(&format!("[hook] {event} store error: {e}")),
     }
 
-    Json(json!({})) // supervised: no programmatic decision
+    Json(response) // supervised by default; auto-approve for review tool calls (see above)
 }

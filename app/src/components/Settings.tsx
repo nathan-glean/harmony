@@ -32,6 +32,7 @@ export function Settings({
   const [autoReview, setAutoReview] = useState(true);
   const [reviewLoop, setReviewLoop] = useState(false);
   const [proof, setProof] = useState(true);
+  const [conflictResolve, setConflictResolve] = useState(true);
   const [autoMerge, setAutoMerge] = useState(false);
   const [orchestrator, setOrchestrator] = useState(false);
   const [maxConcurrent, setMaxConcurrent] = useState(3);
@@ -42,6 +43,7 @@ export function Settings({
     api.getAutoReview().then(setAutoReview).catch(() => {});
     api.getReviewLoop().then(setReviewLoop).catch(() => {});
     api.getProofEnabled().then(setProof).catch(() => {});
+    api.getConflictResolve().then(setConflictResolve).catch(() => {});
     api.getAutoMerge().then(setAutoMerge).catch(() => {});
     api.getOrchestrator().then(setOrchestrator).catch(() => {});
     api.getMaxConcurrent().then(setMaxConcurrent).catch(() => {});
@@ -74,6 +76,12 @@ export function Settings({
     const next = !proof;
     setProof(next);
     api.setProofEnabled(next).catch(() => setProof(!next));
+  };
+
+  const toggleConflictResolve = () => {
+    const next = !conflictResolve;
+    setConflictResolve(next);
+    api.setConflictResolve(next).catch(() => setConflictResolve(!next));
   };
 
   const toggleAutoMerge = () => {
@@ -143,11 +151,15 @@ export function Settings({
           <input type="checkbox" checked={proof} onChange={toggleProof} /> Generate proof of work
           (evidence the change works)
         </label>
+        <label className="muted" title="When a PR develops merge conflicts with its base branch, automatically merge the base in and resolve the conflicts (capped, then escalates to you). Pushes a normal merge commit; the human still reviews the PR.">
+          <input type="checkbox" checked={conflictResolve} onChange={toggleConflictResolve} /> Auto-resolve
+          PR merge conflicts
+        </label>
         <label className="muted" title="When a PR is approved on GitHub and CI is green, automatically merge it and move the card to Done — no manual drag. Merges to your default branch; the agent never self-approves.">
           <input type="checkbox" checked={autoMerge} onChange={toggleAutoMerge} /> Auto-merge PRs once
           approved &amp; green
         </label>
-        <label className="muted" title="Orchestrator: autonomously starts ready tickets and restarts crashed sessions (up to the concurrency limit), answers worker questions it can derive from the spec (escalating genuine judgment to you), and auto-advances the loop (opens PRs when a review is clean). It never merges. You still create/spec tickets, offer judgment on escalations, and check outcomes.">
+        <label className="muted" title="Orchestrator: keeps already-started work moving — restarts crashed sessions (up to the concurrency limit) and answers worker questions it can derive from the spec (escalating genuine judgment to you). It never starts a Todo, opens a PR, or merges — those are your decisions (drag the card). You start work, offer judgment on escalations, open PRs, and check outcomes.">
           <input type="checkbox" checked={orchestrator} onChange={toggleOrchestrator} /> Orchestrator —
           run &amp; wrangle sessions autonomously
         </label>

@@ -115,6 +115,7 @@ pub fn classify(i: &ActivityInput) -> Activity {
             Some("review") => working("Reviewing…"),
             Some("proof") => working("Capturing proof…"),
             Some("fix") => working("Fixing CI…"),
+            Some("conflict") => working("Resolving conflicts…"),
             Some("address") => working("Addressing feedback…"),
             // "work" or anything else.
             _ => working("Implementing…"),

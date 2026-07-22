@@ -182,6 +182,53 @@ fn parse_spec(raw: &str) -> SpecDecision {
     }
 }
 
+/// The conductor's decision on a long-idle live session the deterministic watchdog couldn't classify.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StuckVerdict {
+    /// The turn is genuinely finished — advance the flow (the missed-hook recovery).
+    Done,
+    /// Still working / not safe to advance — leave it.
+    Working,
+    /// Stuck, errored, or looping — surface to the human.
+    Escalate { reason: String },
+}
+
+/// Judge a long-idle live session whose transcript the deterministic watchdog found ambiguous
+/// (idle a long time but the last record isn't a clean finished turn — e.g. a possibly-hung tool).
+/// The tail of the transcript is piped on stdin. Read-only. Fail-safe: anything unrecognised →
+/// `Working` (never advance on doubt).
+pub fn judge_stuck(worktree: &str, transcript_tail: &str) -> Result<StuckVerdict> {
+    let prompt =
+        "You monitor an autonomous coding loop. A worker session has produced no new transcript \
+         output for a while; the tail of its transcript is on stdin. Decide its state and respond \
+         with EXACTLY one of these lines, nothing else (no preamble, no code fences):\n\
+         - `DONE` — the agent finished its turn and is idling (its last message reads as a completed \
+         summary/hand-off with no work pending).\n\
+         - `WORKING` — it is still mid-task (a long-running command, or about to continue).\n\
+         - `ESCALATE <reason>` — it is stuck, errored, or looping and a human should look.\n\
+         When unsure, answer WORKING."
+            .to_string();
+    let raw = run_claude_p(worktree, &prompt, transcript_tail)?;
+    Ok(parse_stuck(&raw))
+}
+
+/// Parse the conductor's stuck-session verdict. Fail-safe: anything unrecognised → `Working`.
+fn parse_stuck(raw: &str) -> StuckVerdict {
+    let line = raw
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    let (tag, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+    match tag.to_ascii_uppercase().as_str() {
+        "DONE" => StuckVerdict::Done,
+        "ESCALATE" => StuckVerdict::Escalate {
+            reason: rest.trim().to_string(),
+        },
+        _ => StuckVerdict::Working,
+    }
+}
+
 // ---- deterministic dispatch helpers (pure) -------------------------------
 
 /// Free dispatch slots given the concurrency cap and current live-session count.
@@ -272,6 +319,20 @@ mod tests {
             SpecDecision::Escalate { .. }
         ));
         assert!(matches!(parse_spec(""), SpecDecision::Escalate { .. }));
+    }
+
+    #[test]
+    fn parse_stuck_verdicts() {
+        assert_eq!(parse_stuck("DONE"), StuckVerdict::Done);
+        assert_eq!(parse_stuck("  done  "), StuckVerdict::Done);
+        assert_eq!(parse_stuck("WORKING"), StuckVerdict::Working);
+        assert!(matches!(
+            parse_stuck("ESCALATE hung on a prompt"),
+            StuckVerdict::Escalate { .. }
+        ));
+        // Fail-safe: anything unrecognised → Working (never advance on doubt).
+        assert_eq!(parse_stuck("hmm not sure"), StuckVerdict::Working);
+        assert_eq!(parse_stuck(""), StuckVerdict::Working);
     }
 
     #[test]

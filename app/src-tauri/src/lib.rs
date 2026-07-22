@@ -25,11 +25,20 @@ const CI_POLL_SECS: u64 = 60;
 const MAX_CI_FIX_ATTEMPTS: i64 = 3;
 /// Max automatic review-fix attempts (review→fix→re-review cycles) before we stop and escalate.
 const MAX_REVIEW_FIX_ATTEMPTS: i64 = 3;
+/// Max automatic merge-conflict-resolve attempts before we stop and escalate to a human.
+const MAX_CONFLICT_FIX_ATTEMPTS: i64 = 3;
 /// Max proof-generation attempts per reviewed HEAD before we stop retrying (anti-loop when capture
 /// keeps failing). The change still advances — proof is best-effort.
 const MAX_PROOF_ATTEMPTS: i64 = 2;
 /// Max times the orchestrator auto-restarts a crashed session for a ticket before escalating.
 const MAX_RESTART_ATTEMPTS: i64 = 2;
+/// Stuck-session watchdog: a live session whose transcript has been idle at least this long AND is at
+/// a finished turn is treated as "the completion hook was missed" → the watchdog fires the recovery
+/// event. Must exceed normal between-record gaps; the mid-tool guard covers long-running commands.
+const STUCK_IDLE_SECS: u64 = 45;
+/// A live session idle at least this long but NOT at a cleanly-finished turn (e.g. a possibly-hung
+/// tool) is ambiguous → escalate to the orchestrator's LLM judge (only when Orchestrator is on).
+const ESCALATE_IDLE_SECS: u64 = 240;
 
 /// Best-effort desktop notification — the escalation channel for when the autonomous loop needs a
 /// human (e.g. the review loop is exhausted) or finishes an outward-facing step (auto-merge).
@@ -54,6 +63,28 @@ struct AppState {
     /// Session ids the user deliberately stopped, so their non-zero exit isn't mistaken for a
     /// crash. The wait-task removes the id once it has handled the exit.
     stopping: Arc<Mutex<HashSet<i64>>>,
+    /// Session ids the stuck-session watchdog has already fired a recovery event for, so it doesn't
+    /// re-fire each tick (for events that don't tear the session down). Cleared on session exit.
+    watchdog_fired: Arc<Mutex<HashSet<i64>>>,
+    /// Live orchestrator status for the Orchestrator tab (last tick time + any in-flight decision).
+    /// In-memory only (reset on restart); the durable history is the `orchestrator_events` log.
+    orchestrator_status: Arc<Mutex<OrchestratorStatus>>,
+}
+
+/// What the orchestrator is doing right now, surfaced to the Orchestrator tab.
+#[derive(Clone, Default, Serialize)]
+struct OrchestratorStatus {
+    /// Unix seconds of the last `poll_orchestrator_once` tick (None until the first tick).
+    last_tick_at: Option<i64>,
+    /// Set while an orchestrator `claude -p` judgment call is in flight; None when idle.
+    deciding: Option<Deciding>,
+}
+
+#[derive(Clone, Serialize)]
+struct Deciding {
+    ticket_id: i64,
+    /// Human label of the in-flight decision ("answering question" | "judging spec" | ...).
+    what: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -812,6 +843,112 @@ async fn poll_ci_once(app: &AppHandle, state: &AppState) {
     }
 }
 
+/// Auto-resolve-conflicts kill-switch (default on). `"off"` → never spawns a conflict resolver.
+async fn conflict_resolve_enabled(state: &AppState) -> bool {
+    state
+        .store
+        .get_setting("conflict_resolve")
+        .await
+        .ok()
+        .flatten()
+        .map(|v| v != "off")
+        .unwrap_or(true)
+}
+
+/// One poll pass: for each PR-stage ticket whose PR has merge conflicts with its base
+/// (`mergeable == CONFLICTING`), spawn an autonomous session that merges the base in and resolves
+/// them; harmony commits + pushes on `ConflictFinished`, updating the PR. Fingerprinted by
+/// `<base_sha>:<branch_head>` so the same state isn't retried, capped by `MAX_CONFLICT_FIX_ATTEMPTS`
+/// (then escalates once). Skips live sessions; gated by `conflict_resolve` (default on). A PR that's
+/// no longer conflicting resets the bookkeeping. `UNKNOWN` (GitHub still computing) is left alone.
+async fn poll_conflicts_once(app: &AppHandle, state: &AppState) {
+    if !conflict_resolve_enabled(state).await {
+        return;
+    }
+    let tickets = match state.store.list_tickets().await {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    for ticket in tickets {
+        if ticket.status != harmony_core::status::IN_REVIEW || has_live_session(state, ticket.id) {
+            continue;
+        }
+        let wt = match state.store.primary_worktree_for_ticket(ticket.id).await {
+            Ok(Some(wt)) => wt,
+            _ => continue,
+        };
+        let repo_path = match state.store.get_repo(wt.repo_id).await {
+            Ok(Some(r)) => r.path,
+            _ => continue,
+        };
+        // Off-thread: PR mergeability + the conflict-state fingerprint (base sha + branch head).
+        let (mergeable, base, base_sha, head) = {
+            let (path, repo_path) = (wt.path.clone(), repo_path.clone());
+            tokio::task::spawn_blocking(move || {
+                let mergeable = harmony_core::github::pr_status(&path).mergeable;
+                let base = harmony_core::worktree::default_branch(&repo_path)
+                    .unwrap_or_else(|_| "main".into());
+                let base_sha = harmony_core::github::rev_parse(&path, &base).unwrap_or_default();
+                let head = harmony_core::github::head_sha(&path).unwrap_or_default();
+                (mergeable, base, base_sha, head)
+            })
+            .await
+            .unwrap_or_default()
+        };
+
+        if mergeable != "CONFLICTING" {
+            // Resolved / clean / still-computing → clear any stale conflict bookkeeping.
+            if !ticket.conflict_fingerprint.is_empty() || ticket.conflict_fix_attempts != 0 {
+                let _ = state.store.reset_conflicts(ticket.id).await;
+            }
+            continue;
+        }
+
+        let fingerprint = format!("{base_sha}:{head}");
+        // Already attempted this exact state → don't respawn.
+        if ticket.conflict_fingerprint == fingerprint {
+            continue;
+        }
+        if ticket.conflict_fix_attempts >= MAX_CONFLICT_FIX_ATTEMPTS {
+            // Escalate once per distinct stuck state (the fingerprint gate above bounds re-notifies
+            // only loosely, so guard on a note fingerprint too).
+            let seen = state_fingerprint("conflict", &fingerprint);
+            if ticket.orchestrator_seen != seen {
+                let _ = state
+                    .store
+                    .set_orchestrator_note(
+                        ticket.id,
+                        "escalated: PR merge conflicts need you",
+                        &seen,
+                    )
+                    .await;
+                notify(
+                    app,
+                    &format!("{} — needs you", ticket.title),
+                    "PR has merge conflicts that couldn't be resolved automatically.",
+                );
+            }
+            continue;
+        }
+
+        let mgr = SessionManager::new(Arc::new(state.store.clone()), HOOK_PORT);
+        match mgr.start_conflict_resolve(ticket.id, &base).await {
+            Ok(handle) => {
+                let _ = wire_session(app, state, handle, ticket.id);
+                let _ = state
+                    .store
+                    .bump_conflict_fix_attempts(ticket.id, &fingerprint)
+                    .await;
+                store_activity(app, state, ticket.id).await;
+            }
+            Err(e) => eprintln!(
+                "[conflicts] start_conflict_resolve #{} failed: {e}",
+                ticket.id
+            ),
+        }
+    }
+}
+
 /// Auto re-review kill-switch (default on — the user opted into auto re-review). `"off"` → never
 /// auto-redoes a review (the manual "Request review" button still works).
 async fn auto_review_enabled(state: &AppState) -> bool {
@@ -1071,6 +1208,47 @@ async fn poll_auto_merge_once(app: &AppHandle, state: &AppState) {
     }
 }
 
+/// One poll pass: move a ticket to Done when its PR was merged on GitHub (by anyone). The work is
+/// merged, so the ticket is done — advance it and clean up. Always on (unlike `auto_merge`, this
+/// performs no merge; it just reacts to a merge a human already made). `flow::decide(Move(Done))`
+/// skips `MergePr` because `pr_merged` is set, so it only stops the session + removes the worktree.
+async fn poll_pr_merged_once(app: &AppHandle, state: &AppState) {
+    let tickets = match state.store.list_tickets().await {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    for ticket in tickets {
+        // Only a card still sitting in In PR Review, and never mid-session.
+        if ticket.status != harmony_core::status::IN_REVIEW || has_live_session(state, ticket.id) {
+            continue;
+        }
+        let wt = match state.store.primary_worktree_for_ticket(ticket.id).await {
+            Ok(Some(wt)) => wt,
+            _ => continue,
+        };
+        let path = wt.path.clone();
+        let merged = tokio::task::spawn_blocking(move || {
+            harmony_core::github::pr_status(&path).state == "MERGED"
+        })
+        .await
+        .unwrap_or(false);
+        if !merged {
+            continue;
+        }
+        match apply_event(app, state, ticket.id, Event::Move(Column::Done), false).await {
+            Ok(()) => notify(
+                app,
+                "Merged",
+                &format!(
+                    "#{} ({}) — PR merged, moved to Done.",
+                    ticket.id, ticket.title
+                ),
+            ),
+            Err(e) => eprintln!("[pr-merged] #{} failed: {e}", ticket.id),
+        }
+    }
+}
+
 // ---- orchestrator (autonomous coordinator) -------------------------------
 
 /// Distinct tickets that currently have a live session (concurrency accounting).
@@ -1096,17 +1274,6 @@ fn state_fingerprint(kind: &str, content: &str) -> String {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     content.hash(&mut h);
     format!("{kind}:{:x}", h.finish())
-}
-
-/// The `label` of a ticket's persisted `activity` JSON (used to route auto-advance).
-fn activity_label(json: &str) -> Option<String> {
-    serde_json::from_str::<serde_json::Value>(json)
-        .ok()
-        .and_then(|v| {
-            v.get("label")
-                .and_then(|l| l.as_str())
-                .map(|s| s.to_string())
-        })
 }
 
 /// Truncate for a human-facing note.
@@ -1148,13 +1315,212 @@ fn parse_pending_question(json: &str) -> Option<(String, Vec<String>, bool)> {
     Some((question, options, multi))
 }
 
+/// The domain event a finished session of `kind` should fire — the same mapping the `Stop` hook uses
+/// (`core/src/hooks.rs`). Returned so the watchdog can re-fire a missed completion.
+fn finish_event_for_kind(kind: &str) -> Event {
+    match kind {
+        "work" => Event::WorkFinished,
+        "review" => Event::ReviewFinished,
+        "fix" => Event::FixFinished,
+        "conflict" => Event::ConflictFinished,
+        "address" => Event::AddressFinished,
+        "proof" => Event::ProofFinished,
+        _ => Event::SessionIdle,
+    }
+}
+
+/// Seconds since a file was last modified, or `None` if it can't be read.
+fn file_idle_secs(path: &str) -> Option<u64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    modified.elapsed().ok().map(|d| d.as_secs())
+}
+
+/// Stuck-session watchdog (always-on recovery). Harmony advances the flow off Claude Code hooks
+/// (`Stop` for work, plan-file write for review), but those are sometimes missed — plan-mode sessions
+/// don't reliably fire `Stop`, and a cwd/plan-path mismatch drops the event silently — so a finished
+/// session sits live forever, the column never moves, and the Review tab stays empty.
+///
+/// This pass detects that from the transcript (written by Claude directly, so it advances even when
+/// hooks don't): for each session live in-process, if its transcript has been idle a while AND the
+/// last record is a finished turn, it re-fires the same completion event the hook would have (after
+/// clearing a stale question and, for a review, backfilling the review text). Long-idle-but-ambiguous
+/// sessions (a possibly-hung tool) escalate to the orchestrator's LLM judge, but only when the
+/// Orchestrator setting is on. Never disturbs a session that's still writing, mid-tool, or waiting on
+/// the user.
+async fn poll_stuck_sessions_once(app: &AppHandle, state: &AppState) {
+    use harmony_core::session::TurnState;
+
+    // Snapshot the live (session_id, ticket_id) pairs, skipping ones already being stopped or
+    // already recovered, so we don't hold the lock across awaits.
+    let live: Vec<(i64, i64)> = {
+        let map = state.sessions.lock().unwrap();
+        let stopping = state.stopping.lock().unwrap();
+        let fired = state.watchdog_fired.lock().unwrap();
+        map.iter()
+            .filter(|(sid, _)| !stopping.contains(sid) && !fired.contains(sid))
+            .map(|(sid, io)| (*sid, io.ticket_id))
+            .collect()
+    };
+    if live.is_empty() {
+        return;
+    }
+    let escalate_enabled = orchestrator_enabled(state).await;
+
+    for (session_id, ticket_id) in live {
+        let path = match state
+            .store
+            .latest_transcript_path_for_ticket(ticket_id)
+            .await
+        {
+            Ok(Some(p)) => p,
+            _ => continue, // no transcript yet — nothing to judge
+        };
+        let idle = match file_idle_secs(&path) {
+            Some(s) => s,
+            None => continue,
+        };
+        if idle < STUCK_IDLE_SECS {
+            continue; // still active (an actively-steered session keeps the transcript fresh)
+        }
+
+        let turn = tokio::task::spawn_blocking({
+            let path = path.clone();
+            move || harmony_core::session::transcript_turn_state(&path)
+        })
+        .await
+        .unwrap_or(TurnState::Working);
+
+        match turn {
+            // Genuinely waiting on the user, or still mid-turn → leave it alone.
+            TurnState::WaitingOnQuestion => continue,
+            TurnState::Working => {
+                // Ambiguous: idle a long time but not a clean finish (e.g. a hung tool). Only the
+                // opt-in LLM judge decides here; otherwise leave it for the human.
+                if !escalate_enabled || idle < ESCALATE_IDLE_SECS {
+                    continue;
+                }
+                let wt = match state.store.primary_worktree_for_ticket(ticket_id).await {
+                    Ok(Some(wt)) => wt,
+                    _ => continue,
+                };
+                let tail = tokio::task::spawn_blocking({
+                    let path = path.clone();
+                    move || harmony_core::session::render_transcript(&path).unwrap_or_default()
+                })
+                .await
+                .unwrap_or_default();
+                set_deciding(app, state, Some((ticket_id, "judging stuck session")));
+                let verdict = tokio::task::spawn_blocking({
+                    let wt = wt.path.clone();
+                    move || harmony_core::orchestrator::judge_stuck(&wt, &tail)
+                })
+                .await;
+                set_deciding(app, state, None);
+                match verdict {
+                    Ok(Ok(harmony_core::orchestrator::StuckVerdict::Done)) => {
+                        recover_finished_session(app, state, ticket_id, session_id).await;
+                    }
+                    Ok(Ok(harmony_core::orchestrator::StuckVerdict::Escalate { reason })) => {
+                        eprintln!("[watchdog] #{ticket_id} escalated: {reason}");
+                        let _ = state
+                            .store
+                            .set_orchestrator_note(
+                                ticket_id,
+                                &format!("stuck session — needs you: {reason}"),
+                                &state_fingerprint("stuck", &reason),
+                            )
+                            .await;
+                        // Mark handled so we don't re-judge every tick; store_activity fires the
+                        // "needs you" notification via the activity pill.
+                        state.watchdog_fired.lock().unwrap().insert(session_id);
+                        store_activity(app, state, ticket_id).await;
+                    }
+                    _ => {} // Working / judge failed → leave for the next tick or the human
+                }
+            }
+            // Clear-cut: the turn finished but the completion event never arrived — re-fire it.
+            TurnState::Finished => {
+                // A review (plan mode) is only "finished" when it presented its verdict via
+                // ExitPlanMode. A trailing text block is mid-investigation narration — recovering on
+                // it captured a partial review (the bug). So gate review recovery on a definitive
+                // plan; a review idle without one gets surfaced to the human, never partial-captured.
+                let kind = state
+                    .store
+                    .active_session_kind_for_ticket(ticket_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+                if kind == "review" {
+                    let presented = tokio::task::spawn_blocking({
+                        let path = path.clone();
+                        move || harmony_core::session::transcript_presented_plan(&path)
+                    })
+                    .await
+                    .unwrap_or(false);
+                    if !presented {
+                        if idle >= ESCALATE_IDLE_SECS {
+                            let _ = state
+                                .store
+                                .set_orchestrator_note(
+                                    ticket_id,
+                                    "review stalled without presenting a verdict — needs you",
+                                    &state_fingerprint("stuck-review", &ticket_id.to_string()),
+                                )
+                                .await;
+                            state.watchdog_fired.lock().unwrap().insert(session_id);
+                            store_activity(app, state, ticket_id).await;
+                        }
+                        continue;
+                    }
+                }
+                recover_finished_session(app, state, ticket_id, session_id).await;
+            }
+        }
+    }
+}
+
+/// Re-fire the completion event a finished-but-stuck session missed: clear a stale pending question,
+/// then inject the kind's finish event through the normal executor (which backfills a missed review's
+/// text from the transcript). Marks the session recovered (de-dup).
+async fn recover_finished_session(
+    app: &AppHandle,
+    state: &AppState,
+    ticket_id: i64,
+    session_id: i64,
+) {
+    let kind = state
+        .store
+        .active_session_kind_for_ticket(ticket_id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "work".to_string());
+
+    // A finished turn is not blocked on a question — clear any stale one so WorkFinished isn't a
+    // no-op (the `user_question_pending` gate in flow::decide).
+    let _ = state.store.clear_ticket_question(ticket_id).await;
+
+    state.watchdog_fired.lock().unwrap().insert(session_id);
+    let event = finish_event_for_kind(&kind);
+    eprintln!("[watchdog] #{ticket_id} finished-but-stuck ({kind}) → {event:?}");
+    if let Err(e) = apply_event(app, state, ticket_id, event, false).await {
+        eprintln!("[watchdog] {event:?} for #{ticket_id} failed: {e}");
+    }
+}
+
 /// The autonomous coordinator pass, gated by `orchestrator` (runs last in the tick, on fresh
-/// activity). (A) reconcile crashed sessions + dispatch ready work under the concurrency cap; (B)
-/// try to unstick each ticket the human would otherwise handle — answer derivable worker questions,
-/// accept low-risk spec proposals, open PRs on a clean review — escalating genuine judgment (left in
-/// place; the WaitingOnYou desktop notification already fired). The state machine stays
-/// authoritative: every action goes through the existing commands.
+/// activity). (A) reconcile crashed sessions (restart, under the concurrency cap); (B) try to unstick
+/// each ticket the human would otherwise handle — answer derivable worker questions, accept low-risk
+/// spec proposals, open PRs on a clean review — escalating genuine judgment (left in place; the
+/// WaitingOnYou desktop notification already fired). It deliberately does NOT pull Todo → In Progress:
+/// starting work on a ticket is a human-only decision. The state machine stays authoritative: every
+/// action goes through the existing commands.
 async fn poll_orchestrator_once(app: &AppHandle, state: &AppState) {
+    // Record the tick (even when disabled) so the Orchestrator tab's "last checked" advances and
+    // shows the loop is alive; `enabled` in the status tells the UI whether it's actually acting.
+    state.orchestrator_status.lock().unwrap().last_tick_at = Some(harmony_core::now_unix());
+    let _ = app.emit("orchestrator-updated", ());
     if !orchestrator_enabled(state).await {
         return;
     }
@@ -1218,35 +1584,9 @@ async fn poll_orchestrator_once(app: &AppHandle, state: &AppState) {
         }
     }
 
-    // (A2) Dispatch: start eligible ready Todos (has repo + grilled), oldest first, up to slots.
-    let mut ready: Vec<&Ticket> = tickets
-        .iter()
-        .filter(|t| {
-            t.status == harmony_core::status::TODO
-                && harmony_core::orchestrator::todo_dispatch_eligible(
-                    t.repo_id.is_some(),
-                    t.grilled == 1,
-                    t.drafting == 1,
-                    has_live_session(state, t.id),
-                )
-        })
-        .collect();
-    ready.sort_by_key(|t| t.created_at);
-    for t in ready {
-        if slots == 0 {
-            break;
-        }
-        match apply_event(app, state, t.id, Event::Move(Column::InProgress), false).await {
-            Ok(()) => {
-                let _ = state
-                    .store
-                    .set_orchestrator_note(t.id, "dispatched: started work", "")
-                    .await;
-                slots -= 1;
-            }
-            Err(e) => eprintln!("[orchestrator] dispatch #{} failed: {e}", t.id),
-        }
-    }
+    // NOTE: the orchestrator deliberately does NOT dispatch Todo → In Progress. Starting work on a
+    // ticket is a human-only decision (drag it to In Progress); the orchestrator only keeps
+    // already-started work moving.
 
     // (B) Unstick tickets the human would otherwise handle.
     for t in &tickets {
@@ -1268,21 +1608,21 @@ async fn poll_orchestrator_once(app: &AppHandle, state: &AppState) {
             }
             continue;
         }
-        // 3) Auto-advance: a clean, reviewed change waiting for a PR → open it (deterministic).
-        if activity_label(&t.activity).as_deref() == Some("Ready to open PR")
-            && !has_live_session(state, t.id)
-        {
-            match apply_event(app, state, t.id, Event::Move(Column::Pr), false).await {
-                Ok(()) => {
-                    let _ = state
-                        .store
-                        .set_orchestrator_note(t.id, "opened PR (review clean)", "")
-                        .await;
-                }
-                Err(e) => eprintln!("[orchestrator] open-PR #{} failed: {e}", t.id),
-            }
-        }
+        // NOTE: the orchestrator deliberately does NOT advance For Your Review → In PR Review.
+        // Opening a PR is a human-only decision (drag it to In PR Review, or use "Open PR"); the
+        // orchestrator leaves a reviewed-and-clean change resting for the human.
     }
+}
+
+/// Set/clear the orchestrator's in-flight "deciding" status and notify the UI. Pass `Some((ticket,
+/// what))` before a `claude -p` judgment call and `None` after it returns.
+fn set_deciding(app: &AppHandle, state: &AppState, deciding: Option<(i64, &str)>) {
+    state.orchestrator_status.lock().unwrap().deciding =
+        deciding.map(|(ticket_id, what)| Deciding {
+            ticket_id,
+            what: what.to_string(),
+        });
+    let _ = app.emit("orchestrator-updated", ());
 }
 
 /// Conductor: decide how to answer a worker's question (or escalate), then deliver it via the PTY.
@@ -1302,10 +1642,12 @@ async fn orchestrator_answer_question(
     };
     let spec = harmony_core::spec::compose_spec(ticket);
     let (path, q, opts) = (wt.path.clone(), question.clone(), options.clone());
+    set_deciding(app, state, Some((ticket.id, "answering question")));
     let decision = tokio::task::spawn_blocking(move || {
         harmony_core::orchestrator::answer_question(&path, &q, &opts, multi, &spec)
     })
     .await;
+    set_deciding(app, state, None);
     let decision = match decision {
         Ok(Ok(d)) => d,
         _ => return, // conductor failed → leave for the human next tick
@@ -1352,10 +1694,12 @@ async fn orchestrator_judge_spec(app: &AppHandle, state: &AppState, ticket: &Tic
     };
     let current = harmony_core::spec::compose_spec(ticket);
     let (path, proposed) = (wt.path.clone(), ticket.proposed_spec.clone());
+    set_deciding(app, state, Some((ticket.id, "judging spec")));
     let decision = tokio::task::spawn_blocking(move || {
         harmony_core::orchestrator::judge_spec(&path, &current, &proposed)
     })
     .await;
+    set_deciding(app, state, None);
     let decision = match decision {
         Ok(Ok(d)) => d,
         _ => return,
@@ -1636,6 +1980,20 @@ async fn set_ci_autofix(state: State<'_, AppState>, enabled: bool) -> Result<(),
 }
 
 #[tauri::command]
+async fn get_conflict_resolve(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(conflict_resolve_enabled(&state).await)
+}
+
+#[tauri::command]
+async fn set_conflict_resolve(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+    state
+        .store
+        .set_setting("conflict_resolve", if enabled { "on" } else { "off" })
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn get_auto_review(state: State<'_, AppState>) -> Result<bool, String> {
     Ok(auto_review_enabled(&state).await)
 }
@@ -1798,6 +2156,47 @@ async fn set_orchestrator(state: State<'_, AppState>, enabled: bool) -> Result<(
 #[tauri::command]
 async fn get_max_concurrent(state: State<'_, AppState>) -> Result<u32, String> {
     Ok(max_concurrent(&state).await as u32)
+}
+
+/// Live status for the Orchestrator tab: whether it's enabled, the concurrency cap, when it last
+/// ticked, and any in-flight decision.
+#[derive(Serialize)]
+struct OrchestratorStatusView {
+    enabled: bool,
+    max_concurrent: u32,
+    last_tick_at: Option<i64>,
+    deciding: Option<Deciding>,
+}
+
+#[tauri::command]
+async fn get_orchestrator_status(
+    state: State<'_, AppState>,
+) -> Result<OrchestratorStatusView, String> {
+    let enabled = orchestrator_enabled(&state).await;
+    let cap = max_concurrent(&state).await as u32;
+    let (last_tick_at, deciding) = {
+        let s = state.orchestrator_status.lock().unwrap();
+        (s.last_tick_at, s.deciding.clone())
+    };
+    Ok(OrchestratorStatusView {
+        enabled,
+        max_concurrent: cap,
+        last_tick_at,
+        deciding,
+    })
+}
+
+/// The orchestrator's decision log (newest first), for the Orchestrator tab's feed.
+#[tauri::command]
+async fn list_orchestrator_events(
+    state: State<'_, AppState>,
+    limit: Option<i64>,
+) -> Result<Vec<harmony_core::models::OrchestratorEvent>, String> {
+    state
+        .store
+        .list_orchestrator_events(limit.unwrap_or(200).clamp(1, 1000))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -2183,6 +2582,7 @@ fn wire_session(
         let store = state.store.clone();
         let sessions = state.sessions.clone();
         let stopping = state.stopping.clone();
+        let watchdog_fired = state.watchdog_fired.clone();
         tauri::async_runtime::spawn(async move {
             let wait = tokio::task::spawn_blocking(move || {
                 let mut child = child;
@@ -2209,6 +2609,7 @@ fn wire_session(
             // the reply) — clear it so a dead session's prompt doesn't linger in the UI.
             let _ = store.clear_ticket_question(ticket_id).await;
             sessions.lock().unwrap().remove(&session_id);
+            watchdog_fired.lock().unwrap().remove(&session_id);
             let _ = app.emit(
                 "session-exit",
                 SessionExit {
@@ -2238,10 +2639,9 @@ fn send_input(state: State<'_, AppState>, session_id: i64, data: String) -> Resu
 
 /// Relay an answer to a Claude `AskUserQuestion` prompt by driving the live TUI over the
 /// PTY — so the user never has to type in the terminal. The recipe lives here in one place
-/// so it can be tuned against the real TUI (see plan Step 0): the option list starts with
-/// item 0 highlighted; Down arrow moves the cursor, Space toggles a multi-select item,
-/// Enter confirms. A custom answer selects the auto-appended "Other" item (index ==
-/// `option_count`) then types the text.
+/// (see `build_answer_keys`): the option list starts with item 0 highlighted; Down arrow
+/// moves the cursor, Space toggles a multi-select item, Enter confirms. A custom answer
+/// selects the auto-appended "Other" item (index == `option_count`) then types the text.
 #[tauri::command]
 fn answer_question(
     state: State<'_, AppState>,
@@ -2261,9 +2661,75 @@ fn answer_question(
     )
 }
 
-/// Translate an AskUserQuestion answer into TUI keystrokes and write them to the session's PTY.
-/// Shared by the `answer_question` command (the human via `QuestionCard`) and the orchestrator
-/// conductor (answering derivable questions autonomously).
+/// Down-arrow escape sequence — moves the AskUserQuestion cursor to the next option.
+const KEY_DOWN: &str = "\x1b[B";
+/// Carriage return — confirms/submits in the TUI.
+const KEY_ENTER: &str = "\r";
+/// Space — toggles the highlighted item in a multi-select prompt.
+const KEY_SPACE: &str = " ";
+/// Delay between keystrokes so the live TUI registers each as a distinct stdin event.
+/// Claude Code's Ink-based prompt parses each stdin chunk as one key event, so a burst
+/// written all at once had its Space toggles swallowed (nothing got checked). Writing one
+/// key per flushed chunk with a small gap makes every toggle land. Kept short (a handful of
+/// keys × this delay is well under ~150ms total) so it doesn't visibly lag the UI, and the
+/// sessions lock is released between chunks so other sessions aren't stalled.
+const KEY_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Build the ordered list of TUI keystrokes for an AskUserQuestion answer. Each returned
+/// element is one *complete* key (an escape sequence stays intact in a single chunk so it is
+/// never misread as a bare Escape) and is meant to be written+flushed separately by
+/// `deliver_answer`. Pure and PTY-free so the exact recipe can be unit-tested.
+///
+/// The option list starts with item 0 highlighted. Down moves the cursor; for multi-select,
+/// Space toggles the highlighted item; Enter confirms. A custom answer walks past every real
+/// option to the auto-appended "Other" item (index == `option_count`), opens it with Enter,
+/// types the text, then confirms.
+fn build_answer_keys(
+    option_count: usize,
+    selected: &[usize],
+    custom_text: Option<&str>,
+    multi_select: bool,
+) -> Vec<String> {
+    let mut keys: Vec<String> = Vec::new();
+    match custom_text {
+        Some(text) if !text.is_empty() => {
+            for _ in 0..option_count {
+                keys.push(KEY_DOWN.to_string());
+            }
+            keys.push(KEY_ENTER.to_string());
+            keys.push(text.to_string());
+            keys.push(KEY_ENTER.to_string());
+        }
+        _ if multi_select => {
+            let mut sorted = selected.to_vec();
+            sorted.sort_unstable();
+            sorted.dedup();
+            let mut cur = 0usize;
+            for idx in sorted {
+                while cur < idx {
+                    keys.push(KEY_DOWN.to_string());
+                    cur += 1;
+                }
+                keys.push(KEY_SPACE.to_string()); // toggle this item
+            }
+            keys.push(KEY_ENTER.to_string());
+        }
+        _ => {
+            let idx = selected.first().copied().unwrap_or(0);
+            for _ in 0..idx {
+                keys.push(KEY_DOWN.to_string());
+            }
+            keys.push(KEY_ENTER.to_string());
+        }
+    }
+    keys
+}
+
+/// Translate an AskUserQuestion answer into TUI keystrokes (via `build_answer_keys`) and write
+/// them to the session's PTY, one flushed chunk per key with a short gap between them so the
+/// live TUI registers each keystroke — in particular so multi-select Space toggles are not
+/// dropped. Shared by the `answer_question` command (the human via `QuestionCard`) and the
+/// orchestrator conductor (answering derivable questions autonomously).
 fn deliver_answer(
     state: &AppState,
     session_id: i64,
@@ -2272,46 +2738,27 @@ fn deliver_answer(
     custom_text: Option<String>,
     multi_select: bool,
 ) -> Result<(), String> {
-    const DOWN: &str = "\x1b[B";
-    const ENTER: &str = "\r";
-    let mut keys = String::new();
-    match custom_text {
-        Some(text) if !text.is_empty() => {
-            for _ in 0..option_count {
-                keys.push_str(DOWN);
-            }
-            keys.push_str(ENTER);
-            keys.push_str(&text);
-            keys.push_str(ENTER);
+    let keys = build_answer_keys(
+        option_count,
+        &selected,
+        custom_text.as_deref(),
+        multi_select,
+    );
+    for (i, chunk) in keys.iter().enumerate() {
+        {
+            // Re-lock per chunk so we never hold the sessions lock across the sleep below.
+            let mut map = state.sessions.lock().unwrap();
+            let Some(io) = map.get_mut(&session_id) else {
+                return Ok(()); // session went away mid-delivery — nothing more to do
+            };
+            io.writer
+                .write_all(chunk.as_bytes())
+                .map_err(|e| e.to_string())?;
+            io.writer.flush().map_err(|e| e.to_string())?;
         }
-        _ if multi_select => {
-            let mut sorted = selected;
-            sorted.sort_unstable();
-            sorted.dedup();
-            let mut cur = 0usize;
-            for idx in sorted {
-                while cur < idx {
-                    keys.push_str(DOWN);
-                    cur += 1;
-                }
-                keys.push(' '); // toggle this item
-            }
-            keys.push_str(ENTER);
+        if i + 1 < keys.len() {
+            std::thread::sleep(KEY_DELAY);
         }
-        _ => {
-            let idx = selected.first().copied().unwrap_or(0);
-            for _ in 0..idx {
-                keys.push_str(DOWN);
-            }
-            keys.push_str(ENTER);
-        }
-    }
-    let mut map = state.sessions.lock().unwrap();
-    if let Some(io) = map.get_mut(&session_id) {
-        io.writer
-            .write_all(keys.as_bytes())
-            .map_err(|e| e.to_string())?;
-        io.writer.flush().map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -2420,6 +2867,7 @@ async fn build_ctx(state: &AppState, ticket: &Ticket) -> Ctx {
         reviewed: ticket.reviewed == 1,
         pr_exists: pr.exists,
         pr_approved: pr.approved,
+        pr_merged: pr.state == "MERGED",
         is_jira: ticket.jira_key.is_some(),
         // Claude is mid-question → a Stop isn't "done"; keep the session live (see `flow::decide`).
         user_question_pending: !ticket.pending_question.trim().is_empty(),
@@ -2553,6 +3001,25 @@ async fn apply_event(
         // Fresh work cycle → the prior proof no longer describes the change; regenerate it after the
         // upcoming review settles.
         let _ = state.store.reset_proof(ticket_id).await;
+    }
+    // Review completion is normally captured from the plan-file/ExitPlanMode PreToolUse hook, but a
+    // plan-mode `/review` presents its verdict via ExitPlanMode and that hook is sometimes missed —
+    // leaving the Review tab empty. Whatever fired ReviewFinished (hook Stop, plan write, or the
+    // watchdog), backfill the review text from the transcript if it's still empty, so it always lands.
+    if event == Event::ReviewFinished && ticket.review_text.trim().is_empty() {
+        if let Ok(Some(path)) = state
+            .store
+            .latest_transcript_path_for_ticket(ticket_id)
+            .await
+        {
+            if let Ok(Some(text)) = tokio::task::spawn_blocking(move || {
+                harmony_core::session::final_assistant_message(&path)
+            })
+            .await
+            {
+                let _ = state.store.set_ticket_review_text(ticket_id, &text).await;
+            }
+        }
     }
     let ctx = build_ctx(state, &ticket).await;
     let decision = flow::decide(event, &ctx);
@@ -2858,8 +3325,76 @@ async fn request_review(
     apply_event(&app, &state, ticket_id, Event::ReviewRequested, false).await
 }
 
+/// Restore the user's login-shell `PATH`. A macOS `.app` launched from Finder/Dock inherits a bare
+/// PATH (`/usr/bin:/bin:/usr/sbin:/sbin`), so tools installed under `~/.local/bin`,
+/// `/opt/homebrew/bin`, npm/volta/bun, etc. — including `claude`, `gh`, `git`, `node` — aren't on it
+/// and every spawn fails with "not found in PATH". Query the login shell's PATH once and merge it
+/// (plus common install dirs) into this process's env; every spawned child then inherits it. In
+/// `tauri dev` the terminal PATH is already correct, so this is a harmless no-op. Best-effort.
+fn ensure_user_path() {
+    let mut dirs: Vec<String> = std::env::var("PATH")
+        .unwrap_or_default()
+        .split(':')
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    let push = |d: String, dirs: &mut Vec<String>| {
+        if !d.is_empty() && !dirs.iter().any(|e| e == &d) {
+            dirs.push(d);
+        }
+    };
+
+    // 1) The user's real PATH from a login+interactive shell (sources .zprofile/.zshrc/.bash_profile).
+    //    Bracket it with a marker so shell-startup noise (MOTD, etc.) is easy to strip.
+    #[cfg(unix)]
+    {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+        const MARK: &str = "__HARMONY_PATH__";
+        let script = format!(r#"printf %s {MARK}; printf %s "$PATH"; printf %s {MARK}"#);
+        if let Ok(out) = std::process::Command::new(&shell)
+            .args(["-ilc", &script])
+            .output()
+        {
+            let s = String::from_utf8_lossy(&out.stdout);
+            if let (Some(a), Some(b)) = (s.find(MARK), s.rfind(MARK)) {
+                let start = a + MARK.len();
+                if b > start {
+                    for d in s[start..b].split(':') {
+                        push(d.to_string(), &mut dirs);
+                    }
+                }
+            }
+        }
+    }
+
+    // 2) Belt-and-suspenders: common install locations that exist on disk.
+    if let Ok(home) = std::env::var("HOME") {
+        for rel in [
+            ".local/bin",
+            ".claude/local",
+            ".npm-global/bin",
+            ".bun/bin",
+            ".cargo/bin",
+        ] {
+            let p = format!("{home}/{rel}");
+            if std::path::Path::new(&p).is_dir() {
+                push(p, &mut dirs);
+            }
+        }
+    }
+    for p in ["/opt/homebrew/bin", "/usr/local/bin"] {
+        if std::path::Path::new(p).is_dir() {
+            push(p.to_string(), &mut dirs);
+        }
+    }
+
+    std::env::set_var("PATH", dirs.join(":"));
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Fix PATH before anything spawns a child process (the store/hooks don't, but sessions do).
+    ensure_user_path();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
@@ -2893,6 +3428,8 @@ pub fn run() {
                     sessions: Arc::new(Mutex::new(HashMap::new())),
                     reattach: Mutex::new(reattach),
                     stopping: Arc::new(Mutex::new(HashSet::new())),
+                    watchdog_fired: Arc::new(Mutex::new(HashSet::new())),
+                    orchestrator_status: Arc::new(Mutex::new(OrchestratorStatus::default())),
                 });
                 // Consume system events and drive the flow executor (auto-advance).
                 let ev_handle = handle.clone();
@@ -2917,6 +3454,9 @@ pub fn run() {
                             }
                             SystemEvent::FixFinished { ticket_id } => {
                                 (ticket_id, Event::FixFinished)
+                            }
+                            SystemEvent::ConflictFinished { ticket_id } => {
+                                (ticket_id, Event::ConflictFinished)
                             }
                             SystemEvent::AddressFinished { ticket_id } => {
                                 (ticket_id, Event::AddressFinished)
@@ -2950,7 +3490,14 @@ pub fn run() {
                         poll_review_loop_once(&poll_handle, &state).await;
                         // After the review loop settles, evidence passed changes (proof of work).
                         poll_proof_loop_once(&poll_handle, &state).await;
+                        // Resolve PR merge conflicts before the merge/merged checks run.
+                        poll_conflicts_once(&poll_handle, &state).await;
                         poll_auto_merge_once(&poll_handle, &state).await;
+                        // Move a ticket to Done when its PR was merged on GitHub (always on).
+                        poll_pr_merged_once(&poll_handle, &state).await;
+                        // Recover finished-but-stuck sessions (missed Stop / plan-file hook) so the
+                        // flow advances even when a completion event was dropped.
+                        poll_stuck_sessions_once(&poll_handle, &state).await;
                         // Last: refresh each ticket's activity pill from the (now-current) facts.
                         poll_activity_once(&poll_handle, &state).await;
                         // Last: the autonomous coordinator acts on the now-fresh board state.
@@ -3000,6 +3547,8 @@ pub fn run() {
             request_ci_fix,
             get_ci_autofix,
             set_ci_autofix,
+            get_conflict_resolve,
+            set_conflict_resolve,
             get_auto_review,
             set_auto_review,
             get_auto_end_idle,
@@ -3012,6 +3561,8 @@ pub fn run() {
             set_auto_merge,
             get_orchestrator,
             set_orchestrator,
+            get_orchestrator_status,
+            list_orchestrator_events,
             get_max_concurrent,
             set_max_concurrent,
             get_pr_desc_autoupdate,
@@ -3043,7 +3594,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::Utf8ChunkBuffer;
+    use super::*;
 
     #[test]
     fn passes_through_plain_ascii() {
@@ -3097,5 +3648,112 @@ mod tests {
         let out = buf.push(&[0x41, 0xFF, 0x42]);
         assert_eq!(out, "A\u{FFFD}B");
         assert!(buf.pending.is_empty());
+    }
+
+    // Assert the exact ordered keystrokes `deliver_answer` sends to the TUI. Each element is
+    // one complete key written+flushed on its own (with a small delay between them) so the
+    // live prompt registers every keystroke — the multi-select Space toggles in particular.
+
+    #[test]
+    fn single_select_first_option_is_bare_enter() {
+        // Cursor already sits on item 0, so no navigation is needed.
+        assert_eq!(build_answer_keys(3, &[0], None, false), vec![KEY_ENTER]);
+    }
+
+    #[test]
+    fn single_select_later_option_navigates_then_confirms() {
+        assert_eq!(
+            build_answer_keys(3, &[2], None, false),
+            vec![KEY_DOWN, KEY_DOWN, KEY_ENTER]
+        );
+    }
+
+    #[test]
+    fn single_select_empty_defaults_to_first_option() {
+        assert_eq!(build_answer_keys(3, &[], None, false), vec![KEY_ENTER]);
+    }
+
+    #[test]
+    fn multi_select_toggles_each_pick_then_confirms() {
+        // Pick [0, 2] of 3: toggle item 0, move down twice, toggle item 2, confirm.
+        assert_eq!(
+            build_answer_keys(3, &[0, 2], None, true),
+            vec![KEY_SPACE, KEY_DOWN, KEY_DOWN, KEY_SPACE, KEY_ENTER]
+        );
+    }
+
+    #[test]
+    fn multi_select_all_options() {
+        assert_eq!(
+            build_answer_keys(3, &[0, 1, 2], None, true),
+            vec![KEY_SPACE, KEY_DOWN, KEY_SPACE, KEY_DOWN, KEY_SPACE, KEY_ENTER]
+        );
+    }
+
+    #[test]
+    fn multi_select_middle_option_only() {
+        // Selecting just index 1: navigate down once, toggle, confirm.
+        assert_eq!(
+            build_answer_keys(3, &[1], None, true),
+            vec![KEY_DOWN, KEY_SPACE, KEY_ENTER]
+        );
+    }
+
+    #[test]
+    fn multi_select_sorts_and_dedups_picks() {
+        // Unsorted, duplicated input must produce the same recipe as sorted-unique [0, 2].
+        assert_eq!(
+            build_answer_keys(3, &[2, 0, 2], None, true),
+            build_answer_keys(3, &[0, 2], None, true)
+        );
+    }
+
+    #[test]
+    fn multi_select_empty_is_a_bare_enter() {
+        // No toggles, just submit (the UI treats zero picks as a no-op before calling this).
+        assert_eq!(build_answer_keys(3, &[], None, true), vec![KEY_ENTER]);
+    }
+
+    #[test]
+    fn custom_answer_walks_to_other_then_types() {
+        // Past all 3 real options to the "Other" item, Enter to open it, type, confirm.
+        assert_eq!(
+            build_answer_keys(3, &[], Some("do it this way"), false),
+            vec![
+                KEY_DOWN,
+                KEY_DOWN,
+                KEY_DOWN,
+                KEY_ENTER,
+                "do it this way",
+                KEY_ENTER
+            ]
+        );
+    }
+
+    #[test]
+    fn custom_answer_takes_precedence_over_multi_select() {
+        // A non-empty custom text wins even when multi_select is set.
+        assert_eq!(
+            build_answer_keys(2, &[0, 1], Some("nope"), true),
+            vec![KEY_DOWN, KEY_DOWN, KEY_ENTER, "nope", KEY_ENTER]
+        );
+    }
+
+    #[test]
+    fn empty_custom_text_falls_through_to_selection() {
+        // An empty/blank custom string is ignored; the selection path handles the answer.
+        assert_eq!(
+            build_answer_keys(3, &[1], Some(""), false),
+            vec![KEY_DOWN, KEY_ENTER]
+        );
+    }
+
+    #[test]
+    fn every_chunk_is_one_complete_key() {
+        // Escape sequences must never be split across chunks, or the TUI would misread a lone
+        // ESC. Each chunk is either a whole key constant or the custom text payload.
+        for chunk in build_answer_keys(3, &[0, 2], None, true) {
+            assert!(chunk == KEY_DOWN || chunk == KEY_ENTER || chunk == KEY_SPACE);
+        }
     }
 }

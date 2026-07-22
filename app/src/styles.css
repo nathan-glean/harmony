@@ -33,6 +33,29 @@ body {
 .nav button.active { border-color: var(--accent); color: var(--accent); }
 
 .sessions { flex: 1; overflow: auto; padding: 16px; }
+
+/* Orchestrator tab: live status header + decision feed. */
+.orchestrator { flex: 1; overflow: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.orch-status { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+.orch-status .muted { color: var(--muted); }
+.orch-status .spacer { flex: 1; }
+.orch-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+.orch-dot.on { background: #9ece6a; box-shadow: 0 0 6px #9ece6a88; }
+.orch-dot.off { background: var(--muted); }
+.orch-deciding { display: inline-flex; align-items: center; gap: 6px; color: var(--accent); font-size: 12px; }
+.orch-feed { width: 100%; border-collapse: collapse; font-size: 13px; }
+.orch-feed th {
+  text-align: left; color: var(--muted); font-weight: 500; font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.5px; padding: 6px 10px;
+  border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--bg);
+}
+.orch-feed td { padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.orch-feed .srow { cursor: pointer; }
+.orch-feed .srow:hover td { background: var(--panel); }
+.orch-kind { display: inline-block; width: 1.2em; text-align: center; }
+.orch-kind.escalate { color: #f7768e; }
+.orch-kind.dispatch, .orch-kind.pr { color: #9ece6a; }
+.orch-kind.answer, .orch-kind.spec { color: var(--accent); }
 .sessions-bar { display: flex; justify-content: flex-end; margin-bottom: 10px; }
 .sessions .row-del {
   padding: 0 8px; line-height: 1.4; font-size: 15px; color: var(--muted);
@@ -97,7 +120,7 @@ button {
 button:hover:not(:disabled) { border-color: var(--accent); }
 button:disabled { opacity: 0.5; cursor: default; }
 
-.main { display: flex; flex: 1; min-height: 0; }
+.main { display: flex; flex: 1; min-height: 0; padding-bottom: 16px; }
 
 .board {
   display: flex; gap: 12px; padding: 16px; overflow-x: auto; flex: 1;
@@ -626,7 +649,7 @@ button:disabled { opacity: 0.5; cursor: default; }
 .question-option.picked { border-color: var(--accent); }
 .question-option-label { font-size: 13px; font-weight: 600; color: var(--text); }
 .question-option-desc { font-size: 12px; color: var(--muted); white-space: pre-wrap; }
-.question-confirm { align-self: flex-start; border-color: var(--accent); color: var(--accent); }
+.question-hint { font-size: 12px; }
 .question-custom { display: flex; gap: 6px; }
 .question-custom input {
   flex: 1; background: var(--bg); color: var(--text);

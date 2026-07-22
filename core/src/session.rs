@@ -215,8 +215,12 @@ impl SessionManager {
     }
 
     /// Start a read-only `/review` session in the ticket's worktree: Claude reviews the branch's
-    /// changes against the spec and prints suggestions, then ends (the executor stops it on the
-    /// review session's Stop). Plan mode keeps it strictly read-only — it never edits.
+    /// changes against the spec and presents its verdict via `ExitPlanMode`, then ends (the executor
+    /// stops it when the hook captures that plan). Runs in **plan mode** — read-only (edits blocked)
+    /// and giving one definitive completion signal (ExitPlanMode). Plan mode would normally prompt to
+    /// approve the review's bash (it runs the test suite), so harmony's hook auto-approves the review
+    /// session's tool calls (`core/src/hooks.rs`) — no prompts, and edits stay blocked. harmony never
+    /// commits a review session's changes.
     pub async fn start_review(&self, ticket_id: i64) -> Result<SessionHandle> {
         let ticket = self
             .store
@@ -238,6 +242,8 @@ impl SessionManager {
         crate::settings::inject_hooks(&wt.path, self.hook_port)?;
 
         let prompt = render_review_prompt(&ticket);
+        // Plan mode keeps it read-only; the hook auto-approves the review's bash so it never stalls
+        // on an approval prompt, and completion is the definitive ExitPlanMode plan capture.
         let (master, child) = spawn_claude(&wt.path, &prompt, None, "plan")?;
 
         let session_id = self
@@ -337,6 +343,51 @@ impl SessionManager {
         let session_id = self
             .store
             .add_session(ticket_id, wt.id, &wt.path, "fix")
+            .await?;
+        self.store
+            .set_ticket_status(ticket_id, crate::status::WORKING)
+            .await?;
+        Ok(SessionHandle {
+            session_id,
+            master,
+            child,
+        })
+    }
+
+    /// Start an autonomous session to resolve the branch's merge conflicts with its base. Runs in
+    /// the worktree with `bypassPermissions`; the prompt tells Claude to merge `origin/<base>` in and
+    /// resolve every conflict, then stop. harmony commits (completing the merge) + pushes on the
+    /// session's Stop (`ConflictFinished`), updating the PR. Session `kind = "conflict"`.
+    pub async fn start_conflict_resolve(
+        &self,
+        ticket_id: i64,
+        base: &str,
+    ) -> Result<SessionHandle> {
+        let ticket = self
+            .store
+            .get_ticket(ticket_id)
+            .await?
+            .ok_or_else(|| anyhow!("no such ticket #{ticket_id}"))?;
+        let repo_id = ticket
+            .repo_id
+            .ok_or_else(|| anyhow!("ticket #{ticket_id} has no repo assigned"))?;
+        let repo = self
+            .store
+            .get_repo(repo_id)
+            .await?
+            .ok_or_else(|| anyhow!("repo #{repo_id} missing"))?;
+
+        let wt = self
+            .ensure_primary_worktree(&ticket, repo_id, &repo)
+            .await?;
+        crate::settings::inject_hooks(&wt.path, self.hook_port)?;
+
+        let prompt = render_conflict_resolve_prompt(base);
+        let (master, child) = spawn_claude(&wt.path, &prompt, None, "bypassPermissions")?;
+
+        let session_id = self
+            .store
+            .add_session(ticket_id, wt.id, &wt.path, "conflict")
             .await?;
         self.store
             .set_ticket_status(ticket_id, crate::status::WORKING)
@@ -512,15 +563,24 @@ impl SessionManager {
 
 /// Opening prompt for a `/review` session (pre-PR human-review sanity check): run the project's
 /// review skill over this branch's changes and surface concrete suggestions for the user to read
-/// before they open a PR. Read-only (plan mode).
+/// before they open a PR. Runs in plan mode (read-only; the review's bash is auto-approved by the
+/// hook, so it never stalls on a prompt). The verdict is captured when the review presents it via
+/// `ExitPlanMode` — the single definitive completion signal — so the review must do all its
+/// investigation first, then call `ExitPlanMode` ONCE with the complete review.
 fn render_review_prompt(t: &Ticket) -> String {
     format!(
         "Run the `/review` skill on the changes this branch makes versus its base. Review against \
          the ticket's intent below, and produce a concise, prioritised list of concerns \
          (correctness, edge cases, missing tests, scope creep) and any concrete fixes you'd \
-         suggest — this is a pre-PR sanity check for the human. Write your full review to your \
-         plan file as a single, complete document (this is how the review is surfaced to the \
-         human). Do not make any edits to the repo.\n\n\
+         suggest — this is a pre-PR sanity check for the human.\n\n\
+         You are in plan mode (read-only): read files and run non-mutating commands (e.g. the test \
+         suite, a type-check) to verify your claims — these run without asking, so investigate \
+         thoroughly. Do not attempt to edit the repo. Work autonomously — no human is watching, so \
+         do not stop to ask for confirmation.\n\n\
+         When your investigation is COMPLETE, call `ExitPlanMode` exactly once, passing your full \
+         review as the plan: a single, self-contained document (verdict + the prioritised concerns). \
+         This is the only way the review is surfaced to the human, so do not end your turn until you \
+         have called it.\n\n\
          # {}\n\n{}",
         t.title,
         crate::spec::compose_spec(t)
@@ -655,6 +715,26 @@ fn render_ci_fix_prompt(context: &str) -> String {
          them pass. Run the relevant checks/tests locally to confirm the fix. Do NOT run `git commit` \
          or `git push` — harmony commits and pushes your changes, which re-triggers CI.\n\n\
          # Failing CI context\n\n{context}"
+    )
+}
+
+/// Opening prompt for an autonomous conflict-resolve session: this branch's PR conflicts with its
+/// base (`base`). Merge the base in and resolve every conflict faithfully; harmony completes the
+/// merge commit + pushes.
+fn render_conflict_resolve_prompt(base: &str) -> String {
+    format!(
+        "This branch's pull request has merge conflicts with its base branch (`{base}`). Resolve them \
+         autonomously and to completion — no human is watching, so do not ask for confirmation.\n\n\
+         Steps:\n\
+         1. Run `git fetch origin`.\n\
+         2. Run `git merge origin/{base}` to merge the latest base into this branch.\n\
+         3. Resolve EVERY conflict faithfully — preserve the intent of BOTH sides (this branch's \
+         change and the base's change); never discard one side wholesale or delete/weaken tests to \
+         sidestep a conflict. Remove all conflict markers.\n\
+         4. Make sure it still builds and the relevant tests pass.\n\n\
+         Do NOT run `git commit` or `git push` — harmony completes the merge commit and pushes your \
+         resolution, which updates the PR. (If the merge turns out to have no real conflicts, just \
+         leave the merged state for harmony to commit.)"
     )
 }
 
@@ -871,6 +951,200 @@ pub fn latest_progress(path: &str) -> Option<TranscriptProgress> {
     }
 }
 
+/// Whether a session's most recent turn has come to rest — derived from the transcript so it works
+/// even when the `Stop`/plan-file hooks are missed (the stuck-session watchdog's signal).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnState {
+    /// Claude is mid-turn (last assistant message has a pending tool call, or the last record is a
+    /// tool result Claude is about to respond to) — do not disturb.
+    Working,
+    /// Claude finished its turn (last assistant message is text with no pending tool call).
+    Finished,
+    /// Claude is blocked on an `AskUserQuestion` — genuinely waiting on the user.
+    WaitingOnQuestion,
+}
+
+/// Parse the last ~64 KB of a transcript JSONL into its complete records (best-effort: drops a
+/// partial leading line from the seek, and any unparseable trailing partial line). Shared by the
+/// turn-state helpers below and modelled on `latest_progress`'s tail read.
+fn tail_records(path: &str) -> Vec<Value> {
+    use std::io::{Read, Seek, SeekFrom};
+    const TAIL: u64 = 64 * 1024;
+    let mut f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return vec![],
+    };
+    let len = match f.metadata() {
+        Ok(m) => m.len(),
+        Err(_) => return vec![],
+    };
+    let start = len.saturating_sub(TAIL);
+    if f.seek(SeekFrom::Start(start)).is_err() {
+        return vec![];
+    }
+    let mut bytes = Vec::new();
+    if f.read_to_end(&mut bytes).is_err() {
+        return vec![];
+    }
+    let buf = String::from_utf8_lossy(&bytes);
+    let body = if start > 0 {
+        match buf.find('\n') {
+            Some(i) => &buf[i + 1..],
+            None => "",
+        }
+    } else {
+        &buf[..]
+    };
+    body.lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .collect()
+}
+
+/// Classify a session's turn state from its transcript's last record. Fail-safe: anything
+/// unrecognized (empty/unreadable transcript, an in-flight tool call, a trailing tool result) is
+/// treated as `Working` so the watchdog never disturbs a session that isn't clearly at rest.
+pub fn transcript_turn_state(path: &str) -> TurnState {
+    let records = tail_records(path);
+    let last = match records.last() {
+        Some(v) => v,
+        None => return TurnState::Working,
+    };
+    let msg = last.get("message");
+    let role = msg
+        .and_then(|m| m.get("role"))
+        .and_then(|x| x.as_str())
+        .or_else(|| last.get("type").and_then(|x| x.as_str()))
+        .unwrap_or("");
+    if role != "assistant" {
+        // A user record / tool_result — Claude is about to continue.
+        return TurnState::Working;
+    }
+    match msg.and_then(|m| m.get("content")) {
+        Some(Value::Array(arr)) => {
+            let (mut has_text, mut has_tool, mut asks_question, mut exits_plan) =
+                (false, false, false, false);
+            for b in arr {
+                match b.get("type").and_then(|x| x.as_str()).unwrap_or("") {
+                    "tool_use" => match b.get("name").and_then(|x| x.as_str()) {
+                        // User-gated tools: the turn is at rest waiting on the human, not mid-work.
+                        Some("AskUserQuestion") => asks_question = true,
+                        // Plan-mode sessions (grill/review) end by presenting their plan via
+                        // ExitPlanMode; nothing runs after it autonomously, so it IS the finish.
+                        Some("ExitPlanMode") => exits_plan = true,
+                        _ => has_tool = true,
+                    },
+                    "text"
+                        if b.get("text")
+                            .and_then(|x| x.as_str())
+                            .map(|t| !t.trim().is_empty())
+                            .unwrap_or(false) =>
+                    {
+                        has_text = true;
+                    }
+                    _ => {}
+                }
+            }
+            if asks_question {
+                TurnState::WaitingOnQuestion
+            } else if exits_plan {
+                TurnState::Finished
+            } else if has_tool {
+                TurnState::Working
+            } else if has_text {
+                TurnState::Finished
+            } else {
+                TurnState::Working
+            }
+        }
+        // A plain-string assistant message is finished text.
+        Some(Value::String(s)) if !s.trim().is_empty() => TurnState::Finished,
+        _ => TurnState::Working,
+    }
+}
+
+/// Whether the transcript's last assistant record presented a plan via `ExitPlanMode`. This is the
+/// *definitive* completion signal for a plan-mode session (review/grill): unlike a trailing text
+/// block (which can be mid-investigation narration), an `ExitPlanMode` means the agent finished and
+/// presented its deliverable. The watchdog uses it to recover a review only on a real finish.
+pub fn transcript_presented_plan(path: &str) -> bool {
+    let records = tail_records(path);
+    let last = match records.last() {
+        Some(v) => v,
+        None => return false,
+    };
+    let msg = last.get("message");
+    if msg
+        .and_then(|m| m.get("role"))
+        .and_then(|x| x.as_str())
+        .or_else(|| last.get("type").and_then(|x| x.as_str()))
+        != Some("assistant")
+    {
+        return false;
+    }
+    match msg.and_then(|m| m.get("content")) {
+        Some(Value::Array(arr)) => arr.iter().any(|b| {
+            b.get("type").and_then(|x| x.as_str()) == Some("tool_use")
+                && b.get("name").and_then(|x| x.as_str()) == Some("ExitPlanMode")
+        }),
+        _ => false,
+    }
+}
+
+/// The deliverable text of the last assistant turn (uncapped) — used to populate a review's text when
+/// the plan-file/ExitPlanMode capture hook was missed. Prefers the plan an `ExitPlanMode` presented
+/// (for a plan-mode review that IS the full review), else the message's text blocks. `None` if empty.
+pub fn final_assistant_message(path: &str) -> Option<String> {
+    for rec in tail_records(path).iter().rev() {
+        let msg = rec.get("message");
+        let role = msg
+            .and_then(|m| m.get("role"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        if role != "assistant" {
+            continue;
+        }
+        let (mut text, mut plan) = (String::new(), String::new());
+        match msg.and_then(|m| m.get("content")) {
+            Some(Value::String(s)) => text = s.clone(),
+            Some(Value::Array(arr)) => {
+                for b in arr {
+                    match b.get("type").and_then(|x| x.as_str()).unwrap_or("") {
+                        "text" => {
+                            if let Some(t) = b.get("text").and_then(|x| x.as_str()) {
+                                if !text.is_empty() {
+                                    text.push_str("\n\n");
+                                }
+                                text.push_str(t);
+                            }
+                        }
+                        "tool_use"
+                            if b.get("name").and_then(|x| x.as_str()) == Some("ExitPlanMode") =>
+                        {
+                            if let Some(p) = b
+                                .get("input")
+                                .or_else(|| b.get("tool_input"))
+                                .and_then(|i| i.get("plan"))
+                                .and_then(|x| x.as_str())
+                            {
+                                plan = p.to_string();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+        // The ExitPlanMode plan is the review's deliverable; fall back to the message's prose.
+        let chosen = if !plan.trim().is_empty() { plan } else { text };
+        let chosen = chosen.trim().to_string();
+        if !chosen.is_empty() {
+            return Some(chosen);
+        }
+    }
+    None
+}
+
 /// Collapse whitespace runs (incl. newlines) into single spaces and cap the length, so a
 /// progress line stays a single tidy line in the UI.
 fn collapse(s: &str, max: usize) -> String {
@@ -1027,6 +1301,8 @@ mod tests {
             proof_artifacts: String::new(),
             proof_sha: String::new(),
             proof_attempts: 0,
+            conflict_fix_attempts: 0,
+            conflict_fingerprint: String::new(),
         }
     }
 
@@ -1113,5 +1389,121 @@ mod tests {
         let out = render_feedback_prompt(&[dc("general", "", "", 0, "x")], &t);
         assert!(!out.contains("# Spec"));
         assert!(!out.contains("do NOT silently"));
+    }
+
+    fn write_transcript(lines: &[&str]) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let p = std::env::temp_dir().join(format!(
+            "harmony-transcript-{}-{n}.jsonl",
+            std::process::id()
+        ));
+        std::fs::write(&p, lines.join("\n")).unwrap();
+        p
+    }
+
+    #[test]
+    fn turn_state_finished_when_last_block_is_text() {
+        let p = write_transcript(&[
+            r#"{"message":{"role":"user","content":[{"type":"text","text":"do it"}]}}"#,
+            r#"{"message":{"role":"assistant","content":[{"type":"tool_use","name":"Edit"}]}}"#,
+            r#"{"message":{"role":"user","content":[{"type":"tool_result","content":"ok"}]}}"#,
+            r#"{"message":{"role":"assistant","content":[{"type":"text","text":"Done — implementation complete."}]}}"#,
+        ]);
+        assert_eq!(
+            transcript_turn_state(p.to_str().unwrap()),
+            TurnState::Finished
+        );
+        assert_eq!(
+            final_assistant_message(p.to_str().unwrap()).as_deref(),
+            Some("Done — implementation complete.")
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn turn_state_working_when_last_message_has_pending_tool() {
+        // Text preamble + a trailing tool_use → the turn is not done.
+        let p = write_transcript(&[
+            r#"{"message":{"role":"assistant","content":[{"type":"text","text":"running tests"},{"type":"tool_use","name":"Bash"}]}}"#,
+        ]);
+        assert_eq!(
+            transcript_turn_state(p.to_str().unwrap()),
+            TurnState::Working
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn turn_state_waiting_on_ask_user_question() {
+        let p = write_transcript(&[
+            r#"{"message":{"role":"assistant","content":[{"type":"text","text":"which one?"},{"type":"tool_use","name":"AskUserQuestion"}]}}"#,
+        ]);
+        assert_eq!(
+            transcript_turn_state(p.to_str().unwrap()),
+            TurnState::WaitingOnQuestion
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn turn_state_finished_when_review_exits_plan_mode() {
+        // A plan-mode review ends by presenting its verdict via ExitPlanMode — that IS the finish,
+        // even though it's a trailing tool_use. (This is the review-stuck case.)
+        let p = write_transcript(&[
+            r#"{"message":{"role":"assistant","content":[{"type":"text","text":"Both green."},{"type":"tool_use","name":"ExitPlanMode","input":{"plan":"Verdict: ship it. The change is correct."}}]}}"#,
+        ]);
+        assert_eq!(
+            transcript_turn_state(p.to_str().unwrap()),
+            TurnState::Finished
+        );
+        // …and the review text comes from the plan, not a text block.
+        assert_eq!(
+            final_assistant_message(p.to_str().unwrap()).as_deref(),
+            Some("Verdict: ship it. The change is correct.")
+        );
+        // …and it's recognised as a definitive plan finish (watchdog review-recovery gate).
+        assert!(transcript_presented_plan(p.to_str().unwrap()));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn presented_plan_false_for_trailing_text() {
+        // A mid-investigation narration is NOT a definitive finish — the watchdog must not recover a
+        // review on it (that was the partial-capture bug).
+        let p = write_transcript(&[
+            r#"{"message":{"role":"assistant","content":[{"type":"text","text":"Let me confirm what the CI gate runs."}]}}"#,
+        ]);
+        assert!(!transcript_presented_plan(p.to_str().unwrap()));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn turn_state_working_when_last_record_is_tool_result() {
+        let p = write_transcript(&[
+            r#"{"message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash"}]}}"#,
+            r#"{"message":{"role":"user","content":[{"type":"tool_result","content":"output"}]}}"#,
+        ]);
+        assert_eq!(
+            transcript_turn_state(p.to_str().unwrap()),
+            TurnState::Working
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn turn_state_working_on_missing_or_empty_transcript() {
+        assert_eq!(
+            transcript_turn_state("/no/such/file.jsonl"),
+            TurnState::Working
+        );
+        let p = write_transcript(&[""]);
+        assert_eq!(
+            transcript_turn_state(p.to_str().unwrap()),
+            TurnState::Working
+        );
+        assert_eq!(final_assistant_message(p.to_str().unwrap()), None);
+        let _ = std::fs::remove_file(&p);
     }
 }
