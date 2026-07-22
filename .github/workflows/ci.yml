@@ -1,8 +1,9 @@
 name: CI
 
 # Runs the same quality gate as `task ci` (fmt → clippy -D warnings → cargo test
-# --workspace [incl. the docs/flow.md drift guard] → tsc) on every push to main and
-# every PR. Runs on macOS (the app's target OS) so no Linux WebKit deps are needed.
+# --workspace [incl. the docs/flow.md drift guard] → tsc → vitest frontend tests) on
+# every push to main and every PR. Runs on macOS (the app's target OS) so no Linux
+# WebKit deps are needed.
 on:
   push:
     branches: [main]
