@@ -1244,7 +1244,11 @@ async fn hook_emits_work_finished_even_when_question_pending() {
 }
 
 #[tokio::test]
-async fn hook_emits_review_finished_on_review_stop() {
+async fn hook_maps_review_stop_to_idle_not_finished() {
+    // A review runs in plan mode and completes only when it presents its verdict (ExitPlanMode /
+    // plan-file capture — see `hook_emits_review_finished_on_review_capture`). An interactive turn
+    // can yield mid-review, so a bare `Stop` must NOT emit ReviewFinished (that captured a partial
+    // review); it maps to a harmless SessionIdle instead.
     let dir = TempDir::new("evreview");
     let (store, ticket_id, cwd) = seed_session(&dir, "review").await;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<hooks::SystemEvent>();
@@ -1255,7 +1259,7 @@ async fn hook_emits_review_finished_on_review_stop() {
 
     assert_eq!(
         rx.recv().await.unwrap(),
-        hooks::SystemEvent::ReviewFinished { ticket_id }
+        hooks::SystemEvent::SessionIdle { ticket_id }
     );
 }
 
