@@ -394,6 +394,58 @@ async fn clear_all_questions_and_drafting_drops_stale_session_state() {
 }
 
 #[tokio::test]
+async fn orchestrator_notes_append_to_decision_log() {
+    let dir = TempDir::new("orch");
+    let store = open_store(&dir).await;
+    let a = store
+        .add_ticket(Some("DNA-1"), "jira", "Alpha", "", None)
+        .await
+        .unwrap();
+    let b = store
+        .add_ticket(None, "local", "Beta", "", None)
+        .await
+        .unwrap();
+
+    // Each distinct decision appends one event; the ticket's latest note is also updated.
+    store
+        .set_orchestrator_note(a, "dispatched: started work", "seen1")
+        .await
+        .unwrap();
+    store
+        .set_orchestrator_note(b, "escalated: ambiguous scope", "seen2")
+        .await
+        .unwrap();
+    store
+        .set_orchestrator_note(a, "answered question — \"Postgres\"", "seen3")
+        .await
+        .unwrap();
+
+    let events = store.list_orchestrator_events(50).await.unwrap();
+    assert_eq!(events.len(), 3);
+    // Newest-first, joined to the ticket, and classified by kind.
+    assert_eq!(events[0].note, "answered question — \"Postgres\"");
+    assert_eq!(events[0].kind, "answer");
+    assert_eq!(events[0].ticket_id, a);
+    assert_eq!(events[0].jira_key.as_deref(), Some("DNA-1"));
+    assert_eq!(events[1].kind, "escalate");
+    assert_eq!(events[1].ticket_title, "Beta");
+    assert_eq!(events[2].kind, "dispatch");
+
+    // The limit caps the feed.
+    assert_eq!(store.list_orchestrator_events(1).await.unwrap().len(), 1);
+    // The ticket keeps only its latest note.
+    assert_eq!(
+        store
+            .get_ticket(a)
+            .await
+            .unwrap()
+            .unwrap()
+            .orchestrator_note,
+        "answered question — \"Postgres\""
+    );
+}
+
+#[tokio::test]
 async fn upsert_jira_ticket_maps_and_backfills_default_repo() {
     let dir = TempDir::new("jira-repo");
     let store = open_store(&dir).await;
