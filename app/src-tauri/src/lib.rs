@@ -1054,17 +1054,6 @@ fn state_fingerprint(kind: &str, content: &str) -> String {
     format!("{kind}:{:x}", h.finish())
 }
 
-/// The `label` of a ticket's persisted `activity` JSON (used to route auto-advance).
-fn activity_label(json: &str) -> Option<String> {
-    serde_json::from_str::<serde_json::Value>(json)
-        .ok()
-        .and_then(|v| {
-            v.get("label")
-                .and_then(|l| l.as_str())
-                .map(|s| s.to_string())
-        })
-}
-
 /// Truncate for a human-facing note.
 fn short(s: &str, n: usize) -> String {
     let s = s.trim();
@@ -1296,11 +1285,12 @@ async fn recover_finished_session(
 }
 
 /// The autonomous coordinator pass, gated by `orchestrator` (runs last in the tick, on fresh
-/// activity). (A) reconcile crashed sessions + dispatch ready work under the concurrency cap; (B)
-/// try to unstick each ticket the human would otherwise handle — answer derivable worker questions,
-/// accept low-risk spec proposals, open PRs on a clean review — escalating genuine judgment (left in
-/// place; the WaitingOnYou desktop notification already fired). The state machine stays
-/// authoritative: every action goes through the existing commands.
+/// activity). (A) reconcile crashed sessions (restart, under the concurrency cap); (B) try to unstick
+/// each ticket the human would otherwise handle — answer derivable worker questions, accept low-risk
+/// spec proposals, open PRs on a clean review — escalating genuine judgment (left in place; the
+/// WaitingOnYou desktop notification already fired). It deliberately does NOT pull Todo → In Progress:
+/// starting work on a ticket is a human-only decision. The state machine stays authoritative: every
+/// action goes through the existing commands.
 async fn poll_orchestrator_once(app: &AppHandle, state: &AppState) {
     if !orchestrator_enabled(state).await {
         return;
@@ -1365,35 +1355,9 @@ async fn poll_orchestrator_once(app: &AppHandle, state: &AppState) {
         }
     }
 
-    // (A2) Dispatch: start eligible ready Todos (has repo + grilled), oldest first, up to slots.
-    let mut ready: Vec<&Ticket> = tickets
-        .iter()
-        .filter(|t| {
-            t.status == harmony_core::status::TODO
-                && harmony_core::orchestrator::todo_dispatch_eligible(
-                    t.repo_id.is_some(),
-                    t.grilled == 1,
-                    t.drafting == 1,
-                    has_live_session(state, t.id),
-                )
-        })
-        .collect();
-    ready.sort_by_key(|t| t.created_at);
-    for t in ready {
-        if slots == 0 {
-            break;
-        }
-        match apply_event(app, state, t.id, Event::Move(Column::InProgress), false).await {
-            Ok(()) => {
-                let _ = state
-                    .store
-                    .set_orchestrator_note(t.id, "dispatched: started work", "")
-                    .await;
-                slots -= 1;
-            }
-            Err(e) => eprintln!("[orchestrator] dispatch #{} failed: {e}", t.id),
-        }
-    }
+    // NOTE: the orchestrator deliberately does NOT dispatch Todo → In Progress. Starting work on a
+    // ticket is a human-only decision (drag it to In Progress); the orchestrator only keeps
+    // already-started work moving.
 
     // (B) Unstick tickets the human would otherwise handle.
     for t in &tickets {
@@ -1415,20 +1379,9 @@ async fn poll_orchestrator_once(app: &AppHandle, state: &AppState) {
             }
             continue;
         }
-        // 3) Auto-advance: a clean, reviewed change waiting for a PR → open it (deterministic).
-        if activity_label(&t.activity).as_deref() == Some("Ready to open PR")
-            && !has_live_session(state, t.id)
-        {
-            match apply_event(app, state, t.id, Event::Move(Column::Pr), false).await {
-                Ok(()) => {
-                    let _ = state
-                        .store
-                        .set_orchestrator_note(t.id, "opened PR (review clean)", "")
-                        .await;
-                }
-                Err(e) => eprintln!("[orchestrator] open-PR #{} failed: {e}", t.id),
-            }
-        }
+        // NOTE: the orchestrator deliberately does NOT advance For Your Review → In PR Review.
+        // Opening a PR is a human-only decision (drag it to In PR Review, or use "Open PR"); the
+        // orchestrator leaves a reviewed-and-clean change resting for the human.
     }
 }
 

@@ -147,7 +147,7 @@ export function Settings({
           <input type="checkbox" checked={autoMerge} onChange={toggleAutoMerge} /> Auto-merge PRs once
           approved &amp; green
         </label>
-        <label className="muted" title="Orchestrator: autonomously starts ready tickets and restarts crashed sessions (up to the concurrency limit), answers worker questions it can derive from the spec (escalating genuine judgment to you), and auto-advances the loop (opens PRs when a review is clean). It never merges. You still create/spec tickets, offer judgment on escalations, and check outcomes.">
+        <label className="muted" title="Orchestrator: keeps already-started work moving — restarts crashed sessions (up to the concurrency limit) and answers worker questions it can derive from the spec (escalating genuine judgment to you). It never starts a Todo, opens a PR, or merges — those are your decisions (drag the card). You start work, offer judgment on escalations, open PRs, and check outcomes.">
           <input type="checkbox" checked={orchestrator} onChange={toggleOrchestrator} /> Orchestrator —
           run &amp; wrangle sessions autonomously
         </label>
