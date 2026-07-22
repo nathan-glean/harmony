@@ -214,13 +214,13 @@ impl SessionManager {
         })
     }
 
-    /// Start a `/review` session in the ticket's worktree: Claude reviews the branch's changes
-    /// against the spec and writes its verdict, then ends (the executor stops it on the review's
-    /// Stop, or the watchdog recovers it). Runs in the configured autonomous mode (default
-    /// `bypassPermissions`), NOT plan mode: plan mode prompts for approval on every bash command
-    /// (the review runs the test suite), which stalls the unattended run — and it made completion
-    /// depend on the fragile ExitPlanMode capture. Read-only is enforced by the prompt instead;
-    /// harmony never commits a review session's changes.
+    /// Start a read-only `/review` session in the ticket's worktree: Claude reviews the branch's
+    /// changes against the spec and presents its verdict via `ExitPlanMode`, then ends (the executor
+    /// stops it when the hook captures that plan). Runs in **plan mode** — read-only (edits blocked)
+    /// and giving one definitive completion signal (ExitPlanMode). Plan mode would normally prompt to
+    /// approve the review's bash (it runs the test suite), so harmony's hook auto-approves the review
+    /// session's tool calls (`core/src/hooks.rs`) — no prompts, and edits stay blocked. harmony never
+    /// commits a review session's changes.
     pub async fn start_review(&self, ticket_id: i64) -> Result<SessionHandle> {
         let ticket = self
             .store
@@ -241,16 +241,10 @@ impl SessionManager {
             .await?;
         crate::settings::inject_hooks(&wt.path, self.hook_port)?;
 
-        // Same autonomy as work sessions — no approval prompts on the review's test/build commands.
-        let mode = claude_mode(
-            &self
-                .store
-                .get_setting("permission_mode")
-                .await?
-                .unwrap_or_default(),
-        );
         let prompt = render_review_prompt(&ticket);
-        let (master, child) = spawn_claude(&wt.path, &prompt, None, mode)?;
+        // Plan mode keeps it read-only; the hook auto-approves the review's bash so it never stalls
+        // on an approval prompt, and completion is the definitive ExitPlanMode plan capture.
+        let (master, child) = spawn_claude(&wt.path, &prompt, None, "plan")?;
 
         let session_id = self
             .store
@@ -524,22 +518,24 @@ impl SessionManager {
 
 /// Opening prompt for a `/review` session (pre-PR human-review sanity check): run the project's
 /// review skill over this branch's changes and surface concrete suggestions for the user to read
-/// before they open a PR. Runs autonomously (not plan mode), so read-only is enforced here: the
-/// review may READ files and RUN non-mutating checks (tests/build) but must not modify the repo. The
-/// verdict is captured from the session's final message (and any plan-file write), so it must be the
-/// last thing produced. `ExitPlanMode` is not used (not plan mode).
+/// before they open a PR. Runs in plan mode (read-only; the review's bash is auto-approved by the
+/// hook, so it never stalls on a prompt). The verdict is captured when the review presents it via
+/// `ExitPlanMode` — the single definitive completion signal — so the review must do all its
+/// investigation first, then call `ExitPlanMode` ONCE with the complete review.
 fn render_review_prompt(t: &Ticket) -> String {
     format!(
         "Run the `/review` skill on the changes this branch makes versus its base. Review against \
          the ticket's intent below, and produce a concise, prioritised list of concerns \
          (correctness, edge cases, missing tests, scope creep) and any concrete fixes you'd \
          suggest — this is a pre-PR sanity check for the human.\n\n\
-         This is a STRICTLY READ-ONLY review: you may read files and run non-mutating commands (e.g. \
-         the test suite, a type-check) to verify claims, but do NOT create, edit, or delete any \
-         files, and do NOT run `git add`/`commit`/`push` or `ExitPlanMode`. Work autonomously to \
-         completion — no human is watching, so do not ask for confirmation.\n\n\
-         When done, present your COMPLETE review as your final message (this is how it's surfaced to \
-         the human) — a single, self-contained document, not a pointer to something else.\n\n\
+         You are in plan mode (read-only): read files and run non-mutating commands (e.g. the test \
+         suite, a type-check) to verify your claims — these run without asking, so investigate \
+         thoroughly. Do not attempt to edit the repo. Work autonomously — no human is watching, so \
+         do not stop to ask for confirmation.\n\n\
+         When your investigation is COMPLETE, call `ExitPlanMode` exactly once, passing your full \
+         review as the plan: a single, self-contained document (verdict + the prioritised concerns). \
+         This is the only way the review is surfaced to the human, so do not end your turn until you \
+         have called it.\n\n\
          # {}\n\n{}",
         t.title,
         crate::spec::compose_spec(t)
@@ -1001,6 +997,34 @@ pub fn transcript_turn_state(path: &str) -> TurnState {
     }
 }
 
+/// Whether the transcript's last assistant record presented a plan via `ExitPlanMode`. This is the
+/// *definitive* completion signal for a plan-mode session (review/grill): unlike a trailing text
+/// block (which can be mid-investigation narration), an `ExitPlanMode` means the agent finished and
+/// presented its deliverable. The watchdog uses it to recover a review only on a real finish.
+pub fn transcript_presented_plan(path: &str) -> bool {
+    let records = tail_records(path);
+    let last = match records.last() {
+        Some(v) => v,
+        None => return false,
+    };
+    let msg = last.get("message");
+    if msg
+        .and_then(|m| m.get("role"))
+        .and_then(|x| x.as_str())
+        .or_else(|| last.get("type").and_then(|x| x.as_str()))
+        != Some("assistant")
+    {
+        return false;
+    }
+    match msg.and_then(|m| m.get("content")) {
+        Some(Value::Array(arr)) => arr.iter().any(|b| {
+            b.get("type").and_then(|x| x.as_str()) == Some("tool_use")
+                && b.get("name").and_then(|x| x.as_str()) == Some("ExitPlanMode")
+        }),
+        _ => false,
+    }
+}
+
 /// The deliverable text of the last assistant turn (uncapped) — used to populate a review's text when
 /// the plan-file/ExitPlanMode capture hook was missed. Prefers the plan an `ExitPlanMode` presented
 /// (for a plan-mode review that IS the full review), else the message's text blocks. `None` if empty.
@@ -1372,6 +1396,19 @@ mod tests {
             final_assistant_message(p.to_str().unwrap()).as_deref(),
             Some("Verdict: ship it. The change is correct.")
         );
+        // …and it's recognised as a definitive plan finish (watchdog review-recovery gate).
+        assert!(transcript_presented_plan(p.to_str().unwrap()));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn presented_plan_false_for_trailing_text() {
+        // A mid-investigation narration is NOT a definitive finish — the watchdog must not recover a
+        // review on it (that was the partial-capture bug).
+        let p = write_transcript(&[
+            r#"{"message":{"role":"assistant","content":[{"type":"text","text":"Let me confirm what the CI gate runs."}]}}"#,
+        ]);
+        assert!(!transcript_presented_plan(p.to_str().unwrap()));
         let _ = std::fs::remove_file(&p);
     }
 

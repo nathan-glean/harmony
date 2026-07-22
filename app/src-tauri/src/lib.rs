@@ -1226,6 +1226,40 @@ async fn poll_stuck_sessions_once(app: &AppHandle, state: &AppState) {
             }
             // Clear-cut: the turn finished but the completion event never arrived — re-fire it.
             TurnState::Finished => {
+                // A review (plan mode) is only "finished" when it presented its verdict via
+                // ExitPlanMode. A trailing text block is mid-investigation narration — recovering on
+                // it captured a partial review (the bug). So gate review recovery on a definitive
+                // plan; a review idle without one gets surfaced to the human, never partial-captured.
+                let kind = state
+                    .store
+                    .active_session_kind_for_ticket(ticket_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+                if kind == "review" {
+                    let presented = tokio::task::spawn_blocking({
+                        let path = path.clone();
+                        move || harmony_core::session::transcript_presented_plan(&path)
+                    })
+                    .await
+                    .unwrap_or(false);
+                    if !presented {
+                        if idle >= ESCALATE_IDLE_SECS {
+                            let _ = state
+                                .store
+                                .set_orchestrator_note(
+                                    ticket_id,
+                                    "review stalled without presenting a verdict — needs you",
+                                    &state_fingerprint("stuck-review", &ticket_id.to_string()),
+                                )
+                                .await;
+                            state.watchdog_fired.lock().unwrap().insert(session_id);
+                            store_activity(app, state, ticket_id).await;
+                        }
+                        continue;
+                    }
+                }
                 recover_finished_session(app, state, ticket_id, session_id).await;
             }
         }
