@@ -171,13 +171,13 @@ fn live_github_write_pr() {
         return skip("HARMONY_LIVE_GH_WORKTREE/BRANCH unset — not pushing or opening a PR");
     };
     github::push_branch(&worktree, &branch).expect("push_branch failed");
-    let url = github::create_draft_pr(
+    let url = github::create_pr(
         &worktree,
-        "harmony live-call validation (draft)",
-        "Automated draft PR from harmony live test. Safe to close.",
+        "harmony live-call validation",
+        "Automated PR from harmony live test. Safe to close.",
         &branch,
     )
-    .expect("create_draft_pr failed");
+    .expect("create_pr failed");
     assert!(url.starts_with("http"), "PR URL not returned: {url}");
-    eprintln!("draft PR opened: {url}");
+    eprintln!("PR opened: {url}");
 }

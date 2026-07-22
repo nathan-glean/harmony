@@ -72,7 +72,7 @@ enum Cmd {
         #[command(subcommand)]
         cmd: JiraCmd,
     },
-    /// Push the ticket's branch and open a draft PR (+ optional Jira writeback)
+    /// Push the ticket's branch and open a PR ready for review (+ optional Jira writeback)
     Pr {
         ticket_id: i64,
         #[arg(long)]
@@ -350,7 +350,7 @@ async fn jira_ref(ticket: &harmony_core::models::Ticket) -> Option<String> {
     }
 }
 
-/// Push the branch, open a draft PR, set ticket → In Review, and (opt-in) write back to
+/// Push the branch, open a PR ready for review, set ticket → In Review, and (opt-in) write back to
 /// Jira (status + PR-link comment). DESIGN Q7/Q11. With `summary`, the PR body is a
 /// Claude-generated diff summary (else the composed spec).
 async fn pr_flow(
@@ -392,8 +392,8 @@ async fn pr_flow(
 
     println!("[pr] pushing {} …", wt.branch);
     harmony_core::github::push_branch(&wt.path, &wt.branch)?;
-    println!("[pr] opening draft PR …");
-    let url = harmony_core::github::create_draft_pr(&wt.path, &pr_title, &body, &wt.branch)?;
+    println!("[pr] opening PR …");
+    let url = harmony_core::github::create_pr(&wt.path, &pr_title, &body, &wt.branch)?;
     store
         .set_ticket_status(ticket_id, harmony_core::status::IN_REVIEW)
         .await?;

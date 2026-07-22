@@ -716,7 +716,7 @@ async fn open_pr(state: State<'_, AppState>, ticket_id: i64) -> Result<String, S
     Ok(url)
 }
 
-/// Push the branch and open the draft PR (generated body, Jira writeback). Does NOT change the
+/// Push the branch and open the PR ready for review (generated body, Jira writeback). Does NOT change the
 /// ticket column — the caller (the `open_pr` command, or the flow executor) owns the status.
 /// Takes `&Store` (not `&AppState`) so the executor can run it in a spawned background task.
 async fn open_pr_for(store: &Store, ticket_id: i64) -> Result<String, String> {
@@ -781,7 +781,7 @@ async fn open_pr_for(store: &Store, ticket_id: i64) -> Result<String, String> {
             &fallback,
         );
         harmony_core::github::push_branch(&path, &branch).map_err(|e| e.to_string())?;
-        let url = harmony_core::github::create_draft_pr(&path, &title, &body, &branch)
+        let url = harmony_core::github::create_pr(&path, &title, &body, &branch)
             .map_err(|e| e.to_string())?;
 
         // Best-effort proof comment: host any media (fills in URLs), render, and post. Never fails

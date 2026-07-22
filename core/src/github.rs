@@ -1,5 +1,5 @@
-//! GitHub PR operations via `gh` (DESIGN Q11): push the worktree's branch, open a draft PR,
-//! read PR status/approval, and squash-merge once approved (on the move to Done).
+//! GitHub PR operations via `gh` (DESIGN Q11): push the worktree's branch, open a PR ready for
+//! review, read PR status/approval, and squash-merge once approved (on the move to Done).
 
 use anyhow::{anyhow, Result};
 use serde::Serialize;
@@ -528,12 +528,15 @@ pub fn merge_pr(worktree: &str) -> Result<()> {
     Ok(())
 }
 
-/// Open a draft PR; returns the PR URL (`gh` prints it to stdout).
-pub fn create_draft_pr(worktree: &str, title: &str, body: &str, branch: &str) -> Result<String> {
+/// Open a PR ready for review; returns the PR URL (`gh` prints it to stdout). Reaching the "In PR
+/// Review" column is the human's explicit signal to hand the change to the team, so the PR is opened
+/// ready (not a draft): it requests reviewers, notifies them, and is mergeable by harmony's gated /
+/// auto-merge once approved. (A draft PR would do none of those and blocks `gh pr merge`.)
+pub fn create_pr(worktree: &str, title: &str, body: &str, branch: &str) -> Result<String> {
     let out = run(
         "gh",
         &[
-            "pr", "create", "--draft", "--title", title, "--body", body, "--head", branch,
+            "pr", "create", "--title", title, "--body", body, "--head", branch,
         ],
         worktree,
     )?;
