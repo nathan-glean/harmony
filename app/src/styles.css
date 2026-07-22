@@ -97,7 +97,7 @@ button {
 button:hover:not(:disabled) { border-color: var(--accent); }
 button:disabled { opacity: 0.5; cursor: default; }
 
-.main { display: flex; flex: 1; min-height: 0; }
+.main { display: flex; flex: 1; min-height: 0; padding-bottom: 16px; }
 
 .board {
   display: flex; gap: 12px; padding: 16px; overflow-x: auto; flex: 1;
