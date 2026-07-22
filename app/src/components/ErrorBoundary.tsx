@@ -5,7 +5,13 @@ import { Component, type ErrorInfo, type ReactNode } from "react";
 // the detail panel: the board stays usable and the actual error is surfaced instead of a white
 // screen. `resetKey` (the selected ticket id) re-mounts the boundary on ticket switch so a crash
 // on one ticket doesn't stick when you open another.
-type Props = { children: ReactNode; onClose?: () => void; resetKey?: unknown };
+type Props = {
+  children: ReactNode;
+  onClose?: () => void;
+  resetKey?: unknown;
+  title?: string;
+  showReload?: boolean;
+};
 type State = { error: Error | null };
 
 export class ErrorBoundary extends Component<Props, State> {
@@ -16,7 +22,7 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
-    console.error("Detail panel crashed:", error, info.componentStack);
+    console.error("UI crashed:", error, info.componentStack);
   }
 
   componentDidUpdate(prev: Props) {
@@ -27,13 +33,22 @@ export class ErrorBoundary extends Component<Props, State> {
 
   render() {
     if (this.state.error) {
+      const stack = this.state.error.stack || "";
       return (
         <div className="panel-error">
-          <div className="panel-error-head">Something went wrong displaying this ticket</div>
-          <pre className="panel-error-msg">{String(this.state.error.message || this.state.error)}</pre>
+          <div className="panel-error-head">
+            {this.props.title ?? "Something went wrong displaying this ticket"}
+          </div>
+          <pre className="panel-error-msg">
+            {String(this.state.error.message || this.state.error)}
+            {stack ? "\n\n" + stack : ""}
+          </pre>
           <div className="panel-error-actions">
             <button onClick={() => this.setState({ error: null })}>Try again</button>
             {this.props.onClose && <button onClick={this.props.onClose}>Close</button>}
+            {this.props.showReload && (
+              <button onClick={() => window.location.reload()}>Reload app</button>
+            )}
           </div>
         </div>
       );
