@@ -767,6 +767,25 @@ impl Store {
         Ok(())
     }
 
+    /// Clear every ticket's pending question — used at startup, where no sessions are live yet, so any
+    /// stored question is stale (its session died without the answer's PostToolUse ever clearing it).
+    pub async fn clear_all_questions(&self) -> Result<()> {
+        sqlx::query("UPDATE tickets SET pending_question = '' WHERE pending_question != ''")
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Clear the `drafting` flag on every ticket — used at startup. `drafting` means a live grill
+    /// session is producing the spec; with no sessions live it's stale (a crash/force-quit skipped
+    /// the on-exit clear), and it otherwise blocks dragging the ticket ("finish the interview first").
+    pub async fn clear_all_drafting(&self) -> Result<()> {
+        sqlx::query("UPDATE tickets SET drafting = 0 WHERE drafting != 0")
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Mark a ticket's one-time initial plan run as done, so subsequent starts (resume or
     /// re-entry into In Progress) skip plan mode.
     pub async fn mark_ticket_planned(&self, id: i64) -> Result<()> {

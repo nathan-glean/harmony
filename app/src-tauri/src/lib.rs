@@ -2144,6 +2144,9 @@ fn wire_session(
             }
             // A grill stopped before producing a spec must not leave the ticket "Drafting".
             let _ = store.set_ticket_drafting(ticket_id, false).await;
+            // A question the session was asking can no longer be answered (no live PTY to receive
+            // the reply) — clear it so a dead session's prompt doesn't linger in the UI.
+            let _ = store.clear_ticket_question(ticket_id).await;
             sessions.lock().unwrap().remove(&session_id);
             let _ = app.emit(
                 "session-exit",
@@ -2811,6 +2814,12 @@ pub fn run() {
                 // Sessions don't survive a process restart (PTYs are our children), so
                 // any still-open session in the DB is a zombie — mark it ended.
                 let _ = store.end_all_open_sessions().await;
+                // No sessions are live yet, so any stored AskUserQuestion is stale (its session
+                // died before the answer's PostToolUse cleared it) — drop them all.
+                let _ = store.clear_all_questions().await;
+                // Likewise clear a stale `drafting` flag left by a grill that a crash/force-quit
+                // interrupted — otherwise the ticket is stuck ("finish the interview first").
+                let _ = store.clear_all_drafting().await;
                 // Hook server → executor channel: the hook raises domain events (grill/work/
                 // review done); the consumer task below runs them through the flow executor.
                 let (tx, mut rx) =
