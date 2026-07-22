@@ -159,6 +159,20 @@ pub struct DiffComment {
     pub anchor: String, // context for non-diff targets (quoted snippet / PR author+snippet)
 }
 
+/// One orchestrator decision, enriched with its ticket for the Orchestrator tab's decision feed.
+/// `kind` is a coarse category (`dispatch|restart|answer|spec|pr|escalate|info`) for icon/colour;
+/// `note` is the human-facing rationale (e.g. "answered question — \"Postgres\"").
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct OrchestratorEvent {
+    pub id: i64,
+    pub ticket_id: i64,
+    pub kind: String,
+    pub note: String,
+    pub created_at: i64,
+    pub ticket_title: String,
+    pub jira_key: Option<String>,
+}
+
 /// A worktree enriched with its ticket + repo info, for the Worktrees view.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct WorktreeView {

@@ -5,6 +5,7 @@ import { confirm } from "@tauri-apps/plugin-dialog";
 import { onAction } from "@tauri-apps/plugin-notification";
 import { Board } from "./components/Board";
 import { Sessions } from "./components/Sessions";
+import { Orchestrator } from "./components/Orchestrator";
 import { Worktrees } from "./components/Worktrees";
 import { Settings } from "./components/Settings";
 import { DiffPane } from "./components/DiffPane";
@@ -23,7 +24,9 @@ import type { Ticket, Repo, SessionView, WorktreeView, PendingQuestion, SessionP
 import { parseActivity } from "./types";
 
 export function App() {
-  const [view, setView] = useState<"board" | "sessions" | "worktrees" | "settings">("board");
+  const [view, setView] = useState<
+    "board" | "sessions" | "orchestrator" | "worktrees" | "settings"
+  >("board");
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [sessions, setSessions] = useState<SessionView[]>([]);
   const [worktrees, setWorktrees] = useState<WorktreeView[]>([]);
@@ -474,6 +477,12 @@ export function App() {
             Sessions
           </button>
           <button
+            className={view === "orchestrator" ? "active" : ""}
+            onClick={() => setView("orchestrator")}
+          >
+            Orchestrator
+          </button>
+          <button
             className={view === "worktrees" ? "active" : ""}
             onClick={() => setView("worktrees")}
           >
@@ -646,6 +655,8 @@ export function App() {
             onClearEnded={clearEndedSessions}
             onDeleteGroup={deleteWorktreeSessions}
           />
+        ) : view === "orchestrator" ? (
+          <Orchestrator onOpen={(tid) => openTicketFromSession(tid, false)} />
         ) : (
         <>
         <Board

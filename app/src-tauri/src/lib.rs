@@ -64,6 +64,25 @@ struct AppState {
     /// Session ids the stuck-session watchdog has already fired a recovery event for, so it doesn't
     /// re-fire each tick (for events that don't tear the session down). Cleared on session exit.
     watchdog_fired: Arc<Mutex<HashSet<i64>>>,
+    /// Live orchestrator status for the Orchestrator tab (last tick time + any in-flight decision).
+    /// In-memory only (reset on restart); the durable history is the `orchestrator_events` log.
+    orchestrator_status: Arc<Mutex<OrchestratorStatus>>,
+}
+
+/// What the orchestrator is doing right now, surfaced to the Orchestrator tab.
+#[derive(Clone, Default, Serialize)]
+struct OrchestratorStatus {
+    /// Unix seconds of the last `poll_orchestrator_once` tick (None until the first tick).
+    last_tick_at: Option<i64>,
+    /// Set while an orchestrator `claude -p` judgment call is in flight; None when idle.
+    deciding: Option<Deciding>,
+}
+
+#[derive(Clone, Serialize)]
+struct Deciding {
+    ticket_id: i64,
+    /// Human label of the in-flight decision ("answering question" | "judging spec" | ...).
+    what: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -1197,11 +1216,13 @@ async fn poll_stuck_sessions_once(app: &AppHandle, state: &AppState) {
                 })
                 .await
                 .unwrap_or_default();
+                set_deciding(app, state, Some((ticket_id, "judging stuck session")));
                 let verdict = tokio::task::spawn_blocking({
                     let wt = wt.path.clone();
                     move || harmony_core::orchestrator::judge_stuck(&wt, &tail)
                 })
                 .await;
+                set_deciding(app, state, None);
                 match verdict {
                     Ok(Ok(harmony_core::orchestrator::StuckVerdict::Done)) => {
                         recover_finished_session(app, state, ticket_id, session_id).await;
@@ -1302,6 +1323,10 @@ async fn recover_finished_session(
 /// place; the WaitingOnYou desktop notification already fired). The state machine stays
 /// authoritative: every action goes through the existing commands.
 async fn poll_orchestrator_once(app: &AppHandle, state: &AppState) {
+    // Record the tick (even when disabled) so the Orchestrator tab's "last checked" advances and
+    // shows the loop is alive; `enabled` in the status tells the UI whether it's actually acting.
+    state.orchestrator_status.lock().unwrap().last_tick_at = Some(harmony_core::now_unix());
+    let _ = app.emit("orchestrator-updated", ());
     if !orchestrator_enabled(state).await {
         return;
     }
@@ -1432,6 +1457,17 @@ async fn poll_orchestrator_once(app: &AppHandle, state: &AppState) {
     }
 }
 
+/// Set/clear the orchestrator's in-flight "deciding" status and notify the UI. Pass `Some((ticket,
+/// what))` before a `claude -p` judgment call and `None` after it returns.
+fn set_deciding(app: &AppHandle, state: &AppState, deciding: Option<(i64, &str)>) {
+    state.orchestrator_status.lock().unwrap().deciding =
+        deciding.map(|(ticket_id, what)| Deciding {
+            ticket_id,
+            what: what.to_string(),
+        });
+    let _ = app.emit("orchestrator-updated", ());
+}
+
 /// Conductor: decide how to answer a worker's question (or escalate), then deliver it via the PTY.
 async fn orchestrator_answer_question(
     app: &AppHandle,
@@ -1449,10 +1485,12 @@ async fn orchestrator_answer_question(
     };
     let spec = harmony_core::spec::compose_spec(ticket);
     let (path, q, opts) = (wt.path.clone(), question.clone(), options.clone());
+    set_deciding(app, state, Some((ticket.id, "answering question")));
     let decision = tokio::task::spawn_blocking(move || {
         harmony_core::orchestrator::answer_question(&path, &q, &opts, multi, &spec)
     })
     .await;
+    set_deciding(app, state, None);
     let decision = match decision {
         Ok(Ok(d)) => d,
         _ => return, // conductor failed → leave for the human next tick
@@ -1499,10 +1537,12 @@ async fn orchestrator_judge_spec(app: &AppHandle, state: &AppState, ticket: &Tic
     };
     let current = harmony_core::spec::compose_spec(ticket);
     let (path, proposed) = (wt.path.clone(), ticket.proposed_spec.clone());
+    set_deciding(app, state, Some((ticket.id, "judging spec")));
     let decision = tokio::task::spawn_blocking(move || {
         harmony_core::orchestrator::judge_spec(&path, &current, &proposed)
     })
     .await;
+    set_deciding(app, state, None);
     let decision = match decision {
         Ok(Ok(d)) => d,
         _ => return,
@@ -1945,6 +1985,47 @@ async fn set_orchestrator(state: State<'_, AppState>, enabled: bool) -> Result<(
 #[tauri::command]
 async fn get_max_concurrent(state: State<'_, AppState>) -> Result<u32, String> {
     Ok(max_concurrent(&state).await as u32)
+}
+
+/// Live status for the Orchestrator tab: whether it's enabled, the concurrency cap, when it last
+/// ticked, and any in-flight decision.
+#[derive(Serialize)]
+struct OrchestratorStatusView {
+    enabled: bool,
+    max_concurrent: u32,
+    last_tick_at: Option<i64>,
+    deciding: Option<Deciding>,
+}
+
+#[tauri::command]
+async fn get_orchestrator_status(
+    state: State<'_, AppState>,
+) -> Result<OrchestratorStatusView, String> {
+    let enabled = orchestrator_enabled(&state).await;
+    let cap = max_concurrent(&state).await as u32;
+    let (last_tick_at, deciding) = {
+        let s = state.orchestrator_status.lock().unwrap();
+        (s.last_tick_at, s.deciding.clone())
+    };
+    Ok(OrchestratorStatusView {
+        enabled,
+        max_concurrent: cap,
+        last_tick_at,
+        deciding,
+    })
+}
+
+/// The orchestrator's decision log (newest first), for the Orchestrator tab's feed.
+#[tauri::command]
+async fn list_orchestrator_events(
+    state: State<'_, AppState>,
+    limit: Option<i64>,
+) -> Result<Vec<harmony_core::models::OrchestratorEvent>, String> {
+    state
+        .store
+        .list_orchestrator_events(limit.unwrap_or(200).clamp(1, 1000))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -3169,6 +3250,7 @@ pub fn run() {
                     reattach: Mutex::new(reattach),
                     stopping: Arc::new(Mutex::new(HashSet::new())),
                     watchdog_fired: Arc::new(Mutex::new(HashSet::new())),
+                    orchestrator_status: Arc::new(Mutex::new(OrchestratorStatus::default())),
                 });
                 // Consume system events and drive the flow executor (auto-advance).
                 let ev_handle = handle.clone();
@@ -3291,6 +3373,8 @@ pub fn run() {
             set_auto_merge,
             get_orchestrator,
             set_orchestrator,
+            get_orchestrator_status,
+            list_orchestrator_events,
             get_max_concurrent,
             set_max_concurrent,
             get_pr_desc_autoupdate,

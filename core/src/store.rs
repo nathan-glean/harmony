@@ -6,8 +6,32 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 use std::path::Path;
 
-use crate::models::{DiffComment, Repo, Session, SessionView, Ticket, Worktree, WorktreeView};
+use crate::models::{
+    DiffComment, OrchestratorEvent, Repo, Session, SessionView, Ticket, Worktree, WorktreeView,
+};
 use crate::now_unix;
+
+/// Classify an orchestrator note into a coarse `kind` for the UI (icon/colour), from its text — the
+/// note strings are authored by the orchestrator/watchdog and stable. Keeps the decision sites from
+/// having to thread a `kind` through every `set_orchestrator_note` call.
+fn orchestrator_kind(note: &str) -> &'static str {
+    let n = note.to_ascii_lowercase();
+    if n.starts_with("escalated") || n.contains("needs you") {
+        "escalate"
+    } else if n.starts_with("dispatched") {
+        "dispatch"
+    } else if n.starts_with("restarted") {
+        "restart"
+    } else if n.starts_with("answered") {
+        "answer"
+    } else if n.starts_with("accepted") {
+        "spec"
+    } else if n.starts_with("opened pr") {
+        "pr"
+    } else {
+        "info"
+    }
+}
 
 #[derive(Clone)]
 pub struct Store {
@@ -112,6 +136,13 @@ impl Store {
             created_at INTEGER NOT NULL,
             target TEXT NOT NULL DEFAULT 'diff',
             anchor TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS orchestrator_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticket_id INTEGER NOT NULL,
+            kind TEXT NOT NULL DEFAULT '',
+            note TEXT NOT NULL,
+            created_at INTEGER NOT NULL
         );
         "#;
         for stmt in DDL.split(';') {
@@ -913,7 +944,10 @@ impl Store {
     }
 
     /// Record the orchestrator's last action + rationale (human-facing audit line) and the "stuck
-    /// state" fingerprint it decided on (idempotency, so it doesn't re-decide the same state).
+    /// state" fingerprint it decided on (idempotency, so it doesn't re-decide the same state). Also
+    /// appends the action to `orchestrator_events` — the durable, cross-ticket decision log for the
+    /// Orchestrator tab. Callers invoke this exactly once per distinct decision (deduped by the
+    /// `seen` fingerprint), so the log has one row per real action, no duplicates.
     pub async fn set_orchestrator_note(&self, id: i64, note: &str, seen: &str) -> Result<()> {
         sqlx::query("UPDATE tickets SET orchestrator_note = ?, orchestrator_seen = ? WHERE id = ?")
             .bind(note)
@@ -921,7 +955,30 @@ impl Store {
             .bind(id)
             .execute(&self.pool)
             .await?;
+        sqlx::query(
+            "INSERT INTO orchestrator_events (ticket_id, kind, note, created_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(orchestrator_kind(note))
+        .bind(note)
+        .bind(now_unix())
+        .execute(&self.pool)
+        .await?;
         Ok(())
+    }
+
+    /// The orchestrator's decision log, newest-first, joined to each ticket for display. Capped by
+    /// `limit`.
+    pub async fn list_orchestrator_events(&self, limit: i64) -> Result<Vec<OrchestratorEvent>> {
+        Ok(sqlx::query_as::<_, OrchestratorEvent>(
+            "SELECT e.id, e.ticket_id, e.kind, e.note, e.created_at, t.title AS ticket_title, \
+             t.jira_key \
+             FROM orchestrator_events e JOIN tickets t ON t.id = e.ticket_id \
+             ORDER BY e.id DESC LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?)
     }
 
     /// Increment the orchestrator's crash-restart counter (capped against crash loops by the caller).

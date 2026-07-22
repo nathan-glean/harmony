@@ -192,6 +192,25 @@ export type DiffComment = {
   anchor: string;
 };
 
+// One orchestrator decision (matches harmony_core::models::OrchestratorEvent).
+export type OrchestratorEvent = {
+  id: number;
+  ticket_id: number;
+  kind: string; // dispatch | restart | answer | spec | pr | escalate | info
+  note: string;
+  created_at: number; // unix seconds
+  ticket_title: string;
+  jira_key: string | null;
+};
+
+// Live orchestrator status (matches the get_orchestrator_status command).
+export type OrchestratorStatus = {
+  enabled: boolean;
+  max_concurrent: number;
+  last_tick_at: number | null; // unix seconds
+  deciding: { ticket_id: number; what: string } | null;
+};
+
 export const COLUMNS = ["todo", "working", "waiting", "in_review", "done"] as const;
 
 export const COLUMN_LABELS: Record<string, string> = {
