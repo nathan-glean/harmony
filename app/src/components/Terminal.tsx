@@ -198,7 +198,23 @@ export function TerminalView({ sessionId }: { sessionId: number }) {
       onScroll.dispose();
       unlisten.then((u) => u());
       window.removeEventListener("resize", pushSize);
-      term.dispose();
+      // Dispose the WebGL addon explicitly, first, while the terminal core is still alive.
+      // @xterm/addon-webgl's own dispose (which xterm would otherwise trigger from term.dispose())
+      // reaches into `this._terminal._core`, which is already torn down by then, throwing
+      // "undefined is not an object (this._terminal._core._store._isDisposed)". A throw in this
+      // effect-cleanup propagates up and blanks the panel, so tear the addon down ourselves and
+      // guard the whole teardown — there's nothing to recover on unmount.
+      try {
+        webgl?.dispose();
+      } catch {
+        /* addon already torn down (e.g. after a WebGL context loss) */
+      }
+      webgl = null;
+      try {
+        term.dispose();
+      } catch {
+        /* xterm's internal addon teardown can race the webgl dispose — ignore on unmount */
+      }
       termRef.current = null;
       searchRef.current = null;
     };
