@@ -51,6 +51,9 @@ export const api = {
   requestCiFix: (id: number) => invoke<string>("request_ci_fix", { ticketId: id }),
   getCiAutofix: () => invoke<boolean>("get_ci_autofix"),
   setCiAutofix: (enabled: boolean) => invoke<void>("set_ci_autofix", { enabled }),
+  getConflictResolve: () => invoke<boolean>("get_conflict_resolve"),
+  setConflictResolve: (enabled: boolean) =>
+    invoke<void>("set_conflict_resolve", { enabled }),
   getAutoReview: () => invoke<boolean>("get_auto_review"),
   setAutoReview: (enabled: boolean) => invoke<void>("set_auto_review", { enabled }),
   getReviewLoop: () => invoke<boolean>("get_review_loop"),

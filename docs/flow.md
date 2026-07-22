@@ -19,25 +19,25 @@ stateDiagram-v2
     Todo --> Todo : GrillRequested, GrillFinished, ReviewRequested, ReviewFinished, ProofFinished, SessionIdle
     Todo --> InProgress : Move
     Todo --> HumanReview : Move, AddressFinished
-    Todo --> Pr : Move, FixFinished, AddressFinished
+    Todo --> Pr : Move, FixFinished, ConflictFinished, AddressFinished
     Todo --> Done : Move
     InProgress --> Todo : Move
     InProgress --> InProgress : GrillFinished, ReviewRequested, ReviewFinished, ProofFinished, SessionIdle
     InProgress --> HumanReview : Move, WorkFinished, AddressFinished
-    InProgress --> Pr : Move, FixFinished, AddressFinished
+    InProgress --> Pr : Move, FixFinished, ConflictFinished, AddressFinished
     InProgress --> Done : Move
     HumanReview --> Todo : Move
     HumanReview --> InProgress : Move
     HumanReview --> HumanReview : Move, GrillFinished, ReviewRequested, ReviewFinished, ProofFinished, AddressFinished, SessionIdle
-    HumanReview --> Pr : Move, FixFinished, AddressFinished
+    HumanReview --> Pr : Move, FixFinished, ConflictFinished, AddressFinished
     HumanReview --> Done : Move
     Pr --> Todo : Move
     Pr --> InProgress : Move
     Pr --> HumanReview : Move, AddressFinished
-    Pr --> Pr : GrillFinished, ReviewRequested, ReviewFinished, ProofFinished, FixFinished, AddressFinished, SessionIdle
+    Pr --> Pr : GrillFinished, ReviewRequested, ReviewFinished, ProofFinished, FixFinished, ConflictFinished, AddressFinished, SessionIdle
     Pr --> Done : Move
     Done --> HumanReview : AddressFinished
-    Done --> Pr : FixFinished, AddressFinished
+    Done --> Pr : FixFinished, ConflictFinished, AddressFinished
     Done --> Done : GrillFinished, ReviewRequested, ReviewFinished, ProofFinished, SessionIdle
     Done --> [*]
 ```
@@ -91,6 +91,7 @@ Every distinct outcome of `decide`, grouped by the column the ticket is in. *Gua
 | ReviewFinished | (any) | Todo | StopSession, MarkReviewed |  |
 | ProofFinished | (any) | Todo | StopSession, MarkProofDone |  |
 | FixFinished | (any) | In PR Review | CommitChanges, PushBranch |  |
+| ConflictFinished | (any) | In PR Review | CommitChanges, PushBranch |  |
 | AddressFinished | !pr_exists | For Your Review | CommitChanges |  |
 | AddressFinished | pr_exists | In PR Review | CommitChanges, PushBranch |  |
 | SessionIdle | !auto_end_idle OR user_question_pending | Todo | — |  |
@@ -138,6 +139,7 @@ Every distinct outcome of `decide`, grouped by the column the ticket is in. *Gua
 | ReviewFinished | (any) | In Progress | StopSession, MarkReviewed |  |
 | ProofFinished | (any) | In Progress | StopSession, MarkProofDone |  |
 | FixFinished | (any) | In PR Review | CommitChanges, PushBranch |  |
+| ConflictFinished | (any) | In PR Review | CommitChanges, PushBranch |  |
 | AddressFinished | !pr_exists | For Your Review | CommitChanges |  |
 | AddressFinished | pr_exists | In PR Review | CommitChanges, PushBranch |  |
 | SessionIdle | !auto_end_idle OR user_question_pending | In Progress | — |  |
@@ -183,6 +185,7 @@ Every distinct outcome of `decide`, grouped by the column the ticket is in. *Gua
 | ReviewFinished | (any) | For Your Review | StopSession, MarkReviewed |  |
 | ProofFinished | (any) | For Your Review | StopSession, MarkProofDone |  |
 | FixFinished | (any) | In PR Review | CommitChanges, PushBranch |  |
+| ConflictFinished | (any) | In PR Review | CommitChanges, PushBranch |  |
 | AddressFinished | !pr_exists | For Your Review | CommitChanges |  |
 | AddressFinished | pr_exists | In PR Review | CommitChanges, PushBranch |  |
 | SessionIdle | !auto_end_idle OR user_question_pending | For Your Review | — |  |
@@ -223,6 +226,7 @@ Every distinct outcome of `decide`, grouped by the column the ticket is in. *Gua
 | ReviewFinished | (any) | In PR Review | StopSession, MarkReviewed |  |
 | ProofFinished | (any) | In PR Review | StopSession, MarkProofDone |  |
 | FixFinished | (any) | In PR Review | CommitChanges, PushBranch |  |
+| ConflictFinished | (any) | In PR Review | CommitChanges, PushBranch |  |
 | AddressFinished | !pr_exists | For Your Review | CommitChanges |  |
 | AddressFinished | pr_exists | In PR Review | CommitChanges, PushBranch |  |
 | SessionIdle | !auto_end_idle OR user_question_pending | In PR Review | — |  |
@@ -247,6 +251,7 @@ Every distinct outcome of `decide`, grouped by the column the ticket is in. *Gua
 | ReviewFinished | (any) | Done | StopSession, MarkReviewed |  |
 | ProofFinished | (any) | Done | StopSession, MarkProofDone |  |
 | FixFinished | (any) | In PR Review | CommitChanges, PushBranch |  |
+| ConflictFinished | (any) | In PR Review | CommitChanges, PushBranch |  |
 | AddressFinished | !pr_exists | For Your Review | CommitChanges |  |
 | AddressFinished | pr_exists | In PR Review | CommitChanges, PushBranch |  |
 | SessionIdle | !auto_end_idle OR user_question_pending | Done | — |  |

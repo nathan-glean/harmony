@@ -33,6 +33,8 @@ pub enum SystemEvent {
     ProofFinished { ticket_id: i64 },
     /// An autonomous CI-fix session finished (commit + push its changes to re-trigger CI).
     FixFinished { ticket_id: i64 },
+    /// An autonomous conflict-resolve session finished (commit the merge + push to update the PR).
+    ConflictFinished { ticket_id: i64 },
     /// A feedback-addressing session finished (commit + push so the PR reflects the changes).
     AddressFinished { ticket_id: i64 },
     /// A session came to rest in `waiting` after a `Stop` with no pending question, and the
@@ -177,6 +179,7 @@ async fn handle(Path(event): Path<String>, State(ctx): State<HookCtx>, body: Byt
                             "work" => SystemEvent::WorkFinished { ticket_id: id },
                             "proof" => SystemEvent::ProofFinished { ticket_id: id },
                             "fix" => SystemEvent::FixFinished { ticket_id: id },
+                            "conflict" => SystemEvent::ConflictFinished { ticket_id: id },
                             "address" => SystemEvent::AddressFinished { ticket_id: id },
                             // A `review` (plan mode) completes when it presents its plan via
                             // ExitPlanMode (the definitive capture below), NOT on a `Stop` — an

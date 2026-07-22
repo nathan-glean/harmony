@@ -354,6 +354,51 @@ impl SessionManager {
         })
     }
 
+    /// Start an autonomous session to resolve the branch's merge conflicts with its base. Runs in
+    /// the worktree with `bypassPermissions`; the prompt tells Claude to merge `origin/<base>` in and
+    /// resolve every conflict, then stop. harmony commits (completing the merge) + pushes on the
+    /// session's Stop (`ConflictFinished`), updating the PR. Session `kind = "conflict"`.
+    pub async fn start_conflict_resolve(
+        &self,
+        ticket_id: i64,
+        base: &str,
+    ) -> Result<SessionHandle> {
+        let ticket = self
+            .store
+            .get_ticket(ticket_id)
+            .await?
+            .ok_or_else(|| anyhow!("no such ticket #{ticket_id}"))?;
+        let repo_id = ticket
+            .repo_id
+            .ok_or_else(|| anyhow!("ticket #{ticket_id} has no repo assigned"))?;
+        let repo = self
+            .store
+            .get_repo(repo_id)
+            .await?
+            .ok_or_else(|| anyhow!("repo #{repo_id} missing"))?;
+
+        let wt = self
+            .ensure_primary_worktree(&ticket, repo_id, &repo)
+            .await?;
+        crate::settings::inject_hooks(&wt.path, self.hook_port)?;
+
+        let prompt = render_conflict_resolve_prompt(base);
+        let (master, child) = spawn_claude(&wt.path, &prompt, None, "bypassPermissions")?;
+
+        let session_id = self
+            .store
+            .add_session(ticket_id, wt.id, &wt.path, "conflict")
+            .await?;
+        self.store
+            .set_ticket_status(ticket_id, crate::status::WORKING)
+            .await?;
+        Ok(SessionHandle {
+            session_id,
+            master,
+            child,
+        })
+    }
+
     /// Start an autonomous session to fix the blocking issues the review-loop judge flagged. The
     /// review-loop sibling of `start_address`: resumes the worktree's Claude (keeps context),
     /// `bypassPermissions`, with the judge's must-fix findings (stored as `review_findings` JSON)
@@ -670,6 +715,26 @@ fn render_ci_fix_prompt(context: &str) -> String {
          them pass. Run the relevant checks/tests locally to confirm the fix. Do NOT run `git commit` \
          or `git push` — harmony commits and pushes your changes, which re-triggers CI.\n\n\
          # Failing CI context\n\n{context}"
+    )
+}
+
+/// Opening prompt for an autonomous conflict-resolve session: this branch's PR conflicts with its
+/// base (`base`). Merge the base in and resolve every conflict faithfully; harmony completes the
+/// merge commit + pushes.
+fn render_conflict_resolve_prompt(base: &str) -> String {
+    format!(
+        "This branch's pull request has merge conflicts with its base branch (`{base}`). Resolve them \
+         autonomously and to completion — no human is watching, so do not ask for confirmation.\n\n\
+         Steps:\n\
+         1. Run `git fetch origin`.\n\
+         2. Run `git merge origin/{base}` to merge the latest base into this branch.\n\
+         3. Resolve EVERY conflict faithfully — preserve the intent of BOTH sides (this branch's \
+         change and the base's change); never discard one side wholesale or delete/weaken tests to \
+         sidestep a conflict. Remove all conflict markers.\n\
+         4. Make sure it still builds and the relevant tests pass.\n\n\
+         Do NOT run `git commit` or `git push` — harmony completes the merge commit and pushes your \
+         resolution, which updates the PR. (If the merge turns out to have no real conflicts, just \
+         leave the merged state for harmony to commit.)"
     )
 }
 
@@ -1236,6 +1301,8 @@ mod tests {
             proof_artifacts: String::new(),
             proof_sha: String::new(),
             proof_attempts: 0,
+            conflict_fix_attempts: 0,
+            conflict_fingerprint: String::new(),
         }
     }
 

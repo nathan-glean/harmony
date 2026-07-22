@@ -273,6 +273,16 @@ impl Store {
             sqlx::query("ALTER TABLE tickets ADD COLUMN proof_attempts INTEGER NOT NULL DEFAULT 0")
                 .execute(&self.pool)
                 .await;
+        let _ = sqlx::query(
+            "ALTER TABLE tickets ADD COLUMN conflict_fix_attempts INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&self.pool)
+        .await;
+        let _ = sqlx::query(
+            "ALTER TABLE tickets ADD COLUMN conflict_fingerprint TEXT NOT NULL DEFAULT ''",
+        )
+        .execute(&self.pool)
+        .await;
         Ok(())
     }
 
@@ -391,7 +401,7 @@ impl Store {
 
     pub async fn get_ticket(&self, id: i64) -> Result<Option<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec, review_verdict, review_findings, judged_sha, review_fix_attempts, activity, orchestrator_note, orchestrator_seen, restart_attempts, proof, proof_artifacts, proof_sha, proof_attempts
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec, review_verdict, review_findings, judged_sha, review_fix_attempts, activity, orchestrator_note, orchestrator_seen, restart_attempts, proof, proof_artifacts, proof_sha, proof_attempts, conflict_fix_attempts, conflict_fingerprint
              FROM tickets WHERE id = ?",
         )
         .bind(id)
@@ -401,7 +411,7 @@ impl Store {
 
     pub async fn list_tickets(&self) -> Result<Vec<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec, review_verdict, review_findings, judged_sha, review_fix_attempts, activity, orchestrator_note, orchestrator_seen, restart_attempts, proof, proof_artifacts, proof_sha, proof_attempts
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec, review_verdict, review_findings, judged_sha, review_fix_attempts, activity, orchestrator_note, orchestrator_seen, restart_attempts, proof, proof_artifacts, proof_sha, proof_attempts, conflict_fix_attempts, conflict_fingerprint
              FROM tickets ORDER BY id",
         )
         .fetch_all(&self.pool)
@@ -726,7 +736,7 @@ impl Store {
 
     pub async fn get_ticket_by_key(&self, key: &str) -> Result<Option<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec, review_verdict, review_findings, judged_sha, review_fix_attempts, activity, orchestrator_note, orchestrator_seen, restart_attempts, proof, proof_artifacts, proof_sha, proof_attempts
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec, review_verdict, review_findings, judged_sha, review_fix_attempts, activity, orchestrator_note, orchestrator_seen, restart_attempts, proof, proof_artifacts, proof_sha, proof_attempts, conflict_fix_attempts, conflict_fingerprint
              FROM tickets WHERE jira_key = ?",
         )
         .bind(key)
@@ -1077,6 +1087,32 @@ impl Store {
         sqlx::query(
             "UPDATE tickets SET proof = '', proof_artifacts = '', proof_sha = '', \
              proof_attempts = 0 WHERE id = ?",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Record the conflict state the resolver last attempted (`<base_sha>:<branch_head>`), and bump
+    /// the attempt counter (capped against a runaway loop by the caller).
+    pub async fn bump_conflict_fix_attempts(&self, id: i64, fingerprint: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE tickets SET conflict_fix_attempts = conflict_fix_attempts + 1, \
+             conflict_fingerprint = ? WHERE id = ?",
+        )
+        .bind(fingerprint)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Reset conflict-resolve state (attempts + fingerprint) — called when the PR is no longer
+    /// conflicting, so a future conflict is handled afresh.
+    pub async fn reset_conflicts(&self, id: i64) -> Result<()> {
+        sqlx::query(
+            "UPDATE tickets SET conflict_fix_attempts = 0, conflict_fingerprint = '' WHERE id = ?",
         )
         .bind(id)
         .execute(&self.pool)

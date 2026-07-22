@@ -446,6 +446,54 @@ async fn orchestrator_notes_append_to_decision_log() {
 }
 
 #[tokio::test]
+async fn conflict_fix_bookkeeping_roundtrip() {
+    let dir = TempDir::new("conflict");
+    let store = open_store(&dir).await;
+    let id = store
+        .add_ticket(None, "local", "T", "", None)
+        .await
+        .unwrap();
+
+    // Defaults: never attempted.
+    let t = store.get_ticket(id).await.unwrap().unwrap();
+    assert_eq!(t.conflict_fix_attempts, 0);
+    assert_eq!(t.conflict_fingerprint, "");
+
+    // Attempt once against a conflict state fingerprint.
+    store
+        .bump_conflict_fix_attempts(id, "base123:head456")
+        .await
+        .unwrap();
+    let t = store.get_ticket(id).await.unwrap().unwrap();
+    assert_eq!(t.conflict_fix_attempts, 1);
+    assert_eq!(t.conflict_fingerprint, "base123:head456");
+
+    // Resolved → reset clears attempts + fingerprint.
+    store.reset_conflicts(id).await.unwrap();
+    let t = store.get_ticket(id).await.unwrap().unwrap();
+    assert_eq!(t.conflict_fix_attempts, 0);
+    assert_eq!(t.conflict_fingerprint, "");
+}
+
+#[tokio::test]
+async fn hook_maps_conflict_stop_to_conflict_finished() {
+    // A conflict-resolve session (kind "conflict") completing its Stop must emit ConflictFinished so
+    // harmony commits the merge + pushes.
+    let dir = TempDir::new("evconflict");
+    let (store, ticket_id, cwd) = seed_session(&dir, "conflict").await;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<hooks::SystemEvent>();
+    let port = spawn_hooks_with(store.clone(), Some(tx)).await;
+    let client = reqwest::Client::new();
+
+    post(&client, port, "Stop", &serde_json::json!({ "cwd": cwd })).await;
+
+    assert_eq!(
+        rx.recv().await.unwrap(),
+        hooks::SystemEvent::ConflictFinished { ticket_id }
+    );
+}
+
+#[tokio::test]
 async fn upsert_jira_ticket_maps_and_backfills_default_repo() {
     let dir = TempDir::new("jira-repo");
     let store = open_store(&dir).await;
@@ -1499,6 +1547,8 @@ fn sample_ticket() -> harmony_core::models::Ticket {
         proof_artifacts: String::new(),
         proof_sha: String::new(),
         proof_attempts: 0,
+        conflict_fix_attempts: 0,
+        conflict_fingerprint: String::new(),
     }
 }
 
