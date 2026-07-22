@@ -30,6 +30,13 @@ const MAX_REVIEW_FIX_ATTEMPTS: i64 = 3;
 const MAX_PROOF_ATTEMPTS: i64 = 2;
 /// Max times the orchestrator auto-restarts a crashed session for a ticket before escalating.
 const MAX_RESTART_ATTEMPTS: i64 = 2;
+/// Stuck-session watchdog: a live session whose transcript has been idle at least this long AND is at
+/// a finished turn is treated as "the completion hook was missed" → the watchdog fires the recovery
+/// event. Must exceed normal between-record gaps; the mid-tool guard covers long-running commands.
+const STUCK_IDLE_SECS: u64 = 45;
+/// A live session idle at least this long but NOT at a cleanly-finished turn (e.g. a possibly-hung
+/// tool) is ambiguous → escalate to the orchestrator's LLM judge (only when Orchestrator is on).
+const ESCALATE_IDLE_SECS: u64 = 240;
 
 /// Best-effort desktop notification — the escalation channel for when the autonomous loop needs a
 /// human (e.g. the review loop is exhausted) or finishes an outward-facing step (auto-merge).
@@ -54,6 +61,9 @@ struct AppState {
     /// Session ids the user deliberately stopped, so their non-zero exit isn't mistaken for a
     /// crash. The wait-task removes the id once it has handled the exit.
     stopping: Arc<Mutex<HashSet<i64>>>,
+    /// Session ids the stuck-session watchdog has already fired a recovery event for, so it doesn't
+    /// re-fire each tick (for events that don't tear the session down). Cleared on session exit.
+    watchdog_fired: Arc<Mutex<HashSet<i64>>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -1094,6 +1104,181 @@ fn parse_pending_question(json: &str) -> Option<(String, Vec<String>, bool)> {
     Some((question, options, multi))
 }
 
+/// The domain event a finished session of `kind` should fire — the same mapping the `Stop` hook uses
+/// (`core/src/hooks.rs`). Returned so the watchdog can re-fire a missed completion.
+fn finish_event_for_kind(kind: &str) -> Event {
+    match kind {
+        "work" => Event::WorkFinished,
+        "review" => Event::ReviewFinished,
+        "fix" => Event::FixFinished,
+        "address" => Event::AddressFinished,
+        "proof" => Event::ProofFinished,
+        _ => Event::SessionIdle,
+    }
+}
+
+/// Seconds since a file was last modified, or `None` if it can't be read.
+fn file_idle_secs(path: &str) -> Option<u64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    modified.elapsed().ok().map(|d| d.as_secs())
+}
+
+/// Stuck-session watchdog (always-on recovery). Harmony advances the flow off Claude Code hooks
+/// (`Stop` for work, plan-file write for review), but those are sometimes missed — plan-mode sessions
+/// don't reliably fire `Stop`, and a cwd/plan-path mismatch drops the event silently — so a finished
+/// session sits live forever, the column never moves, and the Review tab stays empty.
+///
+/// This pass detects that from the transcript (written by Claude directly, so it advances even when
+/// hooks don't): for each session live in-process, if its transcript has been idle a while AND the
+/// last record is a finished turn, it re-fires the same completion event the hook would have (after
+/// clearing a stale question and, for a review, backfilling the review text). Long-idle-but-ambiguous
+/// sessions (a possibly-hung tool) escalate to the orchestrator's LLM judge, but only when the
+/// Orchestrator setting is on. Never disturbs a session that's still writing, mid-tool, or waiting on
+/// the user.
+async fn poll_stuck_sessions_once(app: &AppHandle, state: &AppState) {
+    use harmony_core::session::TurnState;
+
+    // Snapshot the live (session_id, ticket_id) pairs, skipping ones already being stopped or
+    // already recovered, so we don't hold the lock across awaits.
+    let live: Vec<(i64, i64)> = {
+        let map = state.sessions.lock().unwrap();
+        let stopping = state.stopping.lock().unwrap();
+        let fired = state.watchdog_fired.lock().unwrap();
+        map.iter()
+            .filter(|(sid, _)| !stopping.contains(sid) && !fired.contains(sid))
+            .map(|(sid, io)| (*sid, io.ticket_id))
+            .collect()
+    };
+    if live.is_empty() {
+        return;
+    }
+    let escalate_enabled = orchestrator_enabled(state).await;
+
+    for (session_id, ticket_id) in live {
+        let path = match state
+            .store
+            .latest_transcript_path_for_ticket(ticket_id)
+            .await
+        {
+            Ok(Some(p)) => p,
+            _ => continue, // no transcript yet — nothing to judge
+        };
+        let idle = match file_idle_secs(&path) {
+            Some(s) => s,
+            None => continue,
+        };
+        if idle < STUCK_IDLE_SECS {
+            continue; // still active (an actively-steered session keeps the transcript fresh)
+        }
+
+        let turn = tokio::task::spawn_blocking({
+            let path = path.clone();
+            move || harmony_core::session::transcript_turn_state(&path)
+        })
+        .await
+        .unwrap_or(TurnState::Working);
+
+        match turn {
+            // Genuinely waiting on the user, or still mid-turn → leave it alone.
+            TurnState::WaitingOnQuestion => continue,
+            TurnState::Working => {
+                // Ambiguous: idle a long time but not a clean finish (e.g. a hung tool). Only the
+                // opt-in LLM judge decides here; otherwise leave it for the human.
+                if !escalate_enabled || idle < ESCALATE_IDLE_SECS {
+                    continue;
+                }
+                let wt = match state.store.primary_worktree_for_ticket(ticket_id).await {
+                    Ok(Some(wt)) => wt,
+                    _ => continue,
+                };
+                let tail = tokio::task::spawn_blocking({
+                    let path = path.clone();
+                    move || harmony_core::session::render_transcript(&path).unwrap_or_default()
+                })
+                .await
+                .unwrap_or_default();
+                let verdict = tokio::task::spawn_blocking({
+                    let wt = wt.path.clone();
+                    move || harmony_core::orchestrator::judge_stuck(&wt, &tail)
+                })
+                .await;
+                match verdict {
+                    Ok(Ok(harmony_core::orchestrator::StuckVerdict::Done)) => {
+                        recover_finished_session(app, state, ticket_id, session_id, &path).await;
+                    }
+                    Ok(Ok(harmony_core::orchestrator::StuckVerdict::Escalate { reason })) => {
+                        eprintln!("[watchdog] #{ticket_id} escalated: {reason}");
+                        let _ = state
+                            .store
+                            .set_orchestrator_note(
+                                ticket_id,
+                                &format!("stuck session — needs you: {reason}"),
+                                &state_fingerprint("stuck", &reason),
+                            )
+                            .await;
+                        // Mark handled so we don't re-judge every tick; store_activity fires the
+                        // "needs you" notification via the activity pill.
+                        state.watchdog_fired.lock().unwrap().insert(session_id);
+                        store_activity(app, state, ticket_id).await;
+                    }
+                    _ => {} // Working / judge failed → leave for the next tick or the human
+                }
+            }
+            // Clear-cut: the turn finished but the completion event never arrived — re-fire it.
+            TurnState::Finished => {
+                recover_finished_session(app, state, ticket_id, session_id, &path).await;
+            }
+        }
+    }
+}
+
+/// Re-fire the completion event a finished-but-stuck session missed: clear a stale pending question,
+/// backfill a review's text from the transcript if the plan-file capture was missed, then inject the
+/// kind's finish event through the normal executor. Marks the session recovered (de-dup).
+async fn recover_finished_session(
+    app: &AppHandle,
+    state: &AppState,
+    ticket_id: i64,
+    session_id: i64,
+    transcript_path: &str,
+) {
+    let kind = state
+        .store
+        .active_session_kind_for_ticket(ticket_id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "work".to_string());
+
+    // A finished turn is not blocked on a question — clear any stale one so WorkFinished isn't a
+    // no-op (the `user_question_pending` gate in flow::decide).
+    let _ = state.store.clear_ticket_question(ticket_id).await;
+
+    // Review completion is normally captured from the plan-file write; if that hook was missed the
+    // Review tab is empty, so backfill from the transcript's final assistant message.
+    if kind == "review" {
+        if let Ok(Some(t)) = state.store.get_ticket(ticket_id).await {
+            if t.review_text.trim().is_empty() {
+                let path = transcript_path.to_string();
+                if let Ok(Some(msg)) = tokio::task::spawn_blocking(move || {
+                    harmony_core::session::final_assistant_message(&path)
+                })
+                .await
+                {
+                    let _ = state.store.set_ticket_review_text(ticket_id, &msg).await;
+                }
+            }
+        }
+    }
+
+    state.watchdog_fired.lock().unwrap().insert(session_id);
+    let event = finish_event_for_kind(&kind);
+    eprintln!("[watchdog] #{ticket_id} finished-but-stuck ({kind}) → {event:?}");
+    if let Err(e) = apply_event(app, state, ticket_id, event, false).await {
+        eprintln!("[watchdog] {event:?} for #{ticket_id} failed: {e}");
+    }
+}
+
 /// The autonomous coordinator pass, gated by `orchestrator` (runs last in the tick, on fresh
 /// activity). (A) reconcile crashed sessions + dispatch ready work under the concurrency cap; (B)
 /// try to unstick each ticket the human would otherwise handle — answer derivable worker questions,
@@ -2122,6 +2307,7 @@ fn wire_session(
         let store = state.store.clone();
         let sessions = state.sessions.clone();
         let stopping = state.stopping.clone();
+        let watchdog_fired = state.watchdog_fired.clone();
         tauri::async_runtime::spawn(async move {
             let wait = tokio::task::spawn_blocking(move || {
                 let mut child = child;
@@ -2148,6 +2334,7 @@ fn wire_session(
             // the reply) — clear it so a dead session's prompt doesn't linger in the UI.
             let _ = store.clear_ticket_question(ticket_id).await;
             sessions.lock().unwrap().remove(&session_id);
+            watchdog_fired.lock().unwrap().remove(&session_id);
             let _ = app.emit(
                 "session-exit",
                 SessionExit {
@@ -2900,6 +3087,7 @@ pub fn run() {
                     sessions: Arc::new(Mutex::new(HashMap::new())),
                     reattach: Mutex::new(reattach),
                     stopping: Arc::new(Mutex::new(HashSet::new())),
+                    watchdog_fired: Arc::new(Mutex::new(HashSet::new())),
                 });
                 // Consume system events and drive the flow executor (auto-advance).
                 let ev_handle = handle.clone();
@@ -2958,6 +3146,9 @@ pub fn run() {
                         // After the review loop settles, evidence passed changes (proof of work).
                         poll_proof_loop_once(&poll_handle, &state).await;
                         poll_auto_merge_once(&poll_handle, &state).await;
+                        // Recover finished-but-stuck sessions (missed Stop / plan-file hook) so the
+                        // flow advances even when a completion event was dropped.
+                        poll_stuck_sessions_once(&poll_handle, &state).await;
                         // Last: refresh each ticket's activity pill from the (now-current) facts.
                         poll_activity_once(&poll_handle, &state).await;
                         // Last: the autonomous coordinator acts on the now-fresh board state.

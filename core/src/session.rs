@@ -871,6 +871,150 @@ pub fn latest_progress(path: &str) -> Option<TranscriptProgress> {
     }
 }
 
+/// Whether a session's most recent turn has come to rest — derived from the transcript so it works
+/// even when the `Stop`/plan-file hooks are missed (the stuck-session watchdog's signal).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnState {
+    /// Claude is mid-turn (last assistant message has a pending tool call, or the last record is a
+    /// tool result Claude is about to respond to) — do not disturb.
+    Working,
+    /// Claude finished its turn (last assistant message is text with no pending tool call).
+    Finished,
+    /// Claude is blocked on an `AskUserQuestion` — genuinely waiting on the user.
+    WaitingOnQuestion,
+}
+
+/// Parse the last ~64 KB of a transcript JSONL into its complete records (best-effort: drops a
+/// partial leading line from the seek, and any unparseable trailing partial line). Shared by the
+/// turn-state helpers below and modelled on `latest_progress`'s tail read.
+fn tail_records(path: &str) -> Vec<Value> {
+    use std::io::{Read, Seek, SeekFrom};
+    const TAIL: u64 = 64 * 1024;
+    let mut f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return vec![],
+    };
+    let len = match f.metadata() {
+        Ok(m) => m.len(),
+        Err(_) => return vec![],
+    };
+    let start = len.saturating_sub(TAIL);
+    if f.seek(SeekFrom::Start(start)).is_err() {
+        return vec![];
+    }
+    let mut bytes = Vec::new();
+    if f.read_to_end(&mut bytes).is_err() {
+        return vec![];
+    }
+    let buf = String::from_utf8_lossy(&bytes);
+    let body = if start > 0 {
+        match buf.find('\n') {
+            Some(i) => &buf[i + 1..],
+            None => "",
+        }
+    } else {
+        &buf[..]
+    };
+    body.lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .collect()
+}
+
+/// Classify a session's turn state from its transcript's last record. Fail-safe: anything
+/// unrecognized (empty/unreadable transcript, an in-flight tool call, a trailing tool result) is
+/// treated as `Working` so the watchdog never disturbs a session that isn't clearly at rest.
+pub fn transcript_turn_state(path: &str) -> TurnState {
+    let records = tail_records(path);
+    let last = match records.last() {
+        Some(v) => v,
+        None => return TurnState::Working,
+    };
+    let msg = last.get("message");
+    let role = msg
+        .and_then(|m| m.get("role"))
+        .and_then(|x| x.as_str())
+        .or_else(|| last.get("type").and_then(|x| x.as_str()))
+        .unwrap_or("");
+    if role != "assistant" {
+        // A user record / tool_result — Claude is about to continue.
+        return TurnState::Working;
+    }
+    match msg.and_then(|m| m.get("content")) {
+        Some(Value::Array(arr)) => {
+            let (mut has_text, mut has_tool, mut asks_question) = (false, false, false);
+            for b in arr {
+                match b.get("type").and_then(|x| x.as_str()).unwrap_or("") {
+                    "tool_use" => {
+                        has_tool = true;
+                        if b.get("name").and_then(|x| x.as_str()) == Some("AskUserQuestion") {
+                            asks_question = true;
+                        }
+                    }
+                    "text"
+                        if b.get("text")
+                            .and_then(|x| x.as_str())
+                            .map(|t| !t.trim().is_empty())
+                            .unwrap_or(false) =>
+                    {
+                        has_text = true;
+                    }
+                    _ => {}
+                }
+            }
+            if asks_question {
+                TurnState::WaitingOnQuestion
+            } else if has_tool {
+                TurnState::Working
+            } else if has_text {
+                TurnState::Finished
+            } else {
+                TurnState::Working
+            }
+        }
+        // A plain-string assistant message is finished text.
+        Some(Value::String(s)) if !s.trim().is_empty() => TurnState::Finished,
+        _ => TurnState::Working,
+    }
+}
+
+/// The full text of the last assistant message in the transcript (uncapped) — used to populate a
+/// review's text when the plan-file capture hook was missed. `None` if there's no assistant text.
+pub fn final_assistant_message(path: &str) -> Option<String> {
+    for rec in tail_records(path).iter().rev() {
+        let msg = rec.get("message");
+        let role = msg
+            .and_then(|m| m.get("role"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        if role != "assistant" {
+            continue;
+        }
+        let text = match msg.and_then(|m| m.get("content")) {
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Array(arr)) => {
+                let mut out = String::new();
+                for b in arr {
+                    if b.get("type").and_then(|x| x.as_str()) == Some("text") {
+                        if let Some(t) = b.get("text").and_then(|x| x.as_str()) {
+                            if !out.is_empty() {
+                                out.push_str("\n\n");
+                            }
+                            out.push_str(t);
+                        }
+                    }
+                }
+                out
+            }
+            _ => String::new(),
+        };
+        let text = text.trim().to_string();
+        if !text.is_empty() {
+            return Some(text);
+        }
+    }
+    None
+}
+
 /// Collapse whitespace runs (incl. newlines) into single spaces and cap the length, so a
 /// progress line stays a single tidy line in the UI.
 fn collapse(s: &str, max: usize) -> String {
@@ -1113,5 +1257,89 @@ mod tests {
         let out = render_feedback_prompt(&[dc("general", "", "", 0, "x")], &t);
         assert!(!out.contains("# Spec"));
         assert!(!out.contains("do NOT silently"));
+    }
+
+    fn write_transcript(lines: &[&str]) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let p = std::env::temp_dir().join(format!(
+            "harmony-transcript-{}-{n}.jsonl",
+            std::process::id()
+        ));
+        std::fs::write(&p, lines.join("\n")).unwrap();
+        p
+    }
+
+    #[test]
+    fn turn_state_finished_when_last_block_is_text() {
+        let p = write_transcript(&[
+            r#"{"message":{"role":"user","content":[{"type":"text","text":"do it"}]}}"#,
+            r#"{"message":{"role":"assistant","content":[{"type":"tool_use","name":"Edit"}]}}"#,
+            r#"{"message":{"role":"user","content":[{"type":"tool_result","content":"ok"}]}}"#,
+            r#"{"message":{"role":"assistant","content":[{"type":"text","text":"Done — implementation complete."}]}}"#,
+        ]);
+        assert_eq!(
+            transcript_turn_state(p.to_str().unwrap()),
+            TurnState::Finished
+        );
+        assert_eq!(
+            final_assistant_message(p.to_str().unwrap()).as_deref(),
+            Some("Done — implementation complete.")
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn turn_state_working_when_last_message_has_pending_tool() {
+        // Text preamble + a trailing tool_use → the turn is not done.
+        let p = write_transcript(&[
+            r#"{"message":{"role":"assistant","content":[{"type":"text","text":"running tests"},{"type":"tool_use","name":"Bash"}]}}"#,
+        ]);
+        assert_eq!(
+            transcript_turn_state(p.to_str().unwrap()),
+            TurnState::Working
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn turn_state_waiting_on_ask_user_question() {
+        let p = write_transcript(&[
+            r#"{"message":{"role":"assistant","content":[{"type":"text","text":"which one?"},{"type":"tool_use","name":"AskUserQuestion"}]}}"#,
+        ]);
+        assert_eq!(
+            transcript_turn_state(p.to_str().unwrap()),
+            TurnState::WaitingOnQuestion
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn turn_state_working_when_last_record_is_tool_result() {
+        let p = write_transcript(&[
+            r#"{"message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash"}]}}"#,
+            r#"{"message":{"role":"user","content":[{"type":"tool_result","content":"output"}]}}"#,
+        ]);
+        assert_eq!(
+            transcript_turn_state(p.to_str().unwrap()),
+            TurnState::Working
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn turn_state_working_on_missing_or_empty_transcript() {
+        assert_eq!(
+            transcript_turn_state("/no/such/file.jsonl"),
+            TurnState::Working
+        );
+        let p = write_transcript(&[""]);
+        assert_eq!(
+            transcript_turn_state(p.to_str().unwrap()),
+            TurnState::Working
+        );
+        assert_eq!(final_assistant_message(p.to_str().unwrap()), None);
+        let _ = std::fs::remove_file(&p);
     }
 }
