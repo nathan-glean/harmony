@@ -134,6 +134,31 @@ fn move_done_with_approved_pr_merges_and_cleans_up() {
     assert_eq!(d.actions, vec![MergePr, DeleteWorktree]);
 }
 
+#[test]
+fn move_done_with_already_merged_pr_only_cleans_up() {
+    // A human merged the PR on GitHub (state == MERGED). Moving to Done must NOT try to merge again
+    // — just clean up. (This is the "PR merged → move to Done" path.)
+    let d = decide(
+        Event::Move(Done),
+        &Ctx {
+            from: Pr,
+            reviewed: true,
+            has_changes: true,
+            has_worktree: true,
+            pr_exists: true,
+            pr_approved: true,
+            pr_merged: true,
+            ..base()
+        },
+    );
+    assert_eq!(d.target, Done);
+    assert!(
+        !has(&d.actions, MergePr),
+        "must not re-merge an already-merged PR"
+    );
+    assert!(has(&d.actions, DeleteWorktree));
+}
+
 // ===================================================================
 // Repo mandatory
 // ===================================================================

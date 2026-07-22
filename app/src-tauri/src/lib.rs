@@ -1046,6 +1046,47 @@ async fn poll_auto_merge_once(app: &AppHandle, state: &AppState) {
     }
 }
 
+/// One poll pass: move a ticket to Done when its PR was merged on GitHub (by anyone). The work is
+/// merged, so the ticket is done — advance it and clean up. Always on (unlike `auto_merge`, this
+/// performs no merge; it just reacts to a merge a human already made). `flow::decide(Move(Done))`
+/// skips `MergePr` because `pr_merged` is set, so it only stops the session + removes the worktree.
+async fn poll_pr_merged_once(app: &AppHandle, state: &AppState) {
+    let tickets = match state.store.list_tickets().await {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    for ticket in tickets {
+        // Only a card still sitting in In PR Review, and never mid-session.
+        if ticket.status != harmony_core::status::IN_REVIEW || has_live_session(state, ticket.id) {
+            continue;
+        }
+        let wt = match state.store.primary_worktree_for_ticket(ticket.id).await {
+            Ok(Some(wt)) => wt,
+            _ => continue,
+        };
+        let path = wt.path.clone();
+        let merged = tokio::task::spawn_blocking(move || {
+            harmony_core::github::pr_status(&path).state == "MERGED"
+        })
+        .await
+        .unwrap_or(false);
+        if !merged {
+            continue;
+        }
+        match apply_event(app, state, ticket.id, Event::Move(Column::Done), false).await {
+            Ok(()) => notify(
+                app,
+                "Merged",
+                &format!(
+                    "#{} ({}) — PR merged, moved to Done.",
+                    ticket.id, ticket.title
+                ),
+            ),
+            Err(e) => eprintln!("[pr-merged] #{} failed: {e}", ticket.id),
+        }
+    }
+}
+
 // ---- orchestrator (autonomous coordinator) -------------------------------
 
 /// Distinct tickets that currently have a live session (concurrency accounting).
@@ -2642,6 +2683,7 @@ async fn build_ctx(state: &AppState, ticket: &Ticket) -> Ctx {
         reviewed: ticket.reviewed == 1,
         pr_exists: pr.exists,
         pr_approved: pr.approved,
+        pr_merged: pr.state == "MERGED",
         is_jira: ticket.jira_key.is_some(),
         // Claude is mid-question → a Stop isn't "done"; keep the session live (see `flow::decide`).
         user_question_pending: !ticket.pending_question.trim().is_empty(),
@@ -3262,6 +3304,8 @@ pub fn run() {
                         // After the review loop settles, evidence passed changes (proof of work).
                         poll_proof_loop_once(&poll_handle, &state).await;
                         poll_auto_merge_once(&poll_handle, &state).await;
+                        // Move a ticket to Done when its PR was merged on GitHub (always on).
+                        poll_pr_merged_once(&poll_handle, &state).await;
                         // Recover finished-but-stuck sessions (missed Stop / plan-file hook) so the
                         // flow advances even when a completion event was dropped.
                         poll_stuck_sessions_once(&poll_handle, &state).await;

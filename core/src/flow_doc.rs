@@ -59,6 +59,7 @@ fn fields() -> Vec<Field> {
         ("reviewed", |c, v| c.reviewed = v),
         ("pr_exists", |c, v| c.pr_exists = v),
         ("pr_approved", |c, v| c.pr_approved = v),
+        ("pr_merged", |c, v| c.pr_merged = v),
         ("user_question_pending", |c, v| c.user_question_pending = v),
         ("auto_end_idle", |c, v| c.auto_end_idle = v),
     ]
