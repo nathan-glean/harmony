@@ -23,14 +23,42 @@ export function TerminalView({ sessionId }: { sessionId: number }) {
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(el);
-    fit.fit();
-    term.focus(); // ready to steer immediately
-    api.resize(sessionId, term.cols, term.rows).catch(() => {});
 
-    // Reattaching to an idle Claude TUI shows blank until something changes (it only
-    // repaints on demand). Nudge the PTY size (SIGWINCH) to force a full repaint into
-    // this fresh terminal.
+    // Fit the xterm to its container and push the fitted size to the PTY so Claude's alt-screen TUI
+    // redraws to exactly the visible rows/cols — otherwise its bottom (the input line) is clipped.
+    // Skip while the container is hidden/zero-size (e.g. the Session tab isn't active): fitting then
+    // yields a bogus size. The ResizeObserver below refits once the box has a real size.
+    const doFit = () => {
+      if (!el.clientWidth || !el.clientHeight) return;
+      try {
+        fit.fit();
+        api.resize(sessionId, term.cols, term.rows).catch(() => {});
+      } catch {
+        /* not measurable yet */
+      }
+    };
+
+    doFit();
+    term.focus(); // ready to steer immediately
+
+    // Re-fit whenever the container's box changes — not just on window resize. During a live session
+    // the siblings above the terminal (progress line, question card, task list, transcript) appear
+    // and grow, shrinking the terminal with no window-resize event; without this the fit goes stale
+    // and the TUI's bottom rows get clipped. Also covers the tab becoming visible (0 → real size).
+    // Debounced via rAF to coalesce bursts and avoid the "ResizeObserver loop" warning.
+    let raf = 0;
+    const ro = new ResizeObserver(() => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(doFit);
+    });
+    ro.observe(el);
+
+    // Reattaching to an idle Claude TUI shows blank until something changes (it only repaints on
+    // demand). Nudge the PTY size (SIGWINCH) to force a full repaint into this fresh terminal. Only
+    // when already visible — if still hidden, the observer's first real fit (0 → real size) is itself
+    // a size change that triggers the repaint.
     const nudge = setTimeout(() => {
+      if (!el.clientWidth || !el.clientHeight) return;
       api
         .resize(sessionId, term.cols, term.rows + 1)
         .then(() => api.resize(sessionId, term.cols, term.rows))
@@ -43,21 +71,15 @@ export function TerminalView({ sessionId }: { sessionId: number }) {
       if (e.payload.session_id === sessionId) term.write(e.payload.data);
     });
 
-    const onResize = () => {
-      try {
-        fit.fit();
-        api.resize(sessionId, term.cols, term.rows).catch(() => {});
-      } catch {
-        /* element not measurable yet */
-      }
-    };
-    window.addEventListener("resize", onResize);
+    window.addEventListener("resize", doFit);
 
     return () => {
       clearTimeout(nudge);
+      cancelAnimationFrame(raf);
+      ro.disconnect();
       onData.dispose();
       unlisten.then((u) => u());
-      window.removeEventListener("resize", onResize);
+      window.removeEventListener("resize", doFit);
       term.dispose();
     };
   }, [sessionId]);
