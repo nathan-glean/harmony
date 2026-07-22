@@ -390,6 +390,8 @@ async fn clear_all_questions_and_drafting_drops_stale_session_state() {
     assert_eq!(
         store.get_ticket(b).await.unwrap().unwrap().pending_question,
         ""
+    );
+}
 
 #[tokio::test]
 async fn upsert_jira_ticket_maps_and_backfills_default_repo() {
