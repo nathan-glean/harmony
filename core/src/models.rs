@@ -165,14 +165,22 @@ pub struct DiffComment {
     pub anchor: String, // context for non-diff targets (quoted snippet / PR author+snippet)
 }
 
-/// One orchestrator decision, enriched with its ticket for the Orchestrator tab's decision feed.
-/// `kind` is a coarse category (`dispatch|restart|answer|spec|pr|escalate|info`) for icon/colour;
-/// `note` is the human-facing rationale (e.g. "answered question — \"Postgres\"").
+/// One row of the immutable action log (`ticket_actions`), enriched with its ticket for the
+/// Orchestrator tab's feed. This log is the single source of truth for two things: **idempotency**
+/// (state-stamped "we already did `kind` at this HEAD/base" records so autonomous work isn't redone,
+/// even across restarts) and the **human-facing audit feed**.
+///
+/// `kind` is either an idempotency kind (`proof|review|judge|ci_triage|conflict`) or a human-facing
+/// orchestrator kind (`dispatch|restart|answer|spec|pr|escalate|info`). `head_sha` is the branch HEAD
+/// the action ran against ("" for state-less notes); `base_sha` is set only for conflict actions
+/// (the base merged). `note` is the human rationale (e.g. "answered question — \"Postgres\"").
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
-pub struct OrchestratorEvent {
+pub struct TicketAction {
     pub id: i64,
     pub ticket_id: i64,
     pub kind: String,
+    pub head_sha: String,
+    pub base_sha: String,
     pub note: String,
     pub created_at: i64,
     pub ticket_title: String,

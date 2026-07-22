@@ -7,7 +7,7 @@ use sqlx::SqlitePool;
 use std::path::Path;
 
 use crate::models::{
-    DiffComment, OrchestratorEvent, Repo, Session, SessionView, Ticket, Worktree, WorktreeView,
+    DiffComment, Repo, Session, SessionView, Ticket, TicketAction, Worktree, WorktreeView,
 };
 use crate::now_unix;
 
@@ -142,6 +142,15 @@ impl Store {
             ticket_id INTEGER NOT NULL,
             kind TEXT NOT NULL DEFAULT '',
             note TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS ticket_actions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticket_id INTEGER NOT NULL,
+            kind TEXT NOT NULL,
+            head_sha TEXT NOT NULL DEFAULT '',
+            base_sha TEXT NOT NULL DEFAULT '',
+            note TEXT NOT NULL DEFAULT '',
             created_at INTEGER NOT NULL
         );
         "#;
@@ -856,6 +865,7 @@ impl Store {
             .bind(id)
             .execute(&self.pool)
             .await?;
+        self.record_state_action(id, "review", sha, "").await?;
         Ok(())
     }
 
@@ -888,6 +898,7 @@ impl Store {
             .bind(id)
             .execute(&self.pool)
             .await?;
+        self.record_state_action(id, "ci_triage", sha, "").await?;
         Ok(())
     }
 
@@ -929,6 +940,7 @@ impl Store {
         .bind(id)
         .execute(&self.pool)
         .await?;
+        self.record_state_action(id, "judge", sha, "").await?;
         Ok(())
     }
 
@@ -955,9 +967,8 @@ impl Store {
 
     /// Record the orchestrator's last action + rationale (human-facing audit line) and the "stuck
     /// state" fingerprint it decided on (idempotency, so it doesn't re-decide the same state). Also
-    /// appends the action to `orchestrator_events` — the durable, cross-ticket decision log for the
-    /// Orchestrator tab. Callers invoke this exactly once per distinct decision (deduped by the
-    /// `seen` fingerprint), so the log has one row per real action, no duplicates.
+    /// appends a human-facing row to the `ticket_actions` log (the Orchestrator tab feed). Callers
+    /// invoke this once per distinct decision (deduped by `seen`), so the log has one row per action.
     pub async fn set_orchestrator_note(&self, id: i64, note: &str, seen: &str) -> Result<()> {
         sqlx::query("UPDATE tickets SET orchestrator_note = ?, orchestrator_seen = ? WHERE id = ?")
             .bind(note)
@@ -965,11 +976,19 @@ impl Store {
             .bind(id)
             .execute(&self.pool)
             .await?;
+        self.record_note(id, orchestrator_kind(note), note).await?;
+        Ok(())
+    }
+
+    /// Append a human-facing note row to the action log (always inserts — these are audit entries,
+    /// not idempotency records, so duplicates across distinct decisions are expected).
+    pub async fn record_note(&self, id: i64, kind: &str, note: &str) -> Result<()> {
         sqlx::query(
-            "INSERT INTO orchestrator_events (ticket_id, kind, note, created_at) VALUES (?, ?, ?, ?)",
+            "INSERT INTO ticket_actions (ticket_id, kind, head_sha, base_sha, note, created_at) \
+             VALUES (?, ?, '', '', ?, ?)",
         )
         .bind(id)
-        .bind(orchestrator_kind(note))
+        .bind(kind)
         .bind(note)
         .bind(now_unix())
         .execute(&self.pool)
@@ -977,13 +996,87 @@ impl Store {
         Ok(())
     }
 
-    /// The orchestrator's decision log, newest-first, joined to each ticket for display. Capped by
-    /// `limit`.
-    pub async fn list_orchestrator_events(&self, limit: i64) -> Result<Vec<OrchestratorEvent>> {
-        Ok(sqlx::query_as::<_, OrchestratorEvent>(
-            "SELECT e.id, e.ticket_id, e.kind, e.note, e.created_at, t.title AS ticket_title, \
-             t.jira_key \
-             FROM orchestrator_events e JOIN tickets t ON t.id = e.ticket_id \
+    /// Record that an autonomous action of `kind` completed for this ticket at a given state
+    /// (`head_sha`, plus `base_sha` for conflict actions). **Insert-if-absent**: recording the same
+    /// (kind, head, base) twice is a no-op, so the append-only log stays clean and `has_action_at`
+    /// is exact. This is the durable idempotency record — once written it survives restarts, so the
+    /// work isn't redone while the state is unchanged.
+    pub async fn record_state_action(
+        &self,
+        id: i64,
+        kind: &str,
+        head_sha: &str,
+        base_sha: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO ticket_actions (ticket_id, kind, head_sha, base_sha, note, created_at) \
+             SELECT ?, ?, ?, ?, '', ? \
+             WHERE NOT EXISTS ( \
+               SELECT 1 FROM ticket_actions \
+               WHERE ticket_id = ? AND kind = ? AND head_sha = ? AND base_sha = ? \
+             )",
+        )
+        .bind(id)
+        .bind(kind)
+        .bind(head_sha)
+        .bind(base_sha)
+        .bind(now_unix())
+        .bind(id)
+        .bind(kind)
+        .bind(head_sha)
+        .bind(base_sha)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Whether an action of `kind` has been recorded for this ticket at `head_sha` (any base). The
+    /// idempotency gate: true ⇒ already done at this HEAD, nothing meaningful changed ⇒ skip. A
+    /// non-empty `head_sha` is required (an empty HEAD never matches a real completion).
+    pub async fn has_action_at(&self, id: i64, kind: &str, head_sha: &str) -> Result<bool> {
+        if head_sha.is_empty() {
+            return Ok(false);
+        }
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM ticket_actions WHERE ticket_id = ? AND kind = ? AND head_sha = ?",
+        )
+        .bind(id)
+        .bind(kind)
+        .bind(head_sha)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(n > 0)
+    }
+
+    /// Whether a `conflict` action has been recorded for this ticket at this exact base+head state —
+    /// so a conflict resolve isn't re-attempted on an unchanged base:head. Empty shas never match.
+    pub async fn has_conflict_action(
+        &self,
+        id: i64,
+        base_sha: &str,
+        head_sha: &str,
+    ) -> Result<bool> {
+        if base_sha.is_empty() || head_sha.is_empty() {
+            return Ok(false);
+        }
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM ticket_actions \
+             WHERE ticket_id = ? AND kind = 'conflict' AND base_sha = ? AND head_sha = ?",
+        )
+        .bind(id)
+        .bind(base_sha)
+        .bind(head_sha)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(n > 0)
+    }
+
+    /// The action log, newest-first, joined to each ticket for display. Capped by `limit`.
+    pub async fn list_actions(&self, limit: i64) -> Result<Vec<TicketAction>> {
+        Ok(sqlx::query_as::<_, TicketAction>(
+            "SELECT e.id, e.ticket_id, e.kind, e.head_sha, e.base_sha, e.note, e.created_at, \
+             t.title AS ticket_title, t.jira_key \
+             FROM ticket_actions e JOIN tickets t ON t.id = e.ticket_id \
              ORDER BY e.id DESC LIMIT ?",
         )
         .bind(limit)
@@ -1068,6 +1161,7 @@ impl Store {
             .bind(id)
             .execute(&self.pool)
             .await?;
+        self.record_state_action(id, "proof", sha, "").await?;
         Ok(())
     }
 

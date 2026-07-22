@@ -347,6 +347,29 @@ async fn handle(Path(event): Path<String>, State(ctx): State<HookCtx>, body: Byt
             if sess.kind == "proof" && event == "PreToolUse" {
                 if let Some(plan) = extract_plan(&v, tool) {
                     let _ = store.set_ticket_proof(sess.ticket_id, &plan).await;
+                    // Durably record proof completion AT CAPTURE, stamped with the worktree HEAD — not
+                    // at the session's `Stop` (which a restart/missed hook can lose, causing proof to
+                    // be redone). Scan the artifact dir (already populated before the report write) so
+                    // the PR comment has the media regardless of how the session ends. The idempotency
+                    // gate reads this log row, so an unchanged HEAD won't re-run proof after a restart.
+                    let ticket_id = sess.ticket_id;
+                    let wt = cwd_canon.clone();
+                    let (head, artifacts_json) = tokio::task::spawn_blocking(move || {
+                        let head = crate::github::head_sha(&wt).unwrap_or_default();
+                        let dir = crate::settings::proof_artifact_dir(ticket_id)
+                            .to_string_lossy()
+                            .to_string();
+                        let arts = crate::proof::scan_artifacts(&dir);
+                        let json = serde_json::to_string(&arts).unwrap_or_else(|_| "[]".into());
+                        (head, json)
+                    })
+                    .await
+                    .unwrap_or_default();
+                    if !head.is_empty() {
+                        let _ = store
+                            .mark_proof_done(sess.ticket_id, &head, &artifacts_json)
+                            .await;
+                    }
                 }
             }
 

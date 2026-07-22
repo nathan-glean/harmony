@@ -394,6 +394,62 @@ async fn clear_all_questions_and_drafting_drops_stale_session_state() {
 }
 
 #[tokio::test]
+async fn action_log_idempotency_and_persistence() {
+    let dir = TempDir::new("actionlog");
+    let id = {
+        let store = open_store(&dir).await;
+        let id = store
+            .add_ticket(None, "local", "T", "", None)
+            .await
+            .unwrap();
+
+        // Nothing recorded yet.
+        assert!(!store.has_action_at(id, "proof", "abc123").await.unwrap());
+
+        // Record proof@abc123 twice — insert-if-absent keeps it a single row.
+        store
+            .record_state_action(id, "proof", "abc123", "")
+            .await
+            .unwrap();
+        store
+            .record_state_action(id, "proof", "abc123", "")
+            .await
+            .unwrap();
+        assert!(store.has_action_at(id, "proof", "abc123").await.unwrap());
+        assert_eq!(store.list_actions(50).await.unwrap().len(), 1);
+
+        // A different HEAD is NOT covered (meaningful change → would redo).
+        assert!(!store.has_action_at(id, "proof", "def456").await.unwrap());
+        // A different kind at the same HEAD is independent.
+        assert!(!store.has_action_at(id, "review", "abc123").await.unwrap());
+        // Empty HEAD never matches a real completion.
+        assert!(!store.has_action_at(id, "proof", "").await.unwrap());
+
+        // Conflicts key on base+head.
+        store
+            .record_state_action(id, "conflict", "head9", "base9")
+            .await
+            .unwrap();
+        assert!(store
+            .has_conflict_action(id, "base9", "head9")
+            .await
+            .unwrap());
+        assert!(!store
+            .has_conflict_action(id, "base9", "otherhead")
+            .await
+            .unwrap());
+        id
+    };
+
+    // Reopen the SAME db file (simulates an app restart): the record persists, so proof isn't redone.
+    let store = open_store(&dir).await;
+    assert!(
+        store.has_action_at(id, "proof", "abc123").await.unwrap(),
+        "proof record must survive a restart so proof isn't regenerated"
+    );
+}
+
+#[tokio::test]
 async fn orchestrator_notes_append_to_decision_log() {
     let dir = TempDir::new("orch");
     let store = open_store(&dir).await;
@@ -420,7 +476,7 @@ async fn orchestrator_notes_append_to_decision_log() {
         .await
         .unwrap();
 
-    let events = store.list_orchestrator_events(50).await.unwrap();
+    let events = store.list_actions(50).await.unwrap();
     assert_eq!(events.len(), 3);
     // Newest-first, joined to the ticket, and classified by kind.
     assert_eq!(events[0].note, "answered question — \"Postgres\"");
@@ -432,7 +488,7 @@ async fn orchestrator_notes_append_to_decision_log() {
     assert_eq!(events[2].kind, "dispatch");
 
     // The limit caps the feed.
-    assert_eq!(store.list_orchestrator_events(1).await.unwrap().len(), 1);
+    assert_eq!(store.list_actions(1).await.unwrap().len(), 1);
     // The ticket keeps only its latest note.
     assert_eq!(
         store
