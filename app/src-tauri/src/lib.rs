@@ -2346,10 +2346,9 @@ fn send_input(state: State<'_, AppState>, session_id: i64, data: String) -> Resu
 
 /// Relay an answer to a Claude `AskUserQuestion` prompt by driving the live TUI over the
 /// PTY — so the user never has to type in the terminal. The recipe lives here in one place
-/// so it can be tuned against the real TUI (see plan Step 0): the option list starts with
-/// item 0 highlighted; Down arrow moves the cursor, Space toggles a multi-select item,
-/// Enter confirms. A custom answer selects the auto-appended "Other" item (index ==
-/// `option_count`) then types the text.
+/// (see `build_answer_keys`): the option list starts with item 0 highlighted; Down arrow
+/// moves the cursor, Space toggles a multi-select item, Enter confirms. A custom answer
+/// selects the auto-appended "Other" item (index == `option_count`) then types the text.
 #[tauri::command]
 fn answer_question(
     state: State<'_, AppState>,
@@ -2369,9 +2368,75 @@ fn answer_question(
     )
 }
 
-/// Translate an AskUserQuestion answer into TUI keystrokes and write them to the session's PTY.
-/// Shared by the `answer_question` command (the human via `QuestionCard`) and the orchestrator
-/// conductor (answering derivable questions autonomously).
+/// Down-arrow escape sequence — moves the AskUserQuestion cursor to the next option.
+const KEY_DOWN: &str = "\x1b[B";
+/// Carriage return — confirms/submits in the TUI.
+const KEY_ENTER: &str = "\r";
+/// Space — toggles the highlighted item in a multi-select prompt.
+const KEY_SPACE: &str = " ";
+/// Delay between keystrokes so the live TUI registers each as a distinct stdin event.
+/// Claude Code's Ink-based prompt parses each stdin chunk as one key event, so a burst
+/// written all at once had its Space toggles swallowed (nothing got checked). Writing one
+/// key per flushed chunk with a small gap makes every toggle land. Kept short (a handful of
+/// keys × this delay is well under ~150ms total) so it doesn't visibly lag the UI, and the
+/// sessions lock is released between chunks so other sessions aren't stalled.
+const KEY_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Build the ordered list of TUI keystrokes for an AskUserQuestion answer. Each returned
+/// element is one *complete* key (an escape sequence stays intact in a single chunk so it is
+/// never misread as a bare Escape) and is meant to be written+flushed separately by
+/// `deliver_answer`. Pure and PTY-free so the exact recipe can be unit-tested.
+///
+/// The option list starts with item 0 highlighted. Down moves the cursor; for multi-select,
+/// Space toggles the highlighted item; Enter confirms. A custom answer walks past every real
+/// option to the auto-appended "Other" item (index == `option_count`), opens it with Enter,
+/// types the text, then confirms.
+fn build_answer_keys(
+    option_count: usize,
+    selected: &[usize],
+    custom_text: Option<&str>,
+    multi_select: bool,
+) -> Vec<String> {
+    let mut keys: Vec<String> = Vec::new();
+    match custom_text {
+        Some(text) if !text.is_empty() => {
+            for _ in 0..option_count {
+                keys.push(KEY_DOWN.to_string());
+            }
+            keys.push(KEY_ENTER.to_string());
+            keys.push(text.to_string());
+            keys.push(KEY_ENTER.to_string());
+        }
+        _ if multi_select => {
+            let mut sorted = selected.to_vec();
+            sorted.sort_unstable();
+            sorted.dedup();
+            let mut cur = 0usize;
+            for idx in sorted {
+                while cur < idx {
+                    keys.push(KEY_DOWN.to_string());
+                    cur += 1;
+                }
+                keys.push(KEY_SPACE.to_string()); // toggle this item
+            }
+            keys.push(KEY_ENTER.to_string());
+        }
+        _ => {
+            let idx = selected.first().copied().unwrap_or(0);
+            for _ in 0..idx {
+                keys.push(KEY_DOWN.to_string());
+            }
+            keys.push(KEY_ENTER.to_string());
+        }
+    }
+    keys
+}
+
+/// Translate an AskUserQuestion answer into TUI keystrokes (via `build_answer_keys`) and write
+/// them to the session's PTY, one flushed chunk per key with a short gap between them so the
+/// live TUI registers each keystroke — in particular so multi-select Space toggles are not
+/// dropped. Shared by the `answer_question` command (the human via `QuestionCard`) and the
+/// orchestrator conductor (answering derivable questions autonomously).
 fn deliver_answer(
     state: &AppState,
     session_id: i64,
@@ -2380,46 +2445,27 @@ fn deliver_answer(
     custom_text: Option<String>,
     multi_select: bool,
 ) -> Result<(), String> {
-    const DOWN: &str = "\x1b[B";
-    const ENTER: &str = "\r";
-    let mut keys = String::new();
-    match custom_text {
-        Some(text) if !text.is_empty() => {
-            for _ in 0..option_count {
-                keys.push_str(DOWN);
-            }
-            keys.push_str(ENTER);
-            keys.push_str(&text);
-            keys.push_str(ENTER);
+    let keys = build_answer_keys(
+        option_count,
+        &selected,
+        custom_text.as_deref(),
+        multi_select,
+    );
+    for (i, chunk) in keys.iter().enumerate() {
+        {
+            // Re-lock per chunk so we never hold the sessions lock across the sleep below.
+            let mut map = state.sessions.lock().unwrap();
+            let Some(io) = map.get_mut(&session_id) else {
+                return Ok(()); // session went away mid-delivery — nothing more to do
+            };
+            io.writer
+                .write_all(chunk.as_bytes())
+                .map_err(|e| e.to_string())?;
+            io.writer.flush().map_err(|e| e.to_string())?;
         }
-        _ if multi_select => {
-            let mut sorted = selected;
-            sorted.sort_unstable();
-            sorted.dedup();
-            let mut cur = 0usize;
-            for idx in sorted {
-                while cur < idx {
-                    keys.push_str(DOWN);
-                    cur += 1;
-                }
-                keys.push(' '); // toggle this item
-            }
-            keys.push_str(ENTER);
+        if i + 1 < keys.len() {
+            std::thread::sleep(KEY_DELAY);
         }
-        _ => {
-            let idx = selected.first().copied().unwrap_or(0);
-            for _ in 0..idx {
-                keys.push_str(DOWN);
-            }
-            keys.push_str(ENTER);
-        }
-    }
-    let mut map = state.sessions.lock().unwrap();
-    if let Some(io) = map.get_mut(&session_id) {
-        io.writer
-            .write_all(keys.as_bytes())
-            .map_err(|e| e.to_string())?;
-        io.writer.flush().map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -3238,4 +3284,116 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Assert the exact ordered keystrokes `deliver_answer` sends to the TUI. Each element is
+    // one complete key written+flushed on its own (with a small delay between them) so the
+    // live prompt registers every keystroke — the multi-select Space toggles in particular.
+
+    #[test]
+    fn single_select_first_option_is_bare_enter() {
+        // Cursor already sits on item 0, so no navigation is needed.
+        assert_eq!(build_answer_keys(3, &[0], None, false), vec![KEY_ENTER]);
+    }
+
+    #[test]
+    fn single_select_later_option_navigates_then_confirms() {
+        assert_eq!(
+            build_answer_keys(3, &[2], None, false),
+            vec![KEY_DOWN, KEY_DOWN, KEY_ENTER]
+        );
+    }
+
+    #[test]
+    fn single_select_empty_defaults_to_first_option() {
+        assert_eq!(build_answer_keys(3, &[], None, false), vec![KEY_ENTER]);
+    }
+
+    #[test]
+    fn multi_select_toggles_each_pick_then_confirms() {
+        // Pick [0, 2] of 3: toggle item 0, move down twice, toggle item 2, confirm.
+        assert_eq!(
+            build_answer_keys(3, &[0, 2], None, true),
+            vec![KEY_SPACE, KEY_DOWN, KEY_DOWN, KEY_SPACE, KEY_ENTER]
+        );
+    }
+
+    #[test]
+    fn multi_select_all_options() {
+        assert_eq!(
+            build_answer_keys(3, &[0, 1, 2], None, true),
+            vec![KEY_SPACE, KEY_DOWN, KEY_SPACE, KEY_DOWN, KEY_SPACE, KEY_ENTER]
+        );
+    }
+
+    #[test]
+    fn multi_select_middle_option_only() {
+        // Selecting just index 1: navigate down once, toggle, confirm.
+        assert_eq!(
+            build_answer_keys(3, &[1], None, true),
+            vec![KEY_DOWN, KEY_SPACE, KEY_ENTER]
+        );
+    }
+
+    #[test]
+    fn multi_select_sorts_and_dedups_picks() {
+        // Unsorted, duplicated input must produce the same recipe as sorted-unique [0, 2].
+        assert_eq!(
+            build_answer_keys(3, &[2, 0, 2], None, true),
+            build_answer_keys(3, &[0, 2], None, true)
+        );
+    }
+
+    #[test]
+    fn multi_select_empty_is_a_bare_enter() {
+        // No toggles, just submit (the UI treats zero picks as a no-op before calling this).
+        assert_eq!(build_answer_keys(3, &[], None, true), vec![KEY_ENTER]);
+    }
+
+    #[test]
+    fn custom_answer_walks_to_other_then_types() {
+        // Past all 3 real options to the "Other" item, Enter to open it, type, confirm.
+        assert_eq!(
+            build_answer_keys(3, &[], Some("do it this way"), false),
+            vec![
+                KEY_DOWN,
+                KEY_DOWN,
+                KEY_DOWN,
+                KEY_ENTER,
+                "do it this way",
+                KEY_ENTER
+            ]
+        );
+    }
+
+    #[test]
+    fn custom_answer_takes_precedence_over_multi_select() {
+        // A non-empty custom text wins even when multi_select is set.
+        assert_eq!(
+            build_answer_keys(2, &[0, 1], Some("nope"), true),
+            vec![KEY_DOWN, KEY_DOWN, KEY_ENTER, "nope", KEY_ENTER]
+        );
+    }
+
+    #[test]
+    fn empty_custom_text_falls_through_to_selection() {
+        // An empty/blank custom string is ignored; the selection path handles the answer.
+        assert_eq!(
+            build_answer_keys(3, &[1], Some(""), false),
+            vec![KEY_DOWN, KEY_ENTER]
+        );
+    }
+
+    #[test]
+    fn every_chunk_is_one_complete_key() {
+        // Escape sequences must never be split across chunks, or the TUI would misread a lone
+        // ESC. Each chunk is either a whole key constant or the custom text payload.
+        for chunk in build_answer_keys(3, &[0, 2], None, true) {
+            assert!(chunk == KEY_DOWN || chunk == KEY_ENTER || chunk == KEY_SPACE);
+        }
+    }
 }
