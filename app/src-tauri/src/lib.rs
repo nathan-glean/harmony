@@ -2797,8 +2797,76 @@ async fn request_review(
     apply_event(&app, &state, ticket_id, Event::ReviewRequested, false).await
 }
 
+/// Restore the user's login-shell `PATH`. A macOS `.app` launched from Finder/Dock inherits a bare
+/// PATH (`/usr/bin:/bin:/usr/sbin:/sbin`), so tools installed under `~/.local/bin`,
+/// `/opt/homebrew/bin`, npm/volta/bun, etc. — including `claude`, `gh`, `git`, `node` — aren't on it
+/// and every spawn fails with "not found in PATH". Query the login shell's PATH once and merge it
+/// (plus common install dirs) into this process's env; every spawned child then inherits it. In
+/// `tauri dev` the terminal PATH is already correct, so this is a harmless no-op. Best-effort.
+fn ensure_user_path() {
+    let mut dirs: Vec<String> = std::env::var("PATH")
+        .unwrap_or_default()
+        .split(':')
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    let push = |d: String, dirs: &mut Vec<String>| {
+        if !d.is_empty() && !dirs.iter().any(|e| e == &d) {
+            dirs.push(d);
+        }
+    };
+
+    // 1) The user's real PATH from a login+interactive shell (sources .zprofile/.zshrc/.bash_profile).
+    //    Bracket it with a marker so shell-startup noise (MOTD, etc.) is easy to strip.
+    #[cfg(unix)]
+    {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+        const MARK: &str = "__HARMONY_PATH__";
+        let script = format!(r#"printf %s {MARK}; printf %s "$PATH"; printf %s {MARK}"#);
+        if let Ok(out) = std::process::Command::new(&shell)
+            .args(["-ilc", &script])
+            .output()
+        {
+            let s = String::from_utf8_lossy(&out.stdout);
+            if let (Some(a), Some(b)) = (s.find(MARK), s.rfind(MARK)) {
+                let start = a + MARK.len();
+                if b > start {
+                    for d in s[start..b].split(':') {
+                        push(d.to_string(), &mut dirs);
+                    }
+                }
+            }
+        }
+    }
+
+    // 2) Belt-and-suspenders: common install locations that exist on disk.
+    if let Ok(home) = std::env::var("HOME") {
+        for rel in [
+            ".local/bin",
+            ".claude/local",
+            ".npm-global/bin",
+            ".bun/bin",
+            ".cargo/bin",
+        ] {
+            let p = format!("{home}/{rel}");
+            if std::path::Path::new(&p).is_dir() {
+                push(p, &mut dirs);
+            }
+        }
+    }
+    for p in ["/opt/homebrew/bin", "/usr/local/bin"] {
+        if std::path::Path::new(p).is_dir() {
+            push(p.to_string(), &mut dirs);
+        }
+    }
+
+    std::env::set_var("PATH", dirs.join(":"));
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Fix PATH before anything spawns a child process (the store/hooks don't, but sessions do).
+    ensure_user_path();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
