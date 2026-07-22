@@ -331,13 +331,57 @@ button:disabled { opacity: 0.5; cursor: default; }
 
 .session-start { display: flex; justify-content: center; padding: 16px 0; }
 .term-head {
+  display: flex; align-items: center; gap: 8px;
   font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
   color: var(--muted); margin-top: 4px;
 }
-.terminal {
-  height: 320px; flex: none; background: #0b0e14;
-  border: 1px solid var(--border); border-radius: 8px; padding: 6px; overflow: hidden;
+.term-head::before {
+  content: ""; width: 7px; height: 7px; border-radius: 50%;
+  background: #9ece6a; box-shadow: 0 0 6px #9ece6a88; flex: none;
 }
+.terminal {
+  position: relative;
+  height: 320px; flex: none; background: var(--bg);
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden;
+}
+/* The xterm mount is inset for breathing room; overlays (jump/search) position against .terminal. */
+.term-screen { position: absolute; inset: 8px 4px 8px 10px; }
+
+/* Styled, theme-matched scrollbar for the terminal viewport. */
+.terminal .xterm-viewport { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+.terminal .xterm-viewport::-webkit-scrollbar { width: 10px; }
+.terminal .xterm-viewport::-webkit-scrollbar-track { background: transparent; }
+.terminal .xterm-viewport::-webkit-scrollbar-thumb {
+  background: var(--border); border-radius: 6px; border: 2px solid var(--bg);
+}
+.terminal .xterm-viewport::-webkit-scrollbar-thumb:hover { background: #35406080; }
+
+/* "Jump to latest" — appears only when scrolled up into history. */
+.term-jump {
+  position: absolute; right: 16px; bottom: 12px; z-index: 5;
+  font-size: 12px; padding: 5px 10px; border-radius: 999px;
+  background: var(--accent); color: #0b0e14; border: none; cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4); font-weight: 600;
+}
+.term-jump:hover { filter: brightness(1.08); }
+
+/* Search bar over the scrollback (Cmd+F). */
+.term-search {
+  position: absolute; right: 12px; top: 10px; z-index: 6;
+  display: flex; align-items: center; gap: 4px;
+  background: var(--panel2); border: 1px solid var(--border); border-radius: 8px;
+  padding: 4px 6px; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+}
+.term-search-input {
+  background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 4px 8px; font-size: 12px; width: 180px; outline: none;
+}
+.term-search-input:focus { border-color: var(--accent); }
+.term-search-btn {
+  background: transparent; color: var(--muted); border: none; cursor: pointer;
+  font-size: 13px; padding: 2px 6px; border-radius: 6px; line-height: 1;
+}
+.term-search-btn:hover { color: var(--text); background: var(--border); }
 
 .muted { color: var(--muted); }
 .tasks { display: flex; flex-direction: column; gap: 6px; }

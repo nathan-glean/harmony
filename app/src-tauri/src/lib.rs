@@ -93,6 +93,60 @@ struct TermOutput {
     data: String,
 }
 
+/// Reassembles a byte stream (raw PTY reads) into valid UTF-8 across read boundaries.
+///
+/// A single multi-byte character (box-drawing glyph, emoji, …) can straddle two `read()`
+/// calls — the last bytes of one 4096-byte chunk and the first bytes of the next. Decoding
+/// each chunk independently with `from_utf8_lossy` mangles that character into `�`. Instead we
+/// emit only the longest valid-UTF-8 prefix of the accumulated bytes and hold back any
+/// incomplete trailing sequence until its remaining bytes arrive. Genuinely invalid bytes
+/// (not merely incomplete) are replaced with U+FFFD so the buffer never stalls.
+#[derive(Default)]
+struct Utf8ChunkBuffer {
+    /// Trailing bytes from a previous chunk that form the start of an incomplete character.
+    pending: Vec<u8>,
+}
+
+impl Utf8ChunkBuffer {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Append a freshly-read chunk and return the decodable text now available, retaining any
+    /// incomplete trailing multi-byte sequence for the next call.
+    fn push(&mut self, chunk: &[u8]) -> String {
+        self.pending.extend_from_slice(chunk);
+        let mut out = String::new();
+        loop {
+            match std::str::from_utf8(&self.pending) {
+                Ok(s) => {
+                    out.push_str(s);
+                    self.pending.clear();
+                    break;
+                }
+                Err(e) => {
+                    let valid = e.valid_up_to();
+                    // Bytes [0, valid) are valid UTF-8 by definition of `valid_up_to`.
+                    out.push_str(std::str::from_utf8(&self.pending[..valid]).unwrap());
+                    match e.error_len() {
+                        // Genuinely invalid bytes mid-stream: emit a replacement char and skip.
+                        Some(len) => {
+                            out.push('\u{FFFD}');
+                            self.pending.drain(..valid + len);
+                        }
+                        // Incomplete trailing sequence: keep it until the rest arrives.
+                        None => {
+                            self.pending.drain(..valid);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
 /// Emitted when a session's Claude process exits. `ok` is false for an abnormal exit (crash)
 /// that wasn't a user-initiated stop, so the UI can flash a toast and show an error badge.
 #[derive(Clone, Serialize)]
@@ -2493,12 +2547,19 @@ fn wire_session(
         let app = app.clone();
         std::thread::spawn(move || {
             let mut buf = [0u8; 4096];
+            // Reassemble UTF-8 across chunk boundaries so a multi-byte glyph split by a read
+            // isn't mangled into `�` (see `Utf8ChunkBuffer`).
+            let mut decoder = Utf8ChunkBuffer::new();
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        let data = String::from_utf8_lossy(&buf[..n]).to_string();
-                        let _ = app.emit("term-output", TermOutput { session_id, data });
+                        let data = decoder.push(&buf[..n]);
+                        // A chunk may end mid-character, yielding no complete text yet; skip the
+                        // empty emit until the rest of the sequence arrives.
+                        if !data.is_empty() {
+                            let _ = app.emit("term-output", TermOutput { session_id, data });
+                        }
                     }
                 }
             }
@@ -3534,6 +3595,60 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn passes_through_plain_ascii() {
+        let mut buf = Utf8ChunkBuffer::new();
+        assert_eq!(buf.push(b"hello world"), "hello world");
+        assert!(buf.pending.is_empty());
+    }
+
+    #[test]
+    fn decodes_a_whole_multibyte_char() {
+        let mut buf = Utf8ChunkBuffer::new();
+        // U+2502 BOX DRAWINGS LIGHT VERTICAL = e2 94 82
+        assert_eq!(buf.push("│".as_bytes()), "│");
+    }
+
+    #[test]
+    fn buffers_a_multibyte_char_split_across_a_boundary() {
+        let mut buf = Utf8ChunkBuffer::new();
+        // "a│" = 61 e2 94 82. Split the 3-byte glyph after its first byte.
+        let bytes = "a│".as_bytes();
+        assert_eq!(bytes, &[0x61, 0xE2, 0x94, 0x82]);
+        // First read ends mid-glyph: emit only the valid ASCII prefix, hold the rest.
+        assert_eq!(buf.push(&bytes[..2]), "a");
+        assert_eq!(buf.pending, vec![0xE2]);
+        // Second read carries a single leftover byte, still incomplete.
+        assert_eq!(buf.push(&bytes[2..3]), "");
+        assert_eq!(buf.pending, vec![0xE2, 0x94]);
+        // Final byte completes the glyph.
+        assert_eq!(buf.push(&bytes[3..]), "│");
+        assert!(buf.pending.is_empty());
+    }
+
+    #[test]
+    fn reassembles_a_four_byte_emoji_split_byte_by_byte() {
+        let mut buf = Utf8ChunkBuffer::new();
+        // U+1F680 ROCKET = f0 9f 9a 80 (4 bytes).
+        let bytes = "🚀".as_bytes();
+        assert_eq!(bytes.len(), 4);
+        let mut out = String::new();
+        for b in bytes {
+            out.push_str(&buf.push(&[*b]));
+        }
+        assert_eq!(out, "🚀");
+        assert!(buf.pending.is_empty());
+    }
+
+    #[test]
+    fn replaces_genuinely_invalid_bytes_without_stalling() {
+        let mut buf = Utf8ChunkBuffer::new();
+        // 0xFF is never valid UTF-8; it must not be held forever.
+        let out = buf.push(&[0x41, 0xFF, 0x42]);
+        assert_eq!(out, "A\u{FFFD}B");
+        assert!(buf.pending.is_empty());
+    }
 
     // Assert the exact ordered keystrokes `deliver_answer` sends to the TUI. Each element is
     // one complete key written+flushed on its own (with a small delay between them) so the
