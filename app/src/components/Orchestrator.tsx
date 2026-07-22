@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "../api";
-import type { OrchestratorEvent, OrchestratorStatus } from "../types";
+import type { TicketAction, OrchestratorStatus } from "../types";
 
 const fmt = (secs: number) =>
   new Date(secs * 1000).toLocaleString([], {
@@ -19,7 +19,7 @@ function ago(secs: number): string {
   return `${Math.floor(d / 3600)}h ago`;
 }
 
-// Icon + label per event kind (matches store::orchestrator_kind).
+// Icon + label per action kind (orchestrator notes + idempotency actions).
 const KIND: Record<string, { icon: string; label: string }> = {
   dispatch: { icon: "▶", label: "Dispatched" },
   restart: { icon: "↻", label: "Restarted" },
@@ -28,19 +28,24 @@ const KIND: Record<string, { icon: string; label: string }> = {
   pr: { icon: "🔀", label: "PR" },
   escalate: { icon: "⚠", label: "Escalated" },
   info: { icon: "•", label: "Info" },
+  proof: { icon: "🔎", label: "Proof" },
+  review: { icon: "🔍", label: "Reviewed" },
+  judge: { icon: "⚖", label: "Judged" },
+  ci_triage: { icon: "🩺", label: "CI triage" },
+  conflict: { icon: "🔀", label: "Conflicts" },
 };
 
 /** The Orchestrator tab: live status (on/off, concurrency, last tick, in-flight decision) plus the
  *  persistent decision feed across all tickets. Clicking a row opens that ticket. */
 export function Orchestrator({ onOpen }: { onOpen: (ticketId: number) => void }) {
   const [status, setStatus] = useState<OrchestratorStatus | null>(null);
-  const [events, setEvents] = useState<OrchestratorEvent[]>([]);
+  const [events, setEvents] = useState<TicketAction[]>([]);
 
   const refresh = useCallback(async () => {
     try {
       const [s, e] = await Promise.all([
         api.getOrchestratorStatus(),
-        api.listOrchestratorEvents(200),
+        api.listActions(200),
       ]);
       setStatus(s);
       setEvents(e);
@@ -118,7 +123,18 @@ export function Orchestrator({ onOpen }: { onOpen: (ticketId: number) => void })
                     <span className={"orch-kind " + e.kind} title={k.label}>
                       {k.icon}
                     </span>{" "}
-                    {e.note}
+                    {/* Orchestrator notes carry prose; state-stamped idempotency actions carry a
+                        HEAD instead — show the label + short sha for those. */}
+                    {e.note ? (
+                      e.note
+                    ) : (
+                      <>
+                        {k.label}
+                        {e.head_sha && (
+                          <span className="muted"> @ {e.head_sha.slice(0, 7)}</span>
+                        )}
+                      </>
+                    )}
                   </td>
                 </tr>
               );

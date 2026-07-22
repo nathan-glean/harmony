@@ -192,11 +192,14 @@ export type DiffComment = {
   anchor: string;
 };
 
-// One orchestrator decision (matches harmony_core::models::OrchestratorEvent).
-export type OrchestratorEvent = {
+// One row of the immutable action log (matches harmony_core::models::TicketAction). Backs both
+// idempotency (state-stamped completions) and the Orchestrator tab's audit feed.
+export type TicketAction = {
   id: number;
   ticket_id: number;
-  kind: string; // dispatch | restart | answer | spec | pr | escalate | info
+  kind: string; // proof|review|judge|ci_triage|conflict | dispatch|restart|answer|spec|pr|escalate|info
+  head_sha: string; // branch HEAD it acted on ("" for state-less notes)
+  base_sha: string; // base merged (conflict actions only)
   note: string;
   created_at: number; // unix seconds
   ticket_title: string;

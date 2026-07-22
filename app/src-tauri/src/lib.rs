@@ -905,8 +905,14 @@ async fn poll_conflicts_once(app: &AppHandle, state: &AppState) {
         }
 
         let fingerprint = format!("{base_sha}:{head}");
-        // Already attempted this exact state → don't respawn.
-        if ticket.conflict_fingerprint == fingerprint {
+        // Already acted on this exact base:head (per the durable action log) → don't respawn, even
+        // after a restart.
+        if state
+            .store
+            .has_conflict_action(ticket.id, &base_sha, &head)
+            .await
+            .unwrap_or(false)
+        {
             continue;
         }
         if ticket.conflict_fix_attempts >= MAX_CONFLICT_FIX_ATTEMPTS {
@@ -938,6 +944,11 @@ async fn poll_conflicts_once(app: &AppHandle, state: &AppState) {
                 let _ = state
                     .store
                     .bump_conflict_fix_attempts(ticket.id, &fingerprint)
+                    .await;
+                // Durable idempotency record: we've acted on this base:head (survives restart).
+                let _ = state
+                    .store
+                    .record_state_action(ticket.id, "conflict", &head, &base_sha)
                     .await;
                 store_activity(app, state, ticket.id).await;
             }
@@ -996,8 +1007,15 @@ async fn poll_reviews_once(app: &AppHandle, state: &AppState) {
         })
         .await
         .unwrap_or_default();
-        if head.is_empty() || head == ticket.reviewed_sha {
-            continue; // review is current
+        // Already reviewed at this HEAD (per the durable action log)? Then review is current.
+        if head.is_empty()
+            || state
+                .store
+                .has_action_at(ticket.id, "review", &head)
+                .await
+                .unwrap_or(false)
+        {
+            continue;
         }
         // Stale → re-run `/review` in place (stays in the current column).
         let _ = apply_event(app, state, ticket.id, Event::ReviewRequested, false).await;
@@ -1043,7 +1061,20 @@ async fn poll_review_loop_once(app: &AppHandle, state: &AppState) {
         })
         .await
         .unwrap_or_default();
-        if head.is_empty() || head != ticket.reviewed_sha || head == ticket.judged_sha {
+        // Only judge a CURRENT review (reviewed at this HEAD), and judge each HEAD once — both via
+        // the durable action log, so a restart doesn't re-judge an already-judged HEAD.
+        if head.is_empty()
+            || !state
+                .store
+                .has_action_at(ticket.id, "review", &head)
+                .await
+                .unwrap_or(false)
+            || state
+                .store
+                .has_action_at(ticket.id, "judge", &head)
+                .await
+                .unwrap_or(false)
+        {
             continue;
         }
 
@@ -1134,12 +1165,31 @@ async fn poll_proof_loop_once(app: &AppHandle, state: &AppState) {
         })
         .await
         .unwrap_or_default();
-        // Only evidence a CURRENT review (proof reflects the reviewed HEAD), and only once per HEAD.
-        if head.is_empty() || head != ticket.reviewed_sha || head == ticket.proof_sha {
+        // Only evidence a CURRENT review (proof reflects the reviewed HEAD), and only once per HEAD —
+        // both via the durable action log, so proof isn't regenerated after a restart at the same HEAD.
+        if head.is_empty()
+            || !state
+                .store
+                .has_action_at(ticket.id, "review", &head)
+                .await
+                .unwrap_or(false)
+            || state
+                .store
+                .has_action_at(ticket.id, "proof", &head)
+                .await
+                .unwrap_or(false)
+        {
             continue;
         }
         // With the review loop on, don't evidence until its judge has PASSED this exact HEAD.
-        if review_loop && (ticket.judged_sha != head || ticket.review_verdict != "pass") {
+        if review_loop
+            && (!state
+                .store
+                .has_action_at(ticket.id, "judge", &head)
+                .await
+                .unwrap_or(false)
+                || ticket.review_verdict != "pass")
+        {
             continue;
         }
 
@@ -1786,8 +1836,15 @@ async fn triage_and_maybe_fix(
         return Ok("no failing checks".into());
     }
     // Already triaged this exact commit (and not a manual request) → nothing new to do (avoids
-    // re-running the LLM / re-spawning a fix for the same HEAD).
-    if !manual && !head.is_empty() && head == ticket.ci_triaged_sha {
+    // re-running the LLM / re-spawning a fix for the same HEAD). Read the durable action log so a
+    // restart doesn't re-triage a HEAD already triaged.
+    if !manual
+        && state
+            .store
+            .has_action_at(ticket_id, "ci_triage", &head)
+            .await
+            .unwrap_or(false)
+    {
         return Ok("already triaged this commit".into());
     }
 
@@ -2186,15 +2243,16 @@ async fn get_orchestrator_status(
     })
 }
 
-/// The orchestrator's decision log (newest first), for the Orchestrator tab's feed.
+/// The action log (newest first), for the Orchestrator tab's feed. One immutable log backs both
+/// idempotency and this audit view.
 #[tauri::command]
-async fn list_orchestrator_events(
+async fn list_actions(
     state: State<'_, AppState>,
     limit: Option<i64>,
-) -> Result<Vec<harmony_core::models::OrchestratorEvent>, String> {
+) -> Result<Vec<harmony_core::models::TicketAction>, String> {
     state
         .store
-        .list_orchestrator_events(limit.unwrap_or(200).clamp(1, 1000))
+        .list_actions(limit.unwrap_or(200).clamp(1, 1000))
         .await
         .map_err(|e| e.to_string())
 }
@@ -2825,8 +2883,9 @@ async fn build_ctx(state: &AppState, ticket: &Ticket) -> Ctx {
             .flatten()
             .map(|r| r.path);
         let reviewed = ticket.reviewed == 1;
-        let reviewed_sha = ticket.reviewed_sha.clone();
-        tokio::task::spawn_blocking(move || {
+        // git facts off-thread; `review_current` needs an async log lookup, so return `head` and
+        // compute it below.
+        let (has_changes, head, pr) = tokio::task::spawn_blocking(move || {
             let base = repo_path
                 .as_deref()
                 .and_then(|rp| harmony_core::worktree::default_branch(rp).ok())
@@ -2835,12 +2894,23 @@ async fn build_ctx(state: &AppState, ticket: &Ticket) -> Ctx {
                 .map(|d| !d.trim().is_empty())
                 .unwrap_or(false);
             let head = harmony_core::github::head_sha(&path).unwrap_or_default();
-            let review_current = reviewed && !head.is_empty() && head == reviewed_sha;
             let pr = harmony_core::github::pr_status(&path);
-            (has_changes, review_current, pr)
+            (has_changes, head, pr)
         })
         .await
-        .unwrap_or((false, false, harmony_core::github::PrStatus::default()))
+        .unwrap_or((
+            false,
+            String::new(),
+            harmony_core::github::PrStatus::default(),
+        ));
+        // Review is current when it's been reviewed at this exact HEAD (durable action log).
+        let review_current = reviewed
+            && state
+                .store
+                .has_action_at(ticket.id, "review", &head)
+                .await
+                .unwrap_or(false);
+        (has_changes, review_current, pr)
     } else {
         (false, false, harmony_core::github::PrStatus::default())
     };
@@ -3562,7 +3632,7 @@ pub fn run() {
             get_orchestrator,
             set_orchestrator,
             get_orchestrator_status,
-            list_orchestrator_events,
+            list_actions,
             get_max_concurrent,
             set_max_concurrent,
             get_pr_desc_autoupdate,

@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Ticket, Repo, SessionView, WorktreeView, SessionProgress, SpecFields, DiffComment, PrComment, CommentTarget, OrchestratorEvent, OrchestratorStatus } from "./types";
+import type { Ticket, Repo, SessionView, WorktreeView, SessionProgress, SpecFields, DiffComment, PrComment, CommentTarget, TicketAction, OrchestratorStatus } from "./types";
 
 // Tauri converts camelCase JS arg keys to snake_case Rust params.
 export const api = {
@@ -65,8 +65,8 @@ export const api = {
   getOrchestrator: () => invoke<boolean>("get_orchestrator"),
   setOrchestrator: (enabled: boolean) => invoke<void>("set_orchestrator", { enabled }),
   getOrchestratorStatus: () => invoke<OrchestratorStatus>("get_orchestrator_status"),
-  listOrchestratorEvents: (limit?: number) =>
-    invoke<OrchestratorEvent[]>("list_orchestrator_events", { limit: limit ?? null }),
+  listActions: (limit?: number) =>
+    invoke<TicketAction[]>("list_actions", { limit: limit ?? null }),
   getMaxConcurrent: () => invoke<number>("get_max_concurrent"),
   setMaxConcurrent: (n: number) => invoke<void>("set_max_concurrent", { n }),
   getAutoEndIdle: () => invoke<boolean>("get_auto_end_idle"),
