@@ -390,6 +390,66 @@ async fn clear_all_questions_and_drafting_drops_stale_session_state() {
     assert_eq!(
         store.get_ticket(b).await.unwrap().unwrap().pending_question,
         ""
+
+#[tokio::test]
+async fn upsert_jira_ticket_maps_and_backfills_default_repo() {
+    let dir = TempDir::new("jira-repo");
+    let store = open_store(&dir).await;
+
+    // A repo-less ticket synced before its repo's default project key is known → no repo.
+    let (early, _) = store.upsert_jira_ticket("DNA-9", "Early").await.unwrap();
+    assert!(store
+        .get_ticket(early)
+        .await
+        .unwrap()
+        .unwrap()
+        .repo_id
+        .is_none());
+
+    // Register a repo whose default Jira project is DNA.
+    let repo_id = store
+        .add_repo("bistromath", dir.path().to_str().unwrap(), Some("DNA"))
+        .await
+        .unwrap();
+
+    // A NEW DNA ticket maps to that repo on insert.
+    let (fresh, inserted) = store.upsert_jira_ticket("DNA-10", "Fresh").await.unwrap();
+    assert!(inserted);
+    assert_eq!(
+        store.get_ticket(fresh).await.unwrap().unwrap().repo_id,
+        Some(repo_id)
+    );
+
+    // Re-syncing the earlier repo-less ticket backfills its repo from the project default.
+    store.upsert_jira_ticket("DNA-9", "Early").await.unwrap();
+    assert_eq!(
+        store.get_ticket(early).await.unwrap().unwrap().repo_id,
+        Some(repo_id)
+    );
+
+    // A different project with no default repo stays unassigned.
+    let (bug, _) = store.upsert_jira_ticket("BUGS-1", "A bug").await.unwrap();
+    assert!(store
+        .get_ticket(bug)
+        .await
+        .unwrap()
+        .unwrap()
+        .repo_id
+        .is_none());
+
+    // Sync never clobbers a repo the user explicitly set.
+    let other = store
+        .add_repo("other", dir.path().to_str().unwrap(), None)
+        .await
+        .unwrap();
+    store.set_ticket_repo(fresh, other).await.unwrap();
+    store
+        .upsert_jira_ticket("DNA-10", "Fresh again")
+        .await
+        .unwrap();
+    assert_eq!(
+        store.get_ticket(fresh).await.unwrap().unwrap().repo_id,
+        Some(other)
     );
 }
 
@@ -1377,6 +1437,10 @@ fn sample_ticket() -> harmony_core::models::Ticket {
         orchestrator_note: "".into(),
         orchestrator_seen: "".into(),
         restart_attempts: 0,
+        proof: String::new(),
+        proof_artifacts: String::new(),
+        proof_sha: String::new(),
+        proof_attempts: 0,
     }
 }
 

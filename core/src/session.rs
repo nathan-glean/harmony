@@ -251,6 +251,62 @@ impl SessionManager {
         })
     }
 
+    /// Start a proof-of-work session in the ticket's worktree: an autonomous run (execute perms — it
+    /// must run the app/tests and record) that captures the richest feasible evidence the change
+    /// works (walkthrough video → screenshots → grounded report), writing media to the per-ticket
+    /// artifact dir under `~/.harmony` (never the repo) and the prose report to its plan file (which
+    /// the hook captures). Session `kind = "proof"`; harmony fingerprints + collects artifacts on
+    /// Stop (`ProofFinished`). Runs after review passes; does NOT change the ticket column (it stays
+    /// in "For Your Review" while proof is produced).
+    pub async fn start_proof(&self, ticket_id: i64) -> Result<SessionHandle> {
+        let ticket = self
+            .store
+            .get_ticket(ticket_id)
+            .await?
+            .ok_or_else(|| anyhow!("no such ticket #{ticket_id}"))?;
+        let repo_id = ticket
+            .repo_id
+            .ok_or_else(|| anyhow!("ticket #{ticket_id} has no repo assigned"))?;
+        let repo = self
+            .store
+            .get_repo(repo_id)
+            .await?
+            .ok_or_else(|| anyhow!("repo #{repo_id} missing"))?;
+
+        let wt = self
+            .ensure_primary_worktree(&ticket, repo_id, &repo)
+            .await?;
+        crate::settings::inject_hooks(&wt.path, self.hook_port)?;
+        // Keep the repo clean: capture leftovers + harmony config must never land in `git add -A`.
+        let _ = crate::github::add_git_excludes(
+            &wt.path,
+            &[
+                ".harmony/",
+                "node_modules/",
+                "playwright-report/",
+                "test-results/",
+                "*.cast",
+                "harmony-proof*",
+            ],
+        );
+
+        // Provision the shared capture toolchain + the fresh per-run artifact dir, and get the env.
+        let penv = crate::settings::provision_proof_env(ticket_id)?;
+        let prompt = render_proof_prompt(&ticket, &penv.artifact_dir);
+        let (master, child) =
+            spawn_claude_with_env(&wt.path, &prompt, None, "bypassPermissions", &penv.env)?;
+
+        let session_id = self
+            .store
+            .add_session(ticket_id, wt.id, &wt.path, "proof")
+            .await?;
+        Ok(SessionHandle {
+            session_id,
+            master,
+            child,
+        })
+    }
+
     /// Start an autonomous session to fix a failing CI check. Runs in the ticket's worktree with
     /// `bypassPermissions` (unattended), the opening prompt carrying the triage context (failing
     /// check, rationale, proposed fix, and a tail of the failed logs). harmony commits + pushes on
@@ -465,6 +521,52 @@ fn render_review_prompt(t: &Ticket) -> String {
          suggest — this is a pre-PR sanity check for the human. Write your full review to your \
          plan file as a single, complete document (this is how the review is surfaced to the \
          human). Do not make any edits to the repo.\n\n\
+         # {}\n\n{}",
+        t.title,
+        crate::spec::compose_spec(t)
+    )
+}
+
+/// Opening prompt for a proof-of-work session. Inlines the full proof methodology (like the grill,
+/// nothing is installed in the target repo) so the agent decides the richest feasible evidence for
+/// *this* change and repo, captures media to the artifact dir, and writes a grounded report to its
+/// plan file (which the hook captures onto the ticket). Runs with execute perms in the worktree.
+fn render_proof_prompt(t: &Ticket, artifact_dir: &str) -> String {
+    format!(
+        "You are producing PROOF OF WORK for a change that has just passed code review, so a human \
+         (and teammates on the PR) can review the *output and functionality* instead of reading the \
+         diff. Work autonomously and to completion — no human is watching.\n\n\
+         The change is on this branch (the worktree you're in). First inspect what it does: read the \
+         spec below and run `git diff --merge-base <base>` to see the changes.\n\n\
+         Then DECIDE the richest form of proof this change and repo actually support, and produce it \
+         — prefer visual, and avoid making the reviewer read code:\n\
+         - Runnable web/UI app → capture a short screen recording of the feature working and/or \
+         key screenshots. Use a headless browser you drive with `npx playwright` (its browser is \
+         cached centrally, so first use may download once) — e.g. `npx --yes playwright screenshot \
+         <url> <out.png>`, or a tiny Playwright script that records video. Start the app's dev \
+         server first if needed.\n\
+         - Desktop/GUI app → record the screen with `ffmpeg` (`-f avfoundation`) or `screencapture` \
+         while you exercise the feature.\n\
+         - CLI tool → record a terminal cast with `asciinema rec` if available, otherwise run the \
+         commands and capture their real output.\n\
+         - API/library/backend → run the real endpoints/functions (e.g. `curl`, a test harness) and \
+         capture the actual request/response and test output.\n\
+         - Nothing runnable applies → produce a grounded written report only.\n\n\
+         Write ALL media/evidence files into this directory (it already exists; do not put anything \
+         in the repo): {artifact_dir}\n\
+         Use clear, descriptive file names (they become captions), e.g. `walkthrough.mp4`, \
+         `01-filter-applied.png`, `tests.cast`.\n\n\
+         If a capture tool is missing or a step fails, DEGRADE GRACEFULLY — never block; fall back to \
+         screenshots, then to a written report. Do not weaken anything to force a capture.\n\n\
+         Finally, write your proof report to a file under `.claude/plans/` (this is how the report is \
+         surfaced). Ground every claim in REAL output — paste the verbatim output of the commands \
+         you actually ran; do not narrate results you didn't produce. Structure it as:\n\
+         - **What works now** — one or two plain-language sentences.\n\
+         - **How to see it** — the exact steps/commands to reproduce.\n\
+         - **Evidence** — reference the media files you captured (by name) and paste verbatim \
+         command/test output.\n\n\
+         Do NOT edit the repo's code and do NOT run `git commit`/`git push` — this session only \
+         produces evidence; harmony handles version control.\n\n\
          # {}\n\n{}",
         t.title,
         crate::spec::compose_spec(t)
@@ -832,6 +934,19 @@ fn spawn_claude(
     resume: Option<&str>,
     permission_mode: &str,
 ) -> Result<(Box<dyn MasterPty + Send>, Box<dyn Child + Send + Sync>)> {
+    spawn_claude_with_env(cwd, prompt, resume, permission_mode, &[])
+}
+
+/// Spawn `claude` with extra environment variables (used by the proof session to point capture tools
+/// at the shared toolchain + the per-ticket artifact dir). `env` entries are set on the child; a
+/// `PATH` entry replaces the inherited PATH (the caller composes it including the inherited PATH).
+fn spawn_claude_with_env(
+    cwd: &str,
+    prompt: &str,
+    resume: Option<&str>,
+    permission_mode: &str,
+    env: &[(String, String)],
+) -> Result<(Box<dyn MasterPty + Send>, Box<dyn Child + Send + Sync>)> {
     let pty = native_pty_system();
     let pair = pty.openpty(PtySize {
         rows: 40,
@@ -842,6 +957,9 @@ fn spawn_claude(
 
     let mut cmd = CommandBuilder::new("claude");
     cmd.cwd(cwd);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
     for a in claude_args(prompt, resume, permission_mode) {
         cmd.arg(a);
     }
@@ -905,6 +1023,10 @@ mod tests {
             orchestrator_note: String::new(),
             orchestrator_seen: String::new(),
             restart_attempts: 0,
+            proof: String::new(),
+            proof_artifacts: String::new(),
+            proof_sha: String::new(),
+            proof_attempts: 0,
         }
     }
 

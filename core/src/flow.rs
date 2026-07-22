@@ -65,6 +65,9 @@ pub enum Event {
     ReviewRequested,
     /// The `/review` run completed.
     ReviewFinished,
+    /// A proof-of-work session finished capturing evidence — stop it and fingerprint the evidenced
+    /// HEAD (so the proof poller doesn't regenerate until the branch moves).
+    ProofFinished,
     /// An autonomous CI-fix session finished — commit + push its changes (re-triggers CI).
     FixFinished,
     /// A feedback-addressing session finished — commit (and push when a PR exists) so the change
@@ -103,6 +106,9 @@ pub enum Action {
     /// Fingerprint the current HEAD as the reviewed SHA so `/review` isn't re-run until the branch
     /// moves again (drives [`Ctx::review_current`]).
     MarkReviewed,
+    /// Fingerprint the current HEAD as the proof SHA and capture the proof session's media artifacts
+    /// (scan the artifact dir), so the proof poller doesn't regenerate until the branch moves.
+    MarkProofDone,
     /// Push the branch and open a draft PR.
     OpenPr,
     /// Merge the approved PR.
@@ -378,6 +384,16 @@ pub fn decide(event: Event, ctx: &Ctx) -> Decision {
         Event::ReviewFinished => Decision {
             target: ctx.from,
             actions: vec![StopSession, MarkReviewed],
+            blocked: None,
+        },
+
+        // A proof session finished: stop it and fingerprint the evidenced HEAD (+ capture artifacts).
+        // The ticket stays where it is — proof is produced in place in the review column. Mirrors
+        // `ReviewFinished`. The proof session is spawned by the poller (`poll_proof_loop_once`), not
+        // by `decide`, exactly as the review-loop judge spawns its fix sessions.
+        Event::ProofFinished => Decision {
+            target: ctx.from,
+            actions: vec![StopSession, MarkProofDone],
             blocked: None,
         },
 

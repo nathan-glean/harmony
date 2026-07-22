@@ -12,6 +12,8 @@ export const api = {
   renameRepo: (id: number, name: string) => invoke<void>("rename_repo", { id, name }),
   deleteRepo: (id: number) => invoke<void>("delete_repo", { id }),
   getTicket: (id: number) => invoke<Ticket | null>("get_ticket", { id }),
+  assignTicketRepo: (ticketId: number, repoId: number) =>
+    invoke<void>("assign_ticket_repo", { ticketId, repoId }),
   listSessions: () => invoke<SessionView[]>("list_sessions"),
   liveSessions: () => invoke<[number, number][]>("live_sessions"),
   liveProgress: () => invoke<SessionProgress[]>("live_progress"),
@@ -53,6 +55,8 @@ export const api = {
   setAutoReview: (enabled: boolean) => invoke<void>("set_auto_review", { enabled }),
   getReviewLoop: () => invoke<boolean>("get_review_loop"),
   setReviewLoop: (enabled: boolean) => invoke<void>("set_review_loop", { enabled }),
+  getProofEnabled: () => invoke<boolean>("get_proof_enabled"),
+  setProofEnabled: (enabled: boolean) => invoke<void>("set_proof_enabled", { enabled }),
   getAutoMerge: () => invoke<boolean>("get_auto_merge"),
   setAutoMerge: (enabled: boolean) => invoke<void>("set_auto_merge", { enabled }),
   getOrchestrator: () => invoke<boolean>("get_orchestrator"),

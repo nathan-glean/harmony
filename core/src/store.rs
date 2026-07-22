@@ -228,6 +228,20 @@ impl Store {
         )
         .execute(&self.pool)
         .await;
+        let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN proof TEXT NOT NULL DEFAULT ''")
+            .execute(&self.pool)
+            .await;
+        let _ =
+            sqlx::query("ALTER TABLE tickets ADD COLUMN proof_artifacts TEXT NOT NULL DEFAULT ''")
+                .execute(&self.pool)
+                .await;
+        let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN proof_sha TEXT NOT NULL DEFAULT ''")
+            .execute(&self.pool)
+            .await;
+        let _ =
+            sqlx::query("ALTER TABLE tickets ADD COLUMN proof_attempts INTEGER NOT NULL DEFAULT 0")
+                .execute(&self.pool)
+                .await;
         Ok(())
     }
 
@@ -346,7 +360,7 @@ impl Store {
 
     pub async fn get_ticket(&self, id: i64) -> Result<Option<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec, review_verdict, review_findings, judged_sha, review_fix_attempts, activity, orchestrator_note, orchestrator_seen, restart_attempts
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec, review_verdict, review_findings, judged_sha, review_fix_attempts, activity, orchestrator_note, orchestrator_seen, restart_attempts, proof, proof_artifacts, proof_sha, proof_attempts
              FROM tickets WHERE id = ?",
         )
         .bind(id)
@@ -356,7 +370,7 @@ impl Store {
 
     pub async fn list_tickets(&self) -> Result<Vec<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec, review_verdict, review_findings, judged_sha, review_fix_attempts, activity, orchestrator_note, orchestrator_seen, restart_attempts
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec, review_verdict, review_findings, judged_sha, review_fix_attempts, activity, orchestrator_note, orchestrator_seen, restart_attempts, proof, proof_artifacts, proof_sha, proof_attempts
              FROM tickets ORDER BY id",
         )
         .fetch_all(&self.pool)
@@ -681,7 +695,7 @@ impl Store {
 
     pub async fn get_ticket_by_key(&self, key: &str) -> Result<Option<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec, review_verdict, review_findings, judged_sha, review_fix_attempts, activity, orchestrator_note, orchestrator_seen, restart_attempts
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec, review_verdict, review_findings, judged_sha, review_fix_attempts, activity, orchestrator_note, orchestrator_seen, restart_attempts, proof, proof_artifacts, proof_sha, proof_attempts
              FROM tickets WHERE jira_key = ?",
         )
         .bind(key)
@@ -692,6 +706,15 @@ impl Store {
     /// Insert or update a ticket from a Jira issue. Returns (id, inserted). On update we
     /// refresh the title only — never the harmony status or the locally-authored spec.
     pub async fn upsert_jira_ticket(&self, key: &str, title: &str) -> Result<(i64, bool)> {
+        // Map the Jira project key (the `DNA` in `DNA-1685`) to its default repo, if one is set, so a
+        // synced ticket lands on the right repo immediately instead of showing "no repo" until a
+        // session starts. Missing/unknown project → no default (leave repo unassigned).
+        let project = key.split('-').next().unwrap_or("");
+        let default_repo_id = if project.is_empty() {
+            None
+        } else {
+            self.default_repo_for_key(project).await?.map(|r| r.id)
+        };
         if let Some(t) = self.get_ticket_by_key(key).await? {
             sqlx::query("UPDATE tickets SET title = ?, updated_at = ? WHERE id = ?")
                 .bind(title)
@@ -699,9 +722,17 @@ impl Store {
                 .bind(t.id)
                 .execute(&self.pool)
                 .await?;
+            // Backfill a missing repo from the project default (never override a repo the user set).
+            if t.repo_id.is_none() {
+                if let Some(rid) = default_repo_id {
+                    self.set_ticket_repo(t.id, rid).await?;
+                }
+            }
             Ok((t.id, false))
         } else {
-            let id = self.add_ticket(Some(key), "jira", title, "", None).await?;
+            let id = self
+                .add_ticket(Some(key), "jira", title, "", default_repo_id)
+                .await?;
             Ok((id, true))
         }
     }
@@ -941,6 +972,54 @@ impl Store {
         sqlx::query(
             "UPDATE tickets SET review_fix_attempts = 0, judged_sha = '', review_verdict = '', \
              review_findings = '' WHERE id = ?",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Store the proof-of-work report the proof session wrote (from its plan-file write). Latest-only;
+    /// surfaced in the Proof tab and posted to the PR. Does NOT fingerprint — completion + fingerprint
+    /// happens in `mark_proof_done` on the session's Stop.
+    pub async fn set_ticket_proof(&self, id: i64, report: &str) -> Result<()> {
+        sqlx::query("UPDATE tickets SET proof = ? WHERE id = ?")
+            .bind(report)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Record that a proof run completed for `sha` (the HEAD it evidenced) and the media artifacts it
+    /// produced (`artifacts_json`). `proof_sha` is the idempotency fingerprint so the proof poller
+    /// won't regenerate until the branch moves.
+    pub async fn mark_proof_done(&self, id: i64, sha: &str, artifacts_json: &str) -> Result<()> {
+        sqlx::query("UPDATE tickets SET proof_sha = ?, proof_artifacts = ? WHERE id = ?")
+            .bind(sha)
+            .bind(artifacts_json)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Increment the proof-generation attempt counter (capped against runaway capture loops by the
+    /// caller).
+    pub async fn bump_proof_attempts(&self, id: i64) -> Result<()> {
+        sqlx::query("UPDATE tickets SET proof_attempts = proof_attempts + 1 WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Reset proof state (report, artifacts, fingerprint, attempts) — called when a fresh human/work
+    /// cycle lands so the next reviewed state is evidenced afresh.
+    pub async fn reset_proof(&self, id: i64) -> Result<()> {
+        sqlx::query(
+            "UPDATE tickets SET proof = '', proof_artifacts = '', proof_sha = '', \
+             proof_attempts = 0 WHERE id = ?",
         )
         .bind(id)
         .execute(&self.pool)

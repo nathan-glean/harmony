@@ -45,7 +45,7 @@ pub struct ActivityInput {
     pub has_repo: bool,
     /// A Claude session is live for this ticket.
     pub session_live: bool,
-    /// The live session's kind ("work" | "spec" | "review" | "fix" | "address"), if any.
+    /// The live session's kind ("work" | "spec" | "review" | "proof" | "fix" | "address"), if any.
     pub session_kind: Option<String>,
     /// A live `AskUserQuestion` is outstanding (Claude is waiting on the user).
     pub user_question_pending: bool,
@@ -113,6 +113,7 @@ pub fn classify(i: &ActivityInput) -> Activity {
         return match i.session_kind.as_deref() {
             Some("spec") => working("Drafting spec…"),
             Some("review") => working("Reviewing…"),
+            Some("proof") => working("Capturing proof…"),
             Some("fix") => working("Fixing CI…"),
             Some("address") => working("Addressing feedback…"),
             // "work" or anything else.

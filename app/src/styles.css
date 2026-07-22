@@ -201,6 +201,10 @@ button:disabled { opacity: 0.5; cursor: default; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .modal-head .jira-open { padding: 2px 8px; font-size: 12px; }
+.modal-head .modal-repo-assign {
+  padding: 2px 8px; font-size: 12px; border-radius: 6px;
+  border: 1px solid #f7768e; color: #f7768e; background: var(--bg); cursor: pointer;
+}
 .modal-head .close { line-height: 1; padding: 2px 9px; font-size: 18px; }
 .modal .actions { padding: 10px 16px; border-bottom: 1px solid var(--border); }
 
@@ -337,6 +341,15 @@ button:disabled { opacity: 0.5; cursor: default; }
 .jc-body { font-size: 13px; white-space: pre-wrap; }
 
 .diffpane, .proofpane { display: flex; flex-direction: column; gap: 8px; }
+
+/* Proof-of-work evidence: captured media gallery + grounded report. */
+.proof-evidence { display: flex; flex-direction: column; gap: 10px; }
+.proof-gallery { display: flex; flex-wrap: wrap; gap: 10px; }
+.proof-art { margin: 0; display: flex; flex-direction: column; gap: 4px; max-width: 100%; }
+.proof-art img, .proof-art video { max-width: 100%; max-height: 420px; border: 1px solid var(--border); border-radius: 8px; background: #000; }
+.proof-art figcaption { font-size: 12px; color: var(--muted); }
+.proof-art-link { font-size: 13px; color: var(--muted); text-decoration: none; border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; }
+.proof-art-link:hover { color: var(--fg); }
 .autofix-toggle { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); cursor: pointer; }
 .autofix-toggle input { cursor: pointer; }
 .triage-card { border: 1px solid var(--border); border-radius: 8px; background: var(--bg); padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
