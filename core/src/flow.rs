@@ -152,6 +152,9 @@ pub struct Ctx {
     pub pr_exists: bool,
     /// The PR has been approved externally on GitHub.
     pub pr_approved: bool,
+    /// The PR has already been merged on GitHub (state == MERGED) — so a move to Done should just
+    /// clean up, never try to merge again.
+    pub pr_merged: bool,
     /// The ticket is linked to Jira (used for the repo-less warning surface).
     pub is_jira: bool,
     /// A live `AskUserQuestion` is outstanding for this ticket — Claude is waiting on the user, so
@@ -282,7 +285,9 @@ pub fn decide(event: Event, ctx: &Ctx) -> Decision {
                 }
                 Done => {
                     let mut actions = stop_if_live();
-                    if ctx.pr_exists && ctx.pr_approved {
+                    // Merge only an open, approved PR ourselves. If it's already merged on GitHub
+                    // (a human merged it), skip MergePr — moving to Done is just cleanup.
+                    if ctx.pr_exists && ctx.pr_approved && !ctx.pr_merged {
                         actions.push(MergePr);
                     }
                     if ctx.has_worktree {
