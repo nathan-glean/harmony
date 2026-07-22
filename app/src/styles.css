@@ -582,7 +582,7 @@ button:disabled { opacity: 0.5; cursor: default; }
 .question-option.picked { border-color: var(--accent); }
 .question-option-label { font-size: 13px; font-weight: 600; color: var(--text); }
 .question-option-desc { font-size: 12px; color: var(--muted); white-space: pre-wrap; }
-.question-confirm { align-self: flex-start; border-color: var(--accent); color: var(--accent); }
+.question-hint { font-size: 12px; }
 .question-custom { display: flex; gap: 6px; }
 .question-custom input {
   flex: 1; background: var(--bg); color: var(--text);
