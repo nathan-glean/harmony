@@ -95,6 +95,12 @@ tasks:
     cmds:
       - npx tsc --noEmit
 
+  app:test:
+    desc: Run frontend unit tests (Vitest)
+    dir: "{{.APP_DIR}}"
+    cmds:
+      - npm test
+
   # ---- Tauri desktop app (frontend + Rust backend) ----
 
   tauri:dev:
@@ -118,6 +124,7 @@ tasks:
       - task: lint
       - task: test
       - task: app:typecheck
+      - task: app:test
 
   clean:
     desc: Remove Rust and frontend build artifacts
