@@ -19,6 +19,13 @@ type TermOutput = { session_id: number; data: string };
 const KEY_ENTER = "\r";
 // Escape interrupts Claude's current turn.
 const KEY_ESC = "\x1b";
+// Bracketed-paste wrappers. A multi-line message is delivered wrapped in these so the TUI inserts
+// it as one block instead of reading each embedded newline as its own Enter (which would submit the
+// message early / split it across turns). This mirrors how a terminal delivers a multi-line paste
+// when the app has bracketed-paste mode on. A single-line message is sent as plain typed text,
+// exactly like typing it in the terminal.
+const PASTE_START = "\x1b[200~";
+const PASTE_END = "\x1b[201~";
 
 // A small, recognisable glyph per common tool; everything else gets the generic 🔧.
 const TOOL_ICONS: Record<string, string> = {
@@ -147,9 +154,14 @@ export function FriendlySession({
     };
   }, [sessionId, load]);
 
-  // Escape hatch: a plan-approval / permission-style prompt the friendly view can't model — hand
-  // off to the raw terminal so the user can respond. A pending AskUserQuestion is modelled (the
-  // QuestionCard handles it) so it must not trigger the switch.
+  // Escape hatch: a plan-approval prompt the friendly view can't model — hand off to the raw
+  // terminal so the user can respond. A pending AskUserQuestion is modelled (the QuestionCard
+  // handles it) so it must not trigger the switch.
+  //
+  // Known limitation (best-effort): this only catches waiting states that reach the JSONL
+  // transcript. A permission/trust prompt is a pure-TUI overlay that never lands in the transcript,
+  // so it can't auto-switch — the always-visible Terminal toggle + the soft cue below the composer
+  // are the guaranteed fallback for those.
   useEffect(() => {
     if (viewState === "exit_plan" && !pendingQuestion) onNeedTerminal();
   }, [viewState, pendingQuestion, onNeedTerminal]);
@@ -179,10 +191,18 @@ export function FriendlySession({
     atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
   };
 
+  // A pending AskUserQuestion owns the input: the TUI is in its selection prompt, so free-typed
+  // bytes would corrupt that state. Steer via the QuestionCard instead until it's answered.
+  const answering = !!pendingQuestion;
+
   const send = () => {
+    if (answering) return;
     const text = input.trim();
     if (!text) return;
-    api.sendInput(sessionId, text + KEY_ENTER).catch(() => {});
+    const payload = text.includes("\n")
+      ? PASTE_START + text + PASTE_END + KEY_ENTER
+      : text + KEY_ENTER;
+    api.sendInput(sessionId, payload).catch(() => {});
     setInput("");
   };
 
@@ -246,8 +266,13 @@ export function FriendlySession({
       <div className="friendly-composer">
         <textarea
           className="friendly-input"
-          placeholder="Message Claude — type to steer the session, ↵ to send (⇧↵ for a new line)"
+          placeholder={
+            answering
+              ? "Answer the question above to keep steering…"
+              : "Message Claude — type to steer the session, ↵ to send (⇧↵ for a new line)"
+          }
           value={input}
+          disabled={answering}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
@@ -257,7 +282,7 @@ export function FriendlySession({
           }}
         />
         <div className="friendly-actions">
-          <button className="friendly-send" disabled={!input.trim()} onClick={send}>
+          <button className="friendly-send" disabled={answering || !input.trim()} onClick={send}>
             Send
           </button>
           <button
@@ -270,6 +295,13 @@ export function FriendlySession({
           <button className="friendly-stop" title="End this session" onClick={stop}>
             Stop
           </button>
+        </div>
+        {/* Soft cue for the known limitation: not every waiting state reaches the transcript (a
+            permission/trust prompt never does), so the auto-switch is best-effort. If Claude looks
+            stuck with no question shown, the raw Terminal is the guaranteed way to respond. */}
+        <div className="friendly-cue muted">
+          Claude waiting with nothing to answer here? Switch to <strong>Terminal</strong> to
+          respond to raw prompts.
         </div>
       </div>
     </div>
