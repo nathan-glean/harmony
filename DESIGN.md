@@ -28,7 +28,7 @@ for the full capability comparison and the Symphony-inspired items on the roadma
 | 8 | Repo model | **Multi-repo**; pick target repo at start, default remembered per Jira project key |
 | 9 | Worktree scope | **Per-ticket, reused** across sessions (1 ticket → 1 worktree → 1 branch → 1 PR). "New alternate attempt" forks a second worktree on demand |
 | 10 | Spec authoring | **Light structure + AI draft**: markdown body + optional fields (acceptance criteria, relevant paths, constraints). "Draft from Jira" expands the terse issue into an editable first pass |
-| 11 | Output flow | **Open a draft PR via `gh`** (body from spec + optional Claude summary), link to Jira, show diff in-app. **harmony never merges** — hand off to normal review/CI |
+| 11 | Output flow | **Open a PR ready for review via `gh`** (body from spec + optional Claude summary), link to Jira, show diff in-app. Reaching "In PR Review" is the human's hand-off to the team, so the PR is not a draft — it requests reviewers and is mergeable. harmony only merges once approved + green (gated/auto-merge, default off) |
 | 12 | Session persistence | **Resume-on-relaunch**: PTYs are children of harmony; on relaunch resume each via `claude --resume <id>`, rebuild view from transcript. No tmux |
 | 13 | Attention model | **Notify + jump-to-terminal** (v1): card badge + OS notification from hooks; answer in embedded terminal. Native approve/deny **triage UI** is the north-star evolution |
 | 14 | Board model | **harmony-native lifecycle columns**: Todo → In Progress (`working`) → For Your Review (`waiting`) → In PR Review (`in_review`) → Done. New tickets land in **Todo**. **Drag-and-drop** moves a ticket (manual override); In Progress/For-Your-Review are also driven live by session hooks, In PR Review/Done by PR+Jira |
@@ -45,7 +45,7 @@ Tauri desktop app (single process)
 │   ├── Local hook server       (HTTP on localhost: receives SessionStart/PreToolUse/
 │   │                            PermissionRequest/Stop/SessionEnd → drives board state + notifs)
 │   ├── Transcript tailer        (~/.claude/projects/<hash>/<id>.jsonl → progress)
-│   ├── PR/gh integration        (push branch, gh pr create draft)
+│   ├── PR/gh integration        (push branch, gh pr create — ready for review)
 │   └── Store                    (SQLite: tickets, spec, ticket↔repo↔worktree↔session map, settings)
 └── Web frontend
     ├── Board (native lifecycle columns)
@@ -97,7 +97,7 @@ the UI renders it as the per-card pill + modal detail.
    local server, then spawns interactive `claude` in a PTY (cwd = worktree).
 4. You supervise in the embedded terminal; board state tracks hooks (Working/Waiting).
    Optional autonomy = launch with elevated `--permission-mode`.
-5. On finish: push branch, `gh pr create` (draft), transition Jira + comment PR link.
+5. On finish: push branch, `gh pr create` (ready for review), transition Jira + comment PR link.
 6. Hand off to normal review. Close harmony anytime → resume later via `--resume`.
 
 - **Jira Cloud** via the official **Atlassian CLI (`acli`)** — harmony shells out to it

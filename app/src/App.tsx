@@ -790,11 +790,11 @@ export function App() {
                 )}
                 <button
                   disabled={busy !== null}
-                  title="Move to PR — opens a draft PR (must have changes and have been reviewed)"
+                  title="Move to PR — opens a PR ready for review (must have changes and have been reviewed)"
                   onClick={() =>
                     run("pr", async () => {
                       // Go through the flow: blocks if there are no changes, redirects to Human
-                      // review if it hasn't been reviewed yet, else opens the draft PR.
+                      // review if it hasn't been reviewed yet, else opens the PR for review.
                       try {
                         await api.transitionTicket(selected.id, "in_review", false);
                       } catch (e) {

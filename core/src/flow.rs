@@ -112,7 +112,7 @@ pub enum Action {
     /// Fingerprint the current HEAD as the proof SHA and capture the proof session's media artifacts
     /// (scan the artifact dir), so the proof poller doesn't regenerate until the branch moves.
     MarkProofDone,
-    /// Push the branch and open a draft PR.
+    /// Push the branch and open a PR ready for review.
     OpenPr,
     /// Merge the approved PR.
     MergePr,
