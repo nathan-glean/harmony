@@ -85,17 +85,57 @@ export function TerminalView({ sessionId }: { sessionId: number }) {
 
     term.open(screen);
 
-    // WebGL renderer: smooth, flicker-free GPU rendering, with graceful fallback to the default
-    // DOM renderer if WebGL is unavailable or its context is lost in the WKWebView.
-    try {
-      const webgl = new WebglAddon();
-      webgl.onContextLoss(() => webgl.dispose());
-      term.loadAddon(webgl);
-    } catch {
-      /* WebGL unsupported — DOM renderer stays active. */
-    }
+    // The Session tabpanel mounts while hidden (`display:none`) — child effects run before the
+    // parent effect that switches to the Session tab, so at mount the element is 0×0. The WebGL
+    // renderer and `fit()` both throw against a zero-sized canvas, which (with no error boundary
+    // above) blanked the whole app. So defer all sizing-dependent setup until the terminal is
+    // actually measurable, and run it exactly once via `activate()`. The ResizeObserver below
+    // fires when the tab becomes visible, driving activation then.
+    let webgl: WebglAddon | null = null;
+    let activated = false;
+    const measurable = () => screen.clientWidth > 0 && screen.clientHeight > 0;
+
+    const activate = () => {
+      if (activated || !measurable()) return;
+      activated = true;
+
+      // WebGL renderer: smooth, flicker-free GPU rendering, with graceful fallback to the default
+      // DOM renderer if WebGL is unavailable or its context is lost in the WKWebView.
+      try {
+        webgl = new WebglAddon();
+        webgl.onContextLoss(() => {
+          webgl?.dispose();
+          webgl = null;
+        });
+        term.loadAddon(webgl);
+      } catch {
+        webgl = null; // WebGL unsupported — DOM renderer stays active.
+      }
+
+      try {
+        fit.fit();
+      } catch {
+        /* not measurable yet — a later resize will fit */
+      }
+      term.focus(); // ready to steer immediately
+      api.resize(sessionId, term.cols, term.rows).catch(() => {});
+
+      // Reattaching to an idle Claude TUI shows blank until something changes (it only repaints on
+      // demand). Force a single SIGWINCH-driven repaint by briefly shrinking a row and restoring it.
+      // This fires as soon as the terminal is visible and shrinks rather than grows, so there's no
+      // visible size bounce.
+      api
+        .resize(sessionId, term.cols, Math.max(1, term.rows - 1))
+        .then(() => api.resize(sessionId, term.cols, term.rows))
+        .catch(() => {});
+    };
 
     const pushSize = () => {
+      if (!measurable()) return;
+      if (!activated) {
+        activate();
+        return;
+      }
       try {
         fit.fit();
         api.resize(sessionId, term.cols, term.rows).catch(() => {});
@@ -104,18 +144,9 @@ export function TerminalView({ sessionId }: { sessionId: number }) {
       }
     };
 
-    fit.fit();
-    term.focus(); // ready to steer immediately
-    api.resize(sessionId, term.cols, term.rows).catch(() => {});
-
-    // Reattaching to an idle Claude TUI shows blank until something changes (it only repaints on
-    // demand). Force a single SIGWINCH-driven repaint by briefly shrinking a row and restoring it.
-    // Unlike the old 80ms grow-then-shrink nudge, this fires immediately (before the first frame is
-    // perceived) and shrinks rather than grows, so there's no visible size bounce.
-    api
-      .resize(sessionId, term.cols, Math.max(1, term.rows - 1))
-      .then(() => api.resize(sessionId, term.cols, term.rows))
-      .catch(() => {});
+    // If the tab is already active at mount, activate now; otherwise the ResizeObserver activates
+    // on the first show.
+    activate();
 
     const updateJump = () => {
       const b = term.buffer.active;
@@ -167,7 +198,23 @@ export function TerminalView({ sessionId }: { sessionId: number }) {
       onScroll.dispose();
       unlisten.then((u) => u());
       window.removeEventListener("resize", pushSize);
-      term.dispose();
+      // Dispose the WebGL addon explicitly, first, while the terminal core is still alive.
+      // @xterm/addon-webgl's own dispose (which xterm would otherwise trigger from term.dispose())
+      // reaches into `this._terminal._core`, which is already torn down by then, throwing
+      // "undefined is not an object (this._terminal._core._store._isDisposed)". A throw in this
+      // effect-cleanup propagates up and blanks the panel, so tear the addon down ourselves and
+      // guard the whole teardown — there's nothing to recover on unmount.
+      try {
+        webgl?.dispose();
+      } catch {
+        /* addon already torn down (e.g. after a WebGL context loss) */
+      }
+      webgl = null;
+      try {
+        term.dispose();
+      } catch {
+        /* xterm's internal addon teardown can race the webgl dispose — ignore on unmount */
+      }
       termRef.current = null;
       searchRef.current = null;
     };

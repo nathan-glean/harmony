@@ -19,6 +19,7 @@ import { SpecEditor } from "./components/SpecEditor";
 import { ProofPane } from "./components/ProofPane";
 import { PrComments } from "./components/PrComments";
 import { ReviewFeedback } from "./components/ReviewFeedback";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { api } from "./api";
 import type { Ticket, Repo, SessionView, WorktreeView, PendingQuestion, SessionProgress, SessionExit, PrDone } from "./types";
 import { parseActivity } from "./types";
@@ -355,6 +356,26 @@ export function App() {
     };
   }, [refresh]);
 
+  // Surface errors that React error boundaries can't catch — those thrown in event handlers,
+  // timers, and unhandled promise rejections (e.g. an xterm/WebGL failure in an async callback, or
+  // a rejected Tauri command). Without this they'd vanish silently or, worse, leave the UI wedged.
+  useEffect(() => {
+    const onError = (e: ErrorEvent) => {
+      console.error("Uncaught error:", e.error ?? e.message);
+      flash(`Error: ${e.error?.message ?? e.message}`);
+    };
+    const onRejection = (e: PromiseRejectionEvent) => {
+      console.error("Unhandled rejection:", e.reason);
+      flash(`Error: ${e.reason?.message ?? String(e.reason)}`);
+    };
+    window.addEventListener("error", onError);
+    window.addEventListener("unhandledrejection", onRejection);
+    return () => {
+      window.removeEventListener("error", onError);
+      window.removeEventListener("unhandledrejection", onRejection);
+    };
+  }, []);
+
   // Esc closes the ticket modal.
   useEffect(() => {
     if (!selected) return;
@@ -638,6 +659,10 @@ export function App() {
       )}
 
       <div className="main">
+        <ErrorBoundary
+          title="Something went wrong — the app hit an unexpected error"
+          showReload
+        >
         {view === "settings" ? (
           <Settings repos={repos} onAdd={addRepo} onRename={renameRepo} onDelete={deleteRepo} />
         ) : view === "worktrees" ? (
@@ -676,6 +701,7 @@ export function App() {
             }}
           >
             <div className="modal">
+              <ErrorBoundary resetKey={selected.id} onClose={() => setSelected(null)}>
               <div className="modal-head">
                 <span className="badge">{selected.status}</span>
                 {(() => {
@@ -1033,11 +1059,13 @@ export function App() {
                   </div>
                 )}
               </div>
+              </ErrorBoundary>
             </div>
           </div>
         )}
         </>
         )}
+        </ErrorBoundary>
       </div>
 
       {toast && <div className="toast">{toast}</div>}
