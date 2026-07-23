@@ -20,6 +20,8 @@ export const api = {
   pendingReattach: () => invoke<number[]>("pending_reattach"),
   sessionTranscript: (ticketId: number) =>
     invoke<string>("session_transcript", { ticketId }),
+  readTextArtifact: (ticketId: number, path: string) =>
+    invoke<string>("read_text_artifact", { ticketId, path }),
   clearEndedSessions: () => invoke<number>("clear_ended_sessions"),
   deleteSession: (id: number) => invoke<void>("delete_session", { id }),
   deleteWorktreeSessions: (worktreeId: number) =>
