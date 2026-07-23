@@ -49,17 +49,9 @@ function parseTriage(json: string): CiTriage | null {
 
 const MAX_CI_FIX_ATTEMPTS = 3;
 
-/** One captured artifact: image inline, video in a player, terminal cast / other as a link. */
-function ProofArtifactView({ art }: { art: ProofArtifact }) {
+/** One captured media artifact: image inline, video in a player. */
+function ProofMediaView({ art }: { art: ProofArtifact }) {
   const src = convertFileSrc(art.path);
-  if (art.kind === "image") {
-    return (
-      <figure className="proof-art">
-        <img src={src} alt={art.caption} loading="lazy" />
-        <figcaption>{art.caption}</figcaption>
-      </figure>
-    );
-  }
   if (art.kind === "video") {
     return (
       <figure className="proof-art">
@@ -68,18 +60,89 @@ function ProofArtifactView({ art }: { art: ProofArtifact }) {
       </figure>
     );
   }
-  // cast / file — link out (opens with the OS default; casts aren't playable inline).
   return (
-    <a className="proof-art-link" href={src} target="_blank" rel="noreferrer">
-      {art.kind === "cast" ? "▶ " : "📄 "}
-      {art.caption}
-    </a>
+    <figure className="proof-art">
+      <img src={src} alt={art.caption} loading="lazy" />
+      <figcaption>{art.caption}</figcaption>
+    </figure>
   );
 }
 
-/** The evidence section: the grounded proof report + any captured media (video/screenshots). */
+// Extensions we render inline as text (everything else — casts, binaries — stays a link).
+const TEXT_EXTS = new Set([
+  "txt", "log", "sh", "bash", "zsh", "md", "markdown", "json", "yaml", "yml", "toml", "diff",
+  "patch", "csv", "py", "rs", "ts", "tsx", "js", "jsx", "go", "rb", "java", "c", "cpp", "h",
+  "sql", "xml", "html", "css", "env", "ini", "conf",
+]);
+
+function isTextArtifact(path: string): boolean {
+  const base = path.split("/").pop() ?? path;
+  const dot = base.lastIndexOf(".");
+  if (dot <= 0) return true; // no extension (e.g. "reproduce") — treat as text
+  return TEXT_EXTS.has(base.slice(dot + 1).toLowerCase());
+}
+
+/** A non-media artifact: text files render inline & collapsible (read via a scoped backend command —
+ *  the webview can't fetch the asset:// scheme); casts / binaries / unreadable fall back to a link. */
+function ProofFileArtifact({ art, ticketId }: { art: ProofArtifact; ticketId: number }) {
+  const src = convertFileSrc(art.path);
+  const isText = art.kind !== "cast" && isTextArtifact(art.path);
+  const [text, setText] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [open, setOpen] = useState(false);
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    if (!isText) return;
+    let cancelled = false;
+    api
+      .readTextArtifact(ticketId, art.path)
+      .then((t) => {
+        if (cancelled) return;
+        setText(t);
+        // Expand short files by default; keep long ones collapsed.
+        setOpen(t.split("\n").length <= 40);
+        setReady(true);
+      })
+      .catch(() => {
+        if (!cancelled) setFailed(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [ticketId, art.path, isText]);
+
+  // Not text, or we couldn't read it — link out (OS default; casts aren't playable inline).
+  if (!isText || failed) {
+    return (
+      <a className="proof-art-link" href={src} target="_blank" rel="noreferrer">
+        {art.kind === "cast" ? "▶ " : "📄 "}
+        {art.caption}
+      </a>
+    );
+  }
+
+  return (
+    <div className="proof-file">
+      <div className="proof-file-head">
+        <button className="proof-file-toggle" onClick={() => setOpen((o) => !o)} disabled={!ready}>
+          {open ? "▾" : "▸"} 📄 {art.caption}
+        </button>
+        <a className="proof-file-open" href={src} target="_blank" rel="noreferrer">
+          Open
+        </a>
+      </div>
+      {open && ready && text !== null && <pre className="proof-file-body">{text}</pre>}
+    </div>
+  );
+}
+
+/** The evidence section: captured media (video/screenshots), the grounded proof report, then any
+ *  supporting file artifacts (output logs, repro scripts) shown inline. */
 function ProofEvidence({ ticket }: { ticket: Ticket }) {
   const artifacts = parseProofArtifacts(ticket.proof_artifacts);
+  const media = artifacts.filter((a) => a.kind === "image" || a.kind === "video");
+  const files = artifacts.filter((a) => a.kind !== "image" && a.kind !== "video");
   const hasProof = ticket.proof.trim().length > 0 || artifacts.length > 0;
   if (!hasProof) {
     return (
@@ -93,14 +156,21 @@ function ProofEvidence({ ticket }: { ticket: Ticket }) {
   }
   return (
     <div className="proof-evidence">
-      {artifacts.length > 0 && (
+      {media.length > 0 && (
         <div className="proof-gallery">
-          {artifacts.map((a, i) => (
-            <ProofArtifactView key={i} art={a} />
+          {media.map((a, i) => (
+            <ProofMediaView key={i} art={a} />
           ))}
         </div>
       )}
       {ticket.proof.trim() && <MarkdownView markdown={ticket.proof} />}
+      {files.length > 0 && (
+        <div className="proof-files">
+          {files.map((a, i) => (
+            <ProofFileArtifact key={i} art={a} ticketId={ticket.id} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

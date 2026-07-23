@@ -293,6 +293,38 @@ async fn session_transcript(state: State<'_, AppState>, ticket_id: i64) -> Resul
     }
 }
 
+/// Read a proof artifact's text content for inline display in the Proof tab. Scoped to the ticket's
+/// proof artifact dir (`~/.harmony/proof/<ticket_id>`) to defeat path traversal; capped in size.
+/// The webview can't `fetch()` the `asset://` scheme (CORS), so text artifacts are read through here.
+#[tauri::command]
+async fn read_text_artifact(ticket_id: i64, path: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        const MAX: u64 = 100_000;
+        let dir = std::fs::canonicalize(harmony_core::settings::proof_artifact_dir(ticket_id))
+            .map_err(|e| e.to_string())?;
+        let file = std::fs::canonicalize(&path).map_err(|e| e.to_string())?;
+        if !file.starts_with(&dir) {
+            return Err("artifact path is outside the ticket's proof directory".into());
+        }
+        let mut buf = Vec::new();
+        std::fs::File::open(&file)
+            .map_err(|e| e.to_string())?
+            .take(MAX + 1)
+            .read_to_end(&mut buf)
+            .map_err(|e| e.to_string())?;
+        let truncated = buf.len() as u64 > MAX;
+        buf.truncate(MAX as usize);
+        let mut s = String::from_utf8_lossy(&buf).into_owned();
+        if truncated {
+            s.push_str("\n… (truncated)");
+        }
+        Ok(s)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// (ticket_id, session_id) for sessions actually live in THIS process — the source of
 /// truth for "live" (survives webview reloads; excludes zombies from a prior process).
 #[tauri::command]
@@ -3592,6 +3624,7 @@ pub fn run() {
             live_progress,
             pending_reattach,
             session_transcript,
+            read_text_artifact,
             clear_ended_sessions,
             delete_session,
             delete_worktree_sessions,
