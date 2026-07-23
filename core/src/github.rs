@@ -549,6 +549,74 @@ pub fn create_pr(worktree: &str, title: &str, body: &str, branch: &str) -> Resul
         .ok_or_else(|| anyhow!("gh pr create did not return a PR URL: {}", out.trim()))
 }
 
+/// Flip a PR's draft state: `gh pr ready` (mark ready for review) or `gh pr ready --undo` (convert
+/// back to draft). Used to keep the PR in step with the ticket's column — In PR Review ⇒ ready,
+/// moved out ⇒ draft.
+pub fn set_pr_draft(worktree: &str, draft: bool) -> Result<()> {
+    let args: &[&str] = if draft {
+        &["pr", "ready", "--undo"]
+    } else {
+        &["pr", "ready"]
+    };
+    run("gh", args, worktree)?;
+    Ok(())
+}
+
+/// Close the branch's PR and delete its remote branch — when the ticket is deleted so the PR isn't
+/// orphaned on GitHub.
+pub fn close_pr(worktree: &str) -> Result<()> {
+    run("gh", &["pr", "close", "--delete-branch"], worktree)?;
+    Ok(())
+}
+
+/// Open the branch's PR in the default browser (`gh pr view --web`) — the direct analog of Jira's
+/// `acli … --web`.
+pub fn open_in_browser(worktree: &str) -> Result<()> {
+    run("gh", &["pr", "view", "--web"], worktree)?;
+    Ok(())
+}
+
+/// Read a PR's status by its html URL (`https://github.com/OWNER/REPO/pull/N`) without needing the
+/// worktree — used to detect a *reopen from Done* after the worktree has been cleaned up.
+pub fn pr_status_by_url(url: &str) -> PrStatus {
+    let Some((repo, number)) = parse_pr_url(url) else {
+        return PrStatus::default();
+    };
+    match run(
+        "gh",
+        &[
+            "pr",
+            "view",
+            &number,
+            "--repo",
+            &repo,
+            "--json",
+            "number,state,isDraft,url,reviewDecision,mergeable",
+        ],
+        ".",
+    ) {
+        Ok(json) => parse_pr_status(&json),
+        Err(_) => PrStatus::default(),
+    }
+}
+
+/// Parse a GitHub PR URL into `("OWNER/REPO", "NUMBER")`. Returns None if it doesn't look like one.
+fn parse_pr_url(url: &str) -> Option<(String, String)> {
+    let rest = url.strip_prefix("https://github.com/")?;
+    let parts: Vec<&str> = rest.split('/').collect();
+    // OWNER / REPO / "pull" / NUMBER
+    if parts.len() >= 4 && parts[2] == "pull" && !parts[3].is_empty() {
+        let number: String = parts[3]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if !number.is_empty() {
+            return Some((format!("{}/{}", parts[0], parts[1]), number));
+        }
+    }
+    None
+}
+
 // ---- proof-of-work: git hygiene, PR comment, media hosting -------------------------------------
 
 /// Append ignore patterns to this worktree's *local* git exclude (`$GIT_DIR/info/exclude`),
@@ -783,6 +851,22 @@ mod tests {
         assert!(c[0].diff_hunk.contains("+let x = 1;"));
         assert!(c[0].body.contains("```suggestion"));
         assert_eq!(c[1].line, 7); // fell back to original_line
+    }
+
+    #[test]
+    fn parse_pr_url_extracts_repo_and_number() {
+        assert_eq!(
+            parse_pr_url("https://github.com/nathan-glean/harmony/pull/42"),
+            Some(("nathan-glean/harmony".to_string(), "42".to_string()))
+        );
+        // Trailing segments (e.g. /files) still resolve.
+        assert_eq!(
+            parse_pr_url("https://github.com/o/r/pull/7/files"),
+            Some(("o/r".to_string(), "7".to_string()))
+        );
+        assert_eq!(parse_pr_url("https://github.com/o/r/issues/7"), None);
+        assert_eq!(parse_pr_url("not a url"), None);
+        assert_eq!(parse_pr_url(""), None);
     }
 
     #[test]

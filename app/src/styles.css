@@ -224,6 +224,16 @@ button:disabled { opacity: 0.5; cursor: default; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .modal-head .jira-open { padding: 2px 8px; font-size: 12px; }
+.modal-head .pr-open { padding: 2px 8px; font-size: 12px; }
+/* Persisted PR-state chip beside the ↗ PR button. */
+.pr-chip {
+  padding: 2px 8px; font-size: 11px; border-radius: 6px; text-transform: capitalize;
+  border: 1px solid var(--border); color: var(--muted); white-space: nowrap;
+}
+.pr-chip.pr-open { color: #9ece6a; border-color: #9ece6a55; }
+.pr-chip.pr-draft { color: var(--muted); }
+.pr-chip.pr-merged { color: #bb9af7; border-color: #bb9af755; }
+.pr-chip.pr-closed { color: #f7768e; border-color: #f7768e55; }
 .modal-head .modal-repo-assign {
   padding: 2px 8px; font-size: 12px; border-radius: 6px;
   border: 1px solid #f7768e; color: #f7768e; background: var(--bg); cursor: pointer;

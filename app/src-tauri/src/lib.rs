@@ -632,6 +632,18 @@ async fn delete_ticket(
             ));
         }
     }
+    // Close the ticket's open PR (+ delete its remote branch) so it isn't orphaned on GitHub. The
+    // frontend delete confirmation already warns the user about this. Best-effort — never blocks the
+    // delete.
+    if let Ok(Some(ticket)) = state.store.get_ticket(ticket_id).await {
+        if matches!(ticket.pr_state.as_str(), "open" | "") && !ticket.pr_url.is_empty() {
+            if let Ok(Some(wt)) = state.store.primary_worktree_for_ticket(ticket_id).await {
+                let path = wt.path.clone();
+                let _ = tokio::task::spawn_blocking(move || harmony_core::github::close_pr(&path))
+                    .await;
+            }
+        }
+    }
     harmony_core::worktree::cleanup_for_ticket(&state.store, ticket_id).await;
     state
         .store
@@ -715,6 +727,54 @@ async fn open_in_jira(state: State<'_, AppState>, ticket_id: i64) -> Result<(), 
         .map_err(|e| e.to_string())
 }
 
+/// Open the ticket's GitHub PR in the browser (the analog of `open_in_jira`). Prefers
+/// `gh pr view --web` in the worktree; falls back to opening the persisted PR URL with the OS default
+/// when the worktree is gone (e.g. a closed→Done ticket).
+#[tauri::command]
+async fn open_pr_in_browser(state: State<'_, AppState>, ticket_id: i64) -> Result<(), String> {
+    let ticket = state
+        .store
+        .get_ticket(ticket_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("no such ticket")?;
+    let wt = state
+        .store
+        .primary_worktree_for_ticket(ticket_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let url = ticket.pr_url.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        if let Some(wt) = wt {
+            if harmony_core::github::open_in_browser(&wt.path).is_ok() {
+                return Ok(());
+            }
+        }
+        if url.is_empty() {
+            return Err("no PR for this ticket yet".into());
+        }
+        open_url_in_os_browser(&url)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Open a URL with the OS default browser. Used as the fallback when `gh pr view --web` can't run
+/// (no worktree). macOS `open`, Linux `xdg-open`, Windows `cmd /c start`.
+fn open_url_in_os_browser(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let (cmd, args): (&str, Vec<&str>) = ("open", vec![url]);
+    #[cfg(target_os = "linux")]
+    let (cmd, args): (&str, Vec<&str>) = ("xdg-open", vec![url]);
+    #[cfg(target_os = "windows")]
+    let (cmd, args): (&str, Vec<&str>) = ("cmd", vec!["/C", "start", "", url]);
+    std::process::Command::new(cmd)
+        .args(&args)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("failed to open browser: {e}"))
+}
+
 /// The linked Jira issue's description + comments (read-only) for the detail panel.
 #[tauri::command]
 async fn jira_detail(state: State<'_, AppState>, ticket_id: i64) -> Result<JiraDetail, String> {
@@ -751,6 +811,48 @@ async fn open_pr(state: State<'_, AppState>, ticket_id: i64) -> Result<String, S
 /// Push the branch and open the PR ready for review (generated body, Jira writeback). Does NOT change the
 /// ticket column — the caller (the `open_pr` command, or the flow executor) owns the status.
 /// Takes `&Store` (not `&AppState`) so the executor can run it in a spawned background task.
+/// The PR state as stored on the ticket (`open|closed|merged|""`), from a `gh` state string.
+fn pr_state_lower(gh_state: &str) -> &'static str {
+    match gh_state {
+        "OPEN" => "open",
+        "MERGED" => "merged",
+        "CLOSED" => "closed",
+        _ => "",
+    }
+}
+
+/// The PR number parsed from its html URL (`…/pull/N`), 0 when not a PR URL.
+fn pr_number_from_url(url: &str) -> i64 {
+    url.rsplit('/')
+        .next()
+        .and_then(|s| {
+            s.chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .parse()
+                .ok()
+        })
+        .unwrap_or(0)
+}
+
+/// Read the branch's live PR status (in its worktree) and persist it as the ticket's PR snapshot —
+/// the backbone of the tight ticket↔PR link (powers the "↗ PR" button/chip and reopen detection).
+async fn refresh_pr_snapshot(store: &Store, ticket_id: i64, worktree_path: &str) {
+    let path = worktree_path.to_string();
+    let pr = tokio::task::spawn_blocking(move || harmony_core::github::pr_status(&path))
+        .await
+        .unwrap_or_default();
+    let _ = store
+        .set_ticket_pr(
+            ticket_id,
+            pr_number_from_url(&pr.url),
+            &pr.url,
+            pr_state_lower(&pr.state),
+            pr.is_draft,
+        )
+        .await;
+}
+
 async fn open_pr_for(store: &Store, ticket_id: i64) -> Result<String, String> {
     let ticket = store
         .get_ticket(ticket_id)
@@ -829,6 +931,9 @@ async fn open_pr_for(store: &Store, ticket_id: i64) -> Result<String, String> {
     })
     .await
     .map_err(|e| e.to_string())??;
+
+    // Persist the fresh PR snapshot (open, ready, its number/url) so the UI + reconciler see it.
+    refresh_pr_snapshot(store, ticket_id, &wt.path).await;
 
     if let Some(key) = ticket.jira_key.as_deref() {
         let _ = harmony_core::jira::transition(key, "In Review").await;
@@ -1290,43 +1395,94 @@ async fn poll_auto_merge_once(app: &AppHandle, state: &AppState) {
     }
 }
 
-/// One poll pass: move a ticket to Done when its PR was merged on GitHub (by anyone). The work is
-/// merged, so the ticket is done — advance it and clean up. Always on (unlike `auto_merge`, this
-/// performs no merge; it just reacts to a merge a human already made). `flow::decide(Move(Done))`
-/// skips `MergePr` because `pr_merged` is set, so it only stops the session + removes the worktree.
-async fn poll_pr_merged_once(app: &AppHandle, state: &AppState) {
+/// One poll pass reconciling ticket state with GitHub PR state, in both directions (the tight
+/// ticket↔PR link). Always on; performs no merge itself (that's `auto_merge`) — it reacts to state a
+/// human/GitHub already produced and keeps the persisted PR snapshot fresh:
+/// - In PR Review + PR MERGED **or** CLOSED → move to Done. `flow::decide(Move(Done))` skips
+///   `MergePr` (pr_merged set, or pr_open false), so it only stops the session + removes the worktree.
+/// - Done with a stored CLOSED PR that is now OPEN again (reopened on GitHub) → move back to In PR
+///   Review. Resolved via the stored PR URL (no worktree needed — it was cleaned up on Done).
+async fn poll_pr_state_once(app: &AppHandle, state: &AppState) {
     let tickets = match state.store.list_tickets().await {
         Ok(t) => t,
         Err(_) => return,
     };
     for ticket in tickets {
-        // Only a card still sitting in In PR Review, and never mid-session.
-        if ticket.status != harmony_core::status::IN_REVIEW || has_live_session(state, ticket.id) {
+        if has_live_session(state, ticket.id) {
             continue;
         }
-        let wt = match state.store.primary_worktree_for_ticket(ticket.id).await {
-            Ok(Some(wt)) => wt,
-            _ => continue,
-        };
-        let path = wt.path.clone();
-        let merged = tokio::task::spawn_blocking(move || {
-            harmony_core::github::pr_status(&path).state == "MERGED"
-        })
-        .await
-        .unwrap_or(false);
-        if !merged {
-            continue;
-        }
-        match apply_event(app, state, ticket.id, Event::Move(Column::Done), false).await {
-            Ok(()) => notify(
+        if ticket.status == harmony_core::status::IN_REVIEW {
+            // Resolve live PR state via the worktree, refresh the snapshot, and reconcile.
+            let wt = match state.store.primary_worktree_for_ticket(ticket.id).await {
+                Ok(Some(wt)) => wt,
+                _ => continue,
+            };
+            refresh_pr_snapshot(&state.store, ticket.id, &wt.path).await;
+            let path = wt.path.clone();
+            let gh_state =
+                tokio::task::spawn_blocking(move || harmony_core::github::pr_status(&path).state)
+                    .await
+                    .unwrap_or_default();
+            let reason = match gh_state.as_str() {
+                "MERGED" => "PR merged",
+                "CLOSED" => "PR closed",
+                _ => continue,
+            };
+            match apply_event(app, state, ticket.id, Event::Move(Column::Done), false).await {
+                Ok(()) => notify(
+                    app,
+                    "Moved to Done",
+                    &format!(
+                        "#{} ({}) — {reason}, moved to Done.",
+                        ticket.id, ticket.title
+                    ),
+                ),
+                Err(e) => eprintln!("[pr-state] #{} → Done failed: {e}", ticket.id),
+            }
+        } else if ticket.status == harmony_core::status::DONE
+            && ticket.pr_state == "closed"
+            && !ticket.pr_url.is_empty()
+        {
+            // A PR we closed→Done might be reopened on GitHub. Query by URL (worktree is gone).
+            let url = ticket.pr_url.clone();
+            let pr =
+                tokio::task::spawn_blocking(move || harmony_core::github::pr_status_by_url(&url))
+                    .await
+                    .unwrap_or_default();
+            if pr.state != "OPEN" {
+                continue;
+            }
+            let _ = state
+                .store
+                .set_ticket_pr(
+                    ticket.id,
+                    pr_number_from_url(&pr.url),
+                    &pr.url,
+                    "open",
+                    pr.is_draft,
+                )
+                .await;
+            // Set the status directly rather than via `apply_event(Move(Pr))`: the flow's "Done is
+            // terminal" guard blocks moves out of Done (a rule for user board moves), but this is a
+            // system reconciliation of external PR state. There's no worktree to act on — opening a
+            // terminal later recreates it from the still-present branch.
+            if let Err(e) = state
+                .store
+                .set_ticket_status(ticket.id, harmony_core::status::IN_REVIEW)
+                .await
+            {
+                eprintln!("[pr-state] #{} reopen failed: {e}", ticket.id);
+                continue;
+            }
+            let _ = app.emit("ticket-updated", ticket.id);
+            notify(
                 app,
-                "Merged",
+                "PR reopened",
                 &format!(
-                    "#{} ({}) — PR merged, moved to Done.",
+                    "#{} ({}) — PR reopened, moved back to In PR Review.",
                     ticket.id, ticket.title
                 ),
-            ),
-            Err(e) => eprintln!("[pr-merged] #{} failed: {e}", ticket.id),
+            );
         }
     }
 }
@@ -2968,6 +3124,8 @@ async fn build_ctx(state: &AppState, ticket: &Ticket) -> Ctx {
         review_current,
         reviewed: ticket.reviewed == 1,
         pr_exists: pr.exists,
+        pr_open: pr.state == "OPEN",
+        pr_is_draft: pr.is_draft,
         pr_approved: pr.approved,
         pr_merged: pr.state == "MERGED",
         is_jira: ticket.jira_key.is_some(),
@@ -3321,6 +3479,23 @@ async fn run_action(
                 .map_err(|e| e.to_string())?
                 .map_err(|e| e.to_string())?;
         }
+        // Keep the PR's draft state in step with the ticket's column: ready when in In PR Review,
+        // draft when moved out. Refresh the persisted snapshot afterwards so the UI reflects it.
+        Action::MarkPrReady | Action::MarkPrDraft => {
+            let draft = matches!(action, Action::MarkPrDraft);
+            let wt = state
+                .store
+                .primary_worktree_for_ticket(id)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or("no worktree for the PR")?;
+            let path = wt.path.clone();
+            tokio::task::spawn_blocking(move || harmony_core::github::set_pr_draft(&path, draft))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?;
+            refresh_pr_snapshot(&state.store, id, &wt.path).await;
+        }
         Action::DeleteWorktree => {
             cleanup_worktrees(state, id, force).await?;
         }
@@ -3595,8 +3770,9 @@ pub fn run() {
                         // Resolve PR merge conflicts before the merge/merged checks run.
                         poll_conflicts_once(&poll_handle, &state).await;
                         poll_auto_merge_once(&poll_handle, &state).await;
-                        // Move a ticket to Done when its PR was merged on GitHub (always on).
-                        poll_pr_merged_once(&poll_handle, &state).await;
+                        // Reconcile ticket ↔ PR state both ways (merged/closed → Done; reopened →
+                        // In PR Review) and keep the persisted PR snapshot fresh (always on).
+                        poll_pr_state_once(&poll_handle, &state).await;
                         // Recover finished-but-stuck sessions (missed Stop / plan-file hook) so the
                         // flow advances even when a completion event was dropped.
                         poll_stuck_sessions_once(&poll_handle, &state).await;
@@ -3683,6 +3859,7 @@ pub fn run() {
             jira_sync,
             jira_detail,
             open_in_jira,
+            open_pr_in_browser,
             open_pr,
             start_session,
             start_spec_session,

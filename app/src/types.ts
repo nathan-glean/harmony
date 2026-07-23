@@ -26,6 +26,10 @@ export type Ticket = {
   proof: string; // proof-of-work report (markdown), "" until a proof run completes
   proof_artifacts: string; // JSON array of ProofArtifact (captured media), "" when none
   proof_sha: string; // HEAD the proof last evidenced ("" when never)
+  pr_number: number; // GitHub PR number (0 when none)
+  pr_url: string; // GitHub PR html URL ("" when none)
+  pr_state: string; // "open" | "closed" | "merged" | "" — persisted PR snapshot
+  pr_is_draft: number; // 0/1 — the open PR is a draft
 };
 
 // One captured proof-of-work artifact (matches harmony_core::proof::ProofArtifact).

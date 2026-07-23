@@ -69,16 +69,18 @@ Every distinct outcome of `decide`, grouped by the column the ticket is in. *Gua
 | Move → In PR Review | has_repo & session_live & has_changes & review_current & !reviewed | For Your Review | StopSession |  |
 | Move → In PR Review | has_repo & !session_live & has_changes & reviewed & !pr_exists | In PR Review | OpenPr |  |
 | Move → In PR Review | has_repo & session_live & has_changes & reviewed & !pr_exists | In PR Review | StopSession, OpenPr |  |
-| Move → In PR Review | has_repo & !session_live & has_changes & reviewed & pr_exists | In PR Review | — |  |
-| Move → In PR Review | has_repo & session_live & has_changes & reviewed & pr_exists | In PR Review | StopSession |  |
-| Move → Done | !session_live & !has_worktree & !pr_approved OR !session_live & !has_worktree & !pr_exists OR !session_live & !has_worktree & pr_merged | Done | — |  |
-| Move → Done | session_live & !has_worktree & !pr_approved OR session_live & !has_worktree & !pr_exists OR session_live & !has_worktree & pr_merged | Done | StopSession |  |
-| Move → Done | !session_live & has_worktree & !pr_approved OR !session_live & has_worktree & !pr_exists OR !session_live & has_worktree & pr_merged | Done | DeleteWorktree |  |
-| Move → Done | session_live & has_worktree & !pr_approved OR session_live & has_worktree & !pr_exists OR session_live & has_worktree & pr_merged | Done | StopSession, DeleteWorktree |  |
-| Move → Done | !session_live & !has_worktree & pr_exists & pr_approved & !pr_merged | Done | MergePr |  |
-| Move → Done | session_live & !has_worktree & pr_exists & pr_approved & !pr_merged | Done | StopSession, MergePr |  |
-| Move → Done | !session_live & has_worktree & pr_exists & pr_approved & !pr_merged | Done | MergePr, DeleteWorktree |  |
-| Move → Done | session_live & has_worktree & pr_exists & pr_approved & !pr_merged | Done | StopSession, MergePr, DeleteWorktree |  |
+| Move → In PR Review | has_repo & !session_live & has_changes & reviewed & pr_exists & !pr_is_draft | In PR Review | — |  |
+| Move → In PR Review | has_repo & session_live & has_changes & reviewed & pr_exists & !pr_is_draft | In PR Review | StopSession |  |
+| Move → In PR Review | has_repo & !session_live & has_changes & reviewed & pr_exists & pr_is_draft | In PR Review | MarkPrReady |  |
+| Move → In PR Review | has_repo & session_live & has_changes & reviewed & pr_exists & pr_is_draft | In PR Review | StopSession, MarkPrReady |  |
+| Move → Done | !session_live & !has_worktree & !pr_approved OR !session_live & !has_worktree & !pr_open OR !session_live & !has_worktree & pr_merged | Done | — |  |
+| Move → Done | session_live & !has_worktree & !pr_approved OR session_live & !has_worktree & !pr_open OR session_live & !has_worktree & pr_merged | Done | StopSession |  |
+| Move → Done | !session_live & has_worktree & !pr_approved OR !session_live & has_worktree & !pr_open OR !session_live & has_worktree & pr_merged | Done | DeleteWorktree |  |
+| Move → Done | session_live & has_worktree & !pr_approved OR session_live & has_worktree & !pr_open OR session_live & has_worktree & pr_merged | Done | StopSession, DeleteWorktree |  |
+| Move → Done | !session_live & !has_worktree & pr_open & pr_approved & !pr_merged | Done | MergePr |  |
+| Move → Done | session_live & !has_worktree & pr_open & pr_approved & !pr_merged | Done | StopSession, MergePr |  |
+| Move → Done | !session_live & has_worktree & pr_open & pr_approved & !pr_merged | Done | MergePr, DeleteWorktree |  |
+| Move → Done | session_live & has_worktree & pr_open & pr_approved & !pr_merged | Done | StopSession, MergePr, DeleteWorktree |  |
 | GrillRequested | !has_repo | Todo | — | assign a repo first |
 | GrillRequested | has_repo & !drafting | Todo | StartGrill |  |
 | GrillRequested | has_repo & drafting | Todo | — | already drafting a spec |
@@ -117,16 +119,18 @@ Every distinct outcome of `decide`, grouped by the column the ticket is in. *Gua
 | Move → In PR Review | has_repo & session_live & has_changes & review_current & !reviewed | For Your Review | StopSession |  |
 | Move → In PR Review | has_repo & !session_live & has_changes & reviewed & !pr_exists | In PR Review | OpenPr |  |
 | Move → In PR Review | has_repo & session_live & has_changes & reviewed & !pr_exists | In PR Review | StopSession, OpenPr |  |
-| Move → In PR Review | has_repo & !session_live & has_changes & reviewed & pr_exists | In PR Review | — |  |
-| Move → In PR Review | has_repo & session_live & has_changes & reviewed & pr_exists | In PR Review | StopSession |  |
-| Move → Done | !session_live & !has_worktree & !pr_approved OR !session_live & !has_worktree & !pr_exists OR !session_live & !has_worktree & pr_merged | Done | — |  |
-| Move → Done | session_live & !has_worktree & !pr_approved OR session_live & !has_worktree & !pr_exists OR session_live & !has_worktree & pr_merged | Done | StopSession |  |
-| Move → Done | !session_live & has_worktree & !pr_approved OR !session_live & has_worktree & !pr_exists OR !session_live & has_worktree & pr_merged | Done | DeleteWorktree |  |
-| Move → Done | session_live & has_worktree & !pr_approved OR session_live & has_worktree & !pr_exists OR session_live & has_worktree & pr_merged | Done | StopSession, DeleteWorktree |  |
-| Move → Done | !session_live & !has_worktree & pr_exists & pr_approved & !pr_merged | Done | MergePr |  |
-| Move → Done | session_live & !has_worktree & pr_exists & pr_approved & !pr_merged | Done | StopSession, MergePr |  |
-| Move → Done | !session_live & has_worktree & pr_exists & pr_approved & !pr_merged | Done | MergePr, DeleteWorktree |  |
-| Move → Done | session_live & has_worktree & pr_exists & pr_approved & !pr_merged | Done | StopSession, MergePr, DeleteWorktree |  |
+| Move → In PR Review | has_repo & !session_live & has_changes & reviewed & pr_exists & !pr_is_draft | In PR Review | — |  |
+| Move → In PR Review | has_repo & session_live & has_changes & reviewed & pr_exists & !pr_is_draft | In PR Review | StopSession |  |
+| Move → In PR Review | has_repo & !session_live & has_changes & reviewed & pr_exists & pr_is_draft | In PR Review | MarkPrReady |  |
+| Move → In PR Review | has_repo & session_live & has_changes & reviewed & pr_exists & pr_is_draft | In PR Review | StopSession, MarkPrReady |  |
+| Move → Done | !session_live & !has_worktree & !pr_approved OR !session_live & !has_worktree & !pr_open OR !session_live & !has_worktree & pr_merged | Done | — |  |
+| Move → Done | session_live & !has_worktree & !pr_approved OR session_live & !has_worktree & !pr_open OR session_live & !has_worktree & pr_merged | Done | StopSession |  |
+| Move → Done | !session_live & has_worktree & !pr_approved OR !session_live & has_worktree & !pr_open OR !session_live & has_worktree & pr_merged | Done | DeleteWorktree |  |
+| Move → Done | session_live & has_worktree & !pr_approved OR session_live & has_worktree & !pr_open OR session_live & has_worktree & pr_merged | Done | StopSession, DeleteWorktree |  |
+| Move → Done | !session_live & !has_worktree & pr_open & pr_approved & !pr_merged | Done | MergePr |  |
+| Move → Done | session_live & !has_worktree & pr_open & pr_approved & !pr_merged | Done | StopSession, MergePr |  |
+| Move → Done | !session_live & has_worktree & pr_open & pr_approved & !pr_merged | Done | MergePr, DeleteWorktree |  |
+| Move → Done | session_live & has_worktree & pr_open & pr_approved & !pr_merged | Done | StopSession, MergePr, DeleteWorktree |  |
 | GrillRequested | (any) | In Progress | — | grill is only available in Todo |
 | GrillFinished | (any) | In Progress | StopSession, EnsureWorktree, StartImplement |  |
 | WorkFinished | !has_changes & !user_question_pending OR review_current & !user_question_pending | For Your Review | CommitChanges, StopSession |  |
@@ -165,16 +169,18 @@ Every distinct outcome of `decide`, grouped by the column the ticket is in. *Gua
 | Move → In PR Review | has_repo & session_live & has_changes & review_current & !reviewed | For Your Review | StopSession |  |
 | Move → In PR Review | has_repo & !session_live & has_changes & reviewed & !pr_exists | In PR Review | OpenPr |  |
 | Move → In PR Review | has_repo & session_live & has_changes & reviewed & !pr_exists | In PR Review | StopSession, OpenPr |  |
-| Move → In PR Review | has_repo & !session_live & has_changes & reviewed & pr_exists | In PR Review | — |  |
-| Move → In PR Review | has_repo & session_live & has_changes & reviewed & pr_exists | In PR Review | StopSession |  |
-| Move → Done | !session_live & !has_worktree & !pr_approved OR !session_live & !has_worktree & !pr_exists OR !session_live & !has_worktree & pr_merged | Done | — |  |
-| Move → Done | session_live & !has_worktree & !pr_approved OR session_live & !has_worktree & !pr_exists OR session_live & !has_worktree & pr_merged | Done | StopSession |  |
-| Move → Done | !session_live & has_worktree & !pr_approved OR !session_live & has_worktree & !pr_exists OR !session_live & has_worktree & pr_merged | Done | DeleteWorktree |  |
-| Move → Done | session_live & has_worktree & !pr_approved OR session_live & has_worktree & !pr_exists OR session_live & has_worktree & pr_merged | Done | StopSession, DeleteWorktree |  |
-| Move → Done | !session_live & !has_worktree & pr_exists & pr_approved & !pr_merged | Done | MergePr |  |
-| Move → Done | session_live & !has_worktree & pr_exists & pr_approved & !pr_merged | Done | StopSession, MergePr |  |
-| Move → Done | !session_live & has_worktree & pr_exists & pr_approved & !pr_merged | Done | MergePr, DeleteWorktree |  |
-| Move → Done | session_live & has_worktree & pr_exists & pr_approved & !pr_merged | Done | StopSession, MergePr, DeleteWorktree |  |
+| Move → In PR Review | has_repo & !session_live & has_changes & reviewed & pr_exists & !pr_is_draft | In PR Review | — |  |
+| Move → In PR Review | has_repo & session_live & has_changes & reviewed & pr_exists & !pr_is_draft | In PR Review | StopSession |  |
+| Move → In PR Review | has_repo & !session_live & has_changes & reviewed & pr_exists & pr_is_draft | In PR Review | MarkPrReady |  |
+| Move → In PR Review | has_repo & session_live & has_changes & reviewed & pr_exists & pr_is_draft | In PR Review | StopSession, MarkPrReady |  |
+| Move → Done | !session_live & !has_worktree & !pr_approved OR !session_live & !has_worktree & !pr_open OR !session_live & !has_worktree & pr_merged | Done | — |  |
+| Move → Done | session_live & !has_worktree & !pr_approved OR session_live & !has_worktree & !pr_open OR session_live & !has_worktree & pr_merged | Done | StopSession |  |
+| Move → Done | !session_live & has_worktree & !pr_approved OR !session_live & has_worktree & !pr_open OR !session_live & has_worktree & pr_merged | Done | DeleteWorktree |  |
+| Move → Done | session_live & has_worktree & !pr_approved OR session_live & has_worktree & !pr_open OR session_live & has_worktree & pr_merged | Done | StopSession, DeleteWorktree |  |
+| Move → Done | !session_live & !has_worktree & pr_open & pr_approved & !pr_merged | Done | MergePr |  |
+| Move → Done | session_live & !has_worktree & pr_open & pr_approved & !pr_merged | Done | StopSession, MergePr |  |
+| Move → Done | !session_live & has_worktree & pr_open & pr_approved & !pr_merged | Done | MergePr, DeleteWorktree |  |
+| Move → Done | session_live & has_worktree & pr_open & pr_approved & !pr_merged | Done | StopSession, MergePr, DeleteWorktree |  |
 | GrillRequested | (any) | For Your Review | — | grill is only available in Todo |
 | GrillFinished | (any) | For Your Review | StopSession |  |
 | WorkFinished | (any) | For Your Review | — |  |
@@ -195,27 +201,36 @@ Every distinct outcome of `decide`, grouped by the column the ticket is in. *Gua
 
 | Event | Guard | → Target | Actions | Blocked |
 |-------|-------|----------|---------|----------|
-| Move → Todo | !session_live | Todo | — |  |
-| Move → Todo | session_live | Todo | StopSession |  |
+| Move → Todo | !session_live & !pr_open OR !session_live & pr_is_draft | Todo | — |  |
+| Move → Todo | session_live & !pr_open OR session_live & pr_is_draft | Todo | StopSession |  |
+| Move → Todo | !session_live & pr_open & !pr_is_draft | Todo | MarkPrDraft |  |
+| Move → Todo | session_live & pr_open & !pr_is_draft | Todo | StopSession, MarkPrDraft |  |
 | Move → In Progress | !has_repo | In PR Review | — | assign a repo first |
-| Move → In Progress | has_repo & !has_spec & !drafting | In Progress | StartGrill |  |
-| Move → In Progress | has_repo & has_spec & !drafting & !planned | In Progress | EnsureWorktree, StartImplement |  |
+| Move → In Progress | has_repo & !has_spec & !drafting & !pr_open OR has_repo & !has_spec & !drafting & pr_is_draft | In Progress | StartGrill |  |
+| Move → In Progress | has_repo & has_spec & !drafting & !planned & !pr_open OR has_repo & has_spec & !drafting & !planned & pr_is_draft | In Progress | EnsureWorktree, StartImplement |  |
 | Move → In Progress | has_repo & drafting | In PR Review | — | finish the interview first |
-| Move → In Progress | has_repo & has_spec & !drafting & planned | In Progress | ResumeWork |  |
+| Move → In Progress | has_repo & has_spec & !drafting & planned & !pr_open OR has_repo & has_spec & !drafting & planned & pr_is_draft | In Progress | ResumeWork |  |
+| Move → In Progress | has_repo & !has_spec & !drafting & pr_open & !pr_is_draft | In Progress | StartGrill, MarkPrDraft |  |
+| Move → In Progress | has_repo & has_spec & !drafting & !planned & pr_open & !pr_is_draft | In Progress | EnsureWorktree, StartImplement, MarkPrDraft |  |
+| Move → In Progress | has_repo & has_spec & !drafting & planned & pr_open & !pr_is_draft | In Progress | ResumeWork, MarkPrDraft |  |
 | Move → For Your Review | !has_repo | In PR Review | — | assign a repo first |
-| Move → For Your Review | has_repo & !session_live & !has_changes OR has_repo & !session_live & review_current | For Your Review | — |  |
-| Move → For Your Review | has_repo & session_live & !has_changes OR has_repo & session_live & review_current | For Your Review | StopSession |  |
-| Move → For Your Review | has_repo & !session_live & has_changes & !review_current | For Your Review | RunReview |  |
-| Move → For Your Review | has_repo & session_live & has_changes & !review_current | For Your Review | StopSession, RunReview |  |
+| Move → For Your Review | has_repo & !session_live & !has_changes & !pr_open OR has_repo & !session_live & !has_changes & pr_is_draft OR has_repo & !session_live & review_current & !pr_open OR has_repo & !session_live & review_current & pr_is_draft | For Your Review | — |  |
+| Move → For Your Review | has_repo & session_live & !has_changes & !pr_open OR has_repo & session_live & !has_changes & pr_is_draft OR has_repo & session_live & review_current & !pr_open OR has_repo & session_live & review_current & pr_is_draft | For Your Review | StopSession |  |
+| Move → For Your Review | has_repo & !session_live & has_changes & !review_current & !pr_open OR has_repo & !session_live & has_changes & !review_current & pr_is_draft | For Your Review | RunReview |  |
+| Move → For Your Review | has_repo & session_live & has_changes & !review_current & !pr_open OR has_repo & session_live & has_changes & !review_current & pr_is_draft | For Your Review | StopSession, RunReview |  |
+| Move → For Your Review | has_repo & !session_live & !has_changes & pr_open & !pr_is_draft OR has_repo & !session_live & review_current & pr_open & !pr_is_draft | For Your Review | MarkPrDraft |  |
+| Move → For Your Review | has_repo & session_live & !has_changes & pr_open & !pr_is_draft OR has_repo & session_live & review_current & pr_open & !pr_is_draft | For Your Review | StopSession, MarkPrDraft |  |
+| Move → For Your Review | has_repo & !session_live & has_changes & !review_current & pr_open & !pr_is_draft | For Your Review | RunReview, MarkPrDraft |  |
+| Move → For Your Review | has_repo & session_live & has_changes & !review_current & pr_open & !pr_is_draft | For Your Review | StopSession, RunReview, MarkPrDraft |  |
 | Move → In PR Review | (any) | In PR Review | — |  |
-| Move → Done | !session_live & !has_worktree & !pr_approved OR !session_live & !has_worktree & !pr_exists OR !session_live & !has_worktree & pr_merged | Done | — |  |
-| Move → Done | session_live & !has_worktree & !pr_approved OR session_live & !has_worktree & !pr_exists OR session_live & !has_worktree & pr_merged | Done | StopSession |  |
-| Move → Done | !session_live & has_worktree & !pr_approved OR !session_live & has_worktree & !pr_exists OR !session_live & has_worktree & pr_merged | Done | DeleteWorktree |  |
-| Move → Done | session_live & has_worktree & !pr_approved OR session_live & has_worktree & !pr_exists OR session_live & has_worktree & pr_merged | Done | StopSession, DeleteWorktree |  |
-| Move → Done | !session_live & !has_worktree & pr_exists & pr_approved & !pr_merged | Done | MergePr |  |
-| Move → Done | session_live & !has_worktree & pr_exists & pr_approved & !pr_merged | Done | StopSession, MergePr |  |
-| Move → Done | !session_live & has_worktree & pr_exists & pr_approved & !pr_merged | Done | MergePr, DeleteWorktree |  |
-| Move → Done | session_live & has_worktree & pr_exists & pr_approved & !pr_merged | Done | StopSession, MergePr, DeleteWorktree |  |
+| Move → Done | !session_live & !has_worktree & !pr_approved OR !session_live & !has_worktree & !pr_open OR !session_live & !has_worktree & pr_merged | Done | — |  |
+| Move → Done | session_live & !has_worktree & !pr_approved OR session_live & !has_worktree & !pr_open OR session_live & !has_worktree & pr_merged | Done | StopSession |  |
+| Move → Done | !session_live & has_worktree & !pr_approved OR !session_live & has_worktree & !pr_open OR !session_live & has_worktree & pr_merged | Done | DeleteWorktree |  |
+| Move → Done | session_live & has_worktree & !pr_approved OR session_live & has_worktree & !pr_open OR session_live & has_worktree & pr_merged | Done | StopSession, DeleteWorktree |  |
+| Move → Done | !session_live & !has_worktree & pr_open & pr_approved & !pr_merged | Done | MergePr |  |
+| Move → Done | session_live & !has_worktree & pr_open & pr_approved & !pr_merged | Done | StopSession, MergePr |  |
+| Move → Done | !session_live & has_worktree & pr_open & pr_approved & !pr_merged | Done | MergePr, DeleteWorktree |  |
+| Move → Done | session_live & has_worktree & pr_open & pr_approved & !pr_merged | Done | StopSession, MergePr, DeleteWorktree |  |
 | GrillRequested | (any) | In PR Review | — | grill is only available in Todo |
 | GrillFinished | (any) | In PR Review | StopSession |  |
 | WorkFinished | (any) | In PR Review | — |  |

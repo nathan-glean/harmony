@@ -126,12 +126,91 @@ fn move_done_with_approved_pr_merges_and_cleans_up() {
             has_changes: true,
             has_worktree: true,
             pr_exists: true,
+            pr_open: true,
             pr_approved: true,
             ..base()
         },
     );
     assert_eq!(d.target, Done);
     assert_eq!(d.actions, vec![MergePr, DeleteWorktree]);
+}
+
+#[test]
+fn move_pr_with_existing_draft_marks_ready() {
+    // The PR already exists but as a draft (e.g. the ticket was moved out then back). Re-entering
+    // In PR Review marks it ready — it must NOT open a second PR.
+    let d = decide(
+        Event::Move(Pr),
+        &Ctx {
+            from: HumanReview,
+            reviewed: true,
+            has_changes: true,
+            pr_exists: true,
+            pr_open: true,
+            pr_is_draft: true,
+            ..base()
+        },
+    );
+    assert_eq!(d.target, Pr);
+    assert!(has(&d.actions, MarkPrReady));
+    assert!(!has(&d.actions, OpenPr), "must not open a second PR");
+}
+
+#[test]
+fn move_out_of_pr_converts_open_pr_to_draft() {
+    // Moving a ticket out of In PR Review back to For Your Review converts its open PR to a draft.
+    let d = decide(
+        Event::Move(HumanReview),
+        &Ctx {
+            from: Pr,
+            reviewed: true,
+            has_changes: true,
+            review_current: true,
+            pr_exists: true,
+            pr_open: true,
+            ..base()
+        },
+    );
+    assert_eq!(d.target, HumanReview);
+    assert!(has(&d.actions, MarkPrDraft));
+}
+
+#[test]
+fn move_out_of_pr_when_already_draft_is_noop() {
+    // An already-draft PR isn't re-drafted.
+    let d = decide(
+        Event::Move(Todo),
+        &Ctx {
+            from: Pr,
+            pr_exists: true,
+            pr_open: true,
+            pr_is_draft: true,
+            ..base()
+        },
+    );
+    assert!(!has(&d.actions, MarkPrDraft));
+}
+
+#[test]
+fn move_done_with_closed_pr_does_not_merge() {
+    // A PR closed on GitHub (not merged): the reconciler moves the ticket to Done. Because the PR
+    // is not open, MergePr must be skipped (a `gh pr merge` on a closed PR would error).
+    let d = decide(
+        Event::Move(Done),
+        &Ctx {
+            from: Pr,
+            reviewed: true,
+            has_changes: true,
+            has_worktree: true,
+            pr_exists: true,
+            pr_open: false,
+            pr_approved: true,
+            ..base()
+        },
+    );
+    assert_eq!(d.target, Done);
+    assert!(!has(&d.actions, MergePr), "closed PR must not be merged");
+    assert!(has(&d.actions, DeleteWorktree));
 }
 
 #[test]
