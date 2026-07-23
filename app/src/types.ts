@@ -125,6 +125,24 @@ export type Question = {
 };
 export type PendingQuestion = { session_id: number; questions: Question[] };
 
+// One typed block of a structured transcript message (matches harmony_core::session::TranscriptBlock).
+// The friendly session view renders `text` as markdown, `tool_use` as a compact card, and
+// `tool_result` (hidden by default) as the expandable output of its matching `tool_use`.
+export type TranscriptBlock =
+  | { type: "text"; text: string }
+  | { type: "tool_use"; id: string; name: string; summary: string }
+  | { type: "tool_result"; tool_use_id: string; output: string; is_error: boolean };
+
+// One structured message in a session's conversation (matches harmony_core::session::TranscriptMessage).
+export type TranscriptMessage = { role: "assistant" | "user"; blocks: TranscriptBlock[] };
+
+// The friendly view's turn-state read (matches harmony_core::session::ViewState). `exit_plan` is
+// the escape-hatch signal that auto-switches the UI to the raw terminal.
+export type SessionViewState = "working" | "finished" | "waiting_on_question" | "exit_plan";
+
+// How a live session renders: the new chat-style GUI ("friendly") or the raw embedded terminal.
+export type SessionViewMode = "friendly" | "terminal";
+
 export type Repo = {
   id: number;
   name: string;
