@@ -292,6 +292,20 @@ impl Store {
         )
         .execute(&self.pool)
         .await;
+        // Persisted GitHub PR snapshot (the tight ticket↔PR link).
+        let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN pr_number INTEGER NOT NULL DEFAULT 0")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN pr_url TEXT NOT NULL DEFAULT ''")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE tickets ADD COLUMN pr_state TEXT NOT NULL DEFAULT ''")
+            .execute(&self.pool)
+            .await;
+        let _ =
+            sqlx::query("ALTER TABLE tickets ADD COLUMN pr_is_draft INTEGER NOT NULL DEFAULT 0")
+                .execute(&self.pool)
+                .await;
         Ok(())
     }
 
@@ -410,7 +424,7 @@ impl Store {
 
     pub async fn get_ticket(&self, id: i64) -> Result<Option<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec, review_verdict, review_findings, judged_sha, review_fix_attempts, activity, orchestrator_note, orchestrator_seen, restart_attempts, proof, proof_artifacts, proof_sha, proof_attempts, conflict_fix_attempts, conflict_fingerprint
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec, review_verdict, review_findings, judged_sha, review_fix_attempts, activity, orchestrator_note, orchestrator_seen, restart_attempts, proof, proof_artifacts, proof_sha, proof_attempts, conflict_fix_attempts, conflict_fingerprint, pr_number, pr_url, pr_state, pr_is_draft
              FROM tickets WHERE id = ?",
         )
         .bind(id)
@@ -420,7 +434,7 @@ impl Store {
 
     pub async fn list_tickets(&self) -> Result<Vec<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec, review_verdict, review_findings, judged_sha, review_fix_attempts, activity, orchestrator_note, orchestrator_seen, restart_attempts, proof, proof_artifacts, proof_sha, proof_attempts, conflict_fix_attempts, conflict_fingerprint
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec, review_verdict, review_findings, judged_sha, review_fix_attempts, activity, orchestrator_note, orchestrator_seen, restart_attempts, proof, proof_artifacts, proof_sha, proof_attempts, conflict_fix_attempts, conflict_fingerprint, pr_number, pr_url, pr_state, pr_is_draft
              FROM tickets ORDER BY id",
         )
         .fetch_all(&self.pool)
@@ -745,7 +759,7 @@ impl Store {
 
     pub async fn get_ticket_by_key(&self, key: &str) -> Result<Option<Ticket>> {
         Ok(sqlx::query_as::<_, Ticket>(
-            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec, review_verdict, review_findings, judged_sha, review_fix_attempts, activity, orchestrator_note, orchestrator_seen, restart_attempts, proof, proof_artifacts, proof_sha, proof_attempts, conflict_fix_attempts, conflict_fingerprint
+            "SELECT id, jira_key, source, title, spec, status, repo_id, created_at, updated_at, todos, pending_question, planned, drafting, grilled, acceptance_criteria, relevant_paths, constraints, reviewed, reviewed_sha, review_text, ci_triaged_sha, ci_fix_attempts, ci_triage, proposed_spec, review_verdict, review_findings, judged_sha, review_fix_attempts, activity, orchestrator_note, orchestrator_seen, restart_attempts, proof, proof_artifacts, proof_sha, proof_attempts, conflict_fix_attempts, conflict_fingerprint, pr_number, pr_url, pr_state, pr_is_draft
              FROM tickets WHERE jira_key = ?",
         )
         .bind(key)
@@ -866,6 +880,29 @@ impl Store {
             .execute(&self.pool)
             .await?;
         self.record_state_action(id, "review", sha, "").await?;
+        Ok(())
+    }
+
+    /// Persist the GitHub PR snapshot for a ticket (number, html URL, state, draft flag). Refreshed
+    /// by the PR-state poller and on PR creation; powers the "↗ PR" button/chip and reopen detection.
+    pub async fn set_ticket_pr(
+        &self,
+        id: i64,
+        number: i64,
+        url: &str,
+        state: &str,
+        is_draft: bool,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE tickets SET pr_number = ?, pr_url = ?, pr_state = ?, pr_is_draft = ? WHERE id = ?",
+        )
+        .bind(number)
+        .bind(url)
+        .bind(state)
+        .bind(is_draft as i64)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 

@@ -110,6 +110,15 @@ pub struct Ticket {
     /// Fingerprint of the conflict state last attempted (`<base_sha>:<branch_head>`), so the resolver
     /// doesn't respawn on an unchanged state. "" until first attempted; cleared when resolved.
     pub conflict_fingerprint: String,
+    /// Persisted GitHub PR snapshot (the tight ticket↔PR link). Refreshed by the PR-state poller and
+    /// on PR creation; 0/"" until a PR exists. `pr_number` is the PR number, `pr_url` its html URL,
+    /// `pr_state` one of `open|closed|merged` (""=none), `pr_is_draft` 0/1. Persisting lets the UI
+    /// show PR state + the "↗ PR" button without a live `gh` call, and lets the poller detect a
+    /// reopen from Done via `gh pr view <number> --repo …` after the worktree is gone.
+    pub pr_number: i64,
+    pub pr_url: String,
+    pub pr_state: String,
+    pub pr_is_draft: i64,
 }
 
 /// An isolated git worktree for a ticket. Per-ticket and reused; `is_alternate`

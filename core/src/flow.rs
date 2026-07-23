@@ -114,6 +114,12 @@ pub enum Action {
     MarkProofDone,
     /// Push the branch and open a PR ready for review.
     OpenPr,
+    /// Mark an existing draft PR ready for review (`gh pr ready`) — moving (back) into In PR Review
+    /// when the PR already exists as a draft.
+    MarkPrReady,
+    /// Convert an existing open PR back to draft (`gh pr ready --undo`) — moving the ticket out of
+    /// In PR Review to an earlier column. Reversible via `MarkPrReady`.
+    MarkPrDraft,
     /// Merge the approved PR.
     MergePr,
     /// Remove the ticket's worktree from disk + DB.
@@ -151,8 +157,12 @@ pub struct Ctx {
     pub review_current: bool,
     /// The ticket has been through the human-review column at least once.
     pub reviewed: bool,
-    /// A PR exists for the branch.
+    /// A PR exists for the branch (any state — open, closed, or merged).
     pub pr_exists: bool,
+    /// The PR is currently OPEN on GitHub (not closed/merged). Gates self-merge and draft toggling.
+    pub pr_open: bool,
+    /// The open PR is a draft.
+    pub pr_is_draft: bool,
     /// The PR has been approved externally on GitHub.
     pub pr_approved: bool,
     /// The PR has already been merged on GitHub (state == MERGED) — so a move to Done should just
@@ -238,7 +248,7 @@ pub fn decide(event: Event, ctx: &Ctx) -> Decision {
             if !ctx.has_repo && matches!(to, InProgress | HumanReview | Pr) {
                 return Decision::blocked(ctx.from, "assign a repo first");
             }
-            match to {
+            let mut decision = match to {
                 Todo => Decision {
                     target: Todo,
                     actions: stop_if_live(),
@@ -278,6 +288,10 @@ pub fn decide(event: Event, ctx: &Ctx) -> Decision {
                         let mut actions = stop_if_live();
                         if !ctx.pr_exists {
                             actions.push(OpenPr);
+                        } else if ctx.pr_is_draft {
+                            // The PR already exists as a draft (e.g. moved out then back) — mark it
+                            // ready rather than opening a second one.
+                            actions.push(MarkPrReady);
                         }
                         Decision {
                             target: Pr,
@@ -288,9 +302,9 @@ pub fn decide(event: Event, ctx: &Ctx) -> Decision {
                 }
                 Done => {
                     let mut actions = stop_if_live();
-                    // Merge only an open, approved PR ourselves. If it's already merged on GitHub
-                    // (a human merged it), skip MergePr — moving to Done is just cleanup.
-                    if ctx.pr_exists && ctx.pr_approved && !ctx.pr_merged {
+                    // Merge only an open, approved PR ourselves. If it's already merged/closed on
+                    // GitHub, skip MergePr — moving to Done is just cleanup.
+                    if ctx.pr_open && ctx.pr_approved && !ctx.pr_merged {
                         actions.push(MergePr);
                     }
                     if ctx.has_worktree {
@@ -302,7 +316,19 @@ pub fn decide(event: Event, ctx: &Ctx) -> Decision {
                         blocked: None,
                     }
                 }
+            };
+            // Leaving In PR Review for an earlier column: convert the open PR back to a draft so it
+            // isn't sitting "ready for review" while the ticket is no longer there. Reversible —
+            // moving back into In PR Review marks it ready again.
+            if ctx.from == Pr
+                && !matches!(to, Pr | Done)
+                && decision.blocked.is_none()
+                && ctx.pr_open
+                && !ctx.pr_is_draft
+            {
+                decision.actions.push(MarkPrDraft);
             }
+            decision
         }
 
         // Grill is Todo-only, needs a repo, and won't start a second concurrent grill.

@@ -1303,6 +1303,10 @@ mod tests {
             proof_attempts: 0,
             conflict_fix_attempts: 0,
             conflict_fingerprint: String::new(),
+            pr_number: 0,
+            pr_url: String::new(),
+            pr_state: String::new(),
+            pr_is_draft: 0,
         }
     }
 

@@ -724,6 +724,29 @@ export function App() {
                     ↗ Jira
                   </button>
                 )}
+                {(liveTicket ?? selected).pr_url && (
+                  <>
+                    <button
+                      className="pr-open"
+                      title={`Open PR #${(liveTicket ?? selected).pr_number} on GitHub`}
+                      onClick={() =>
+                        api.openPrInBrowser(selected.id).catch((e) => flash(String(e)))
+                      }
+                    >
+                      ↗ PR
+                    </button>
+                    {(() => {
+                      const t = liveTicket ?? selected;
+                      const state =
+                        t.pr_state === "open" && t.pr_is_draft ? "draft" : t.pr_state;
+                      return state ? (
+                        <span className={"pr-chip pr-" + state} title={`PR #${t.pr_number} — ${state}`}>
+                          PR {state}
+                        </span>
+                      ) : null;
+                    })()}
+                  </>
+                )}
                 {(liveTicket ?? selected).repo_id == null && (
                   <select
                     className="modal-repo-assign"
@@ -839,11 +862,13 @@ export function App() {
                     liveSessions[selected.id] ? "Finish the running session first" : "Delete this ticket"
                   }
                   onClick={() => {
-                    const t = selected;
+                    const t = liveTicket ?? selected;
+                    const hasOpenPr = !!t.pr_url && (t.pr_state === "open" || t.pr_state === "");
                     run("delete", async () => {
                       const ok = await confirm(
                         `Delete "${t.title}"? Removes its worktree and harmony record` +
-                          (t.jira_key ? " (not the Jira issue — it'll return on next Sync)." : "."),
+                          (t.jira_key ? " (not the Jira issue — it'll return on next Sync)." : ".") +
+                          (hasOpenPr ? `\n\nIts open PR #${t.pr_number} will be closed on GitHub.` : ""),
                         { title: "Delete ticket", kind: "warning" }
                       );
                       if (!ok) return;

@@ -91,6 +91,7 @@ export const api = {
     ),
   openPr: (ticketId: number) => invoke<string>("open_pr", { ticketId }),
   openInJira: (ticketId: number) => invoke<void>("open_in_jira", { ticketId }),
+  openPrInBrowser: (ticketId: number) => invoke<void>("open_pr_in_browser", { ticketId }),
   ticketDiff: (ticketId: number) => invoke<string>("ticket_diff", { ticketId }),
   ticketPr: (ticketId: number) =>
     invoke<{ pr: any | null; checks: any[] }>("ticket_pr", { ticketId }),

@@ -450,6 +450,40 @@ async fn action_log_idempotency_and_persistence() {
 }
 
 #[tokio::test]
+async fn ticket_pr_snapshot_round_trips_and_persists() {
+    let dir = TempDir::new("prsnap");
+    let id = {
+        let store = open_store(&dir).await;
+        let id = store
+            .add_ticket(None, "local", "T", "", None)
+            .await
+            .unwrap();
+        // Defaults: no PR.
+        let t = store.get_ticket(id).await.unwrap().unwrap();
+        assert_eq!(t.pr_number, 0);
+        assert_eq!(t.pr_state, "");
+        assert_eq!(t.pr_is_draft, 0);
+
+        store
+            .set_ticket_pr(id, 42, "https://github.com/o/r/pull/42", "open", true)
+            .await
+            .unwrap();
+        let t = store.get_ticket(id).await.unwrap().unwrap();
+        assert_eq!(t.pr_number, 42);
+        assert_eq!(t.pr_url, "https://github.com/o/r/pull/42");
+        assert_eq!(t.pr_state, "open");
+        assert_eq!(t.pr_is_draft, 1);
+        id
+    };
+
+    // Survives a restart (reopen the same DB) — the PR link is durable.
+    let store = open_store(&dir).await;
+    let t = store.get_ticket(id).await.unwrap().unwrap();
+    assert_eq!(t.pr_state, "open");
+    assert_eq!(t.pr_number, 42);
+}
+
+#[tokio::test]
 async fn orchestrator_notes_append_to_decision_log() {
     let dir = TempDir::new("orch");
     let store = open_store(&dir).await;
@@ -1605,6 +1639,10 @@ fn sample_ticket() -> harmony_core::models::Ticket {
         proof_attempts: 0,
         conflict_fix_attempts: 0,
         conflict_fingerprint: String::new(),
+        pr_number: 0,
+        pr_url: String::new(),
+        pr_state: String::new(),
+        pr_is_draft: 0,
     }
 }
 
