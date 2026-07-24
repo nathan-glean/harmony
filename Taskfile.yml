@@ -65,7 +65,7 @@ tasks:
       - '{{.WITH_CARGO}}; UPDATE_FLOW_DOC=1 cargo test -p harmony-core --test flow_doc'
 
   release:
-    desc: 'Bump version in lockstep + commit + tag (does not push). E.g. `task release -- minor` (or patch|major|X.Y.Z), then `git push --follow-tags`.'
+    desc: 'Bump version in lockstep on a release branch, open+merge a PR, then tag `vX.Y.Z` (triggers the build). E.g. `task release -- minor` (or patch|major|X.Y.Z). Requires a clean, in-sync `main` and authed `gh`.'
     cmds:
       - 'node scripts/release.mjs {{.CLI_ARGS}}'
 

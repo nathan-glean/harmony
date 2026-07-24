@@ -37,19 +37,22 @@ task tauri:build           # build the macOS bundle locally
 CI (`.github/workflows/ci.yml`) runs `task ci` on every push/PR. Releases are cut deliberately (never
 per-PR) and built + published by `.github/workflows/release.yml` on a `v*` tag.
 
-Bump the version and tag with one command (semantic versioning — `patch` | `minor` | `major`, or an
-explicit `X.Y.Z`):
+Bump the version and publish with one command (semantic versioning — `patch` | `minor` | `major`, or
+an explicit `X.Y.Z`):
 
 ```sh
-task release -- minor      # bumps every version file in lockstep, commits "Release vX.Y.Z", tags vX.Y.Z
-git push --follow-tags     # review first, then push to publish the release
+task release -- minor      # bumps every version file, opens+merges a Release PR, tags vX.Y.Z
 ```
 
-`task release` updates all version spots together (`tauri.conf.json`, both `Cargo.toml`,
-`package.json` + `package-lock.json`, and `Cargo.lock`) so the tag, the bundle, and the auto-update
-manifest always agree; it stops before pushing so you can review. The tag push builds the Apple-Silicon
-`.dmg` and attaches it to a new GitHub Release (a CI guard rejects a tag that doesn't match the app
-version). A manual **Run workflow** / `workflow_dispatch` builds without publishing — a dry run.
+Run it from a **clean `main` that's in sync with origin**, with an authenticated `gh`. `task release`
+updates all version spots together (`tauri.conf.json`, both `Cargo.toml`, `package.json` +
+`package-lock.json` — regenerated so it can't drift and fail `npm ci` — and `Cargo.lock`) on a
+`release-vX.Y.Z` branch, opens a PR with `gh`, merges it (retrying while GitHub computes
+mergeability), fast-forwards your local `main`, then tags the merged commit and pushes the tag. This
+PR-based flow lands cleanly even when `main` is branch-protected. The tag push builds the
+Apple-Silicon `.dmg` and attaches it to a new GitHub Release (a CI guard rejects a tag that doesn't
+match the app version). A manual **Run workflow** / `workflow_dispatch` builds without publishing — a
+dry run.
 
 The DMG is unsigned; to ship a notarized, double-click-installable build later, add a `bundle.macOS`
 signing block to `tauri.conf.json` and the Apple signing secrets to the release workflow.
