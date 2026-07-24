@@ -9,9 +9,6 @@
 //! Note: `claude -p` counts against separate Agent-SDK usage credits (Phase 0 finding); the driver
 //! only judges a fresh review (fingerprinted by HEAD), not on every poll.
 
-use std::io::Write;
-use std::process::{Command, Stdio};
-
 use anyhow::Result;
 
 use crate::draft::truncate_diff;
@@ -52,9 +49,9 @@ impl Verdict {
 }
 
 /// Judge a reviewed change: classify the `/review` output + diff into a [`Verdict`] (+ findings).
-/// Runs `claude -p` in read-only plan mode in the worktree, with the review prose and the branch
-/// diff piped on stdin.
-pub fn judge(worktree: &str, review_text: &str, diff: &str) -> Result<Judgement> {
+/// Runs `claude -p` in read-only plan mode in the worktree (on `model`), with the review prose and
+/// the branch diff piped on stdin.
+pub fn judge(worktree: &str, review_text: &str, diff: &str, model: &str) -> Result<Judgement> {
     let prompt = format!(
         "You are the merge gate for an autonomous coding loop. A code reviewer's findings and the \
          branch's full diff (vs base) are provided on stdin, separated by a line `=== DIFF ===`.\n\n\
@@ -74,30 +71,8 @@ pub fn judge(worktree: &str, review_text: &str, diff: &str) -> Result<Judgement>
         truncate_diff(diff, MAX_DIFF_BYTES)
     );
 
-    let mut child = Command::new("claude")
-        .arg("-p")
-        .arg(&prompt)
-        .arg("--permission-mode")
-        .arg("plan")
-        .current_dir(worktree)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| crate::cmd_err::spawn_error("claude", &e))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(stdin_body.as_bytes());
-    }
-    let out = child
-        .wait_with_output()
-        .map_err(|e| crate::cmd_err::spawn_error("claude", &e))?;
-    if !out.status.success() {
-        return Err(crate::cmd_err::classify(
-            "claude",
-            &String::from_utf8_lossy(&out.stderr),
-        ));
-    }
-    Ok(parse_judgement(&String::from_utf8_lossy(&out.stdout)))
+    let raw = crate::claude::run_headless(worktree, &prompt, &stdin_body, model)?;
+    Ok(parse_judgement(&raw))
 }
 
 /// Parse the judge's response. Fail-safe: only an explicit `CHANGES_REQUESTED` first line triggers

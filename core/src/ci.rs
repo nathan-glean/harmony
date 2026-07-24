@@ -5,8 +5,6 @@
 //! here is pure and unit-tested.
 
 use std::collections::HashSet;
-use std::io::Write;
-use std::process::{Command, Stdio};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -215,8 +213,14 @@ pub fn decide(
 // ---- LLM attribution (claude -p) -------------------------------------------
 
 /// Ask Claude to attribute a CI failure from the diff + failed logs, returning a structured
-/// verdict. One-shot `claude -p` in plan mode (read-only), mirroring `draft::pr_summary`.
-pub fn ci_verdict(worktree: &str, diff: &str, failing: &[String], logs: &str) -> Result<CiVerdict> {
+/// verdict. One-shot `claude -p` in plan mode (read-only) on `model`, mirroring `draft::pr_summary`.
+pub fn ci_verdict(
+    worktree: &str,
+    diff: &str,
+    failing: &[String],
+    logs: &str,
+    model: &str,
+) -> Result<CiVerdict> {
     let prompt = format!(
         "You are triaging a failing CI check on a pull request. Decide whether the failure is \
          caused by THIS PR's changes, or is unrelated (infrastructure, a missing secret, the base \
@@ -236,30 +240,8 @@ pub fn ci_verdict(worktree: &str, diff: &str, failing: &[String], logs: &str) ->
         truncate(logs, MAX_LOG_BYTES)
     );
 
-    let mut child = Command::new("claude")
-        .arg("-p")
-        .arg(&prompt)
-        .arg("--permission-mode")
-        .arg("plan")
-        .current_dir(worktree)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| crate::cmd_err::spawn_error("claude", &e))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(stdin_body.as_bytes());
-    }
-    let out = child
-        .wait_with_output()
-        .map_err(|e| crate::cmd_err::spawn_error("claude", &e))?;
-    if !out.status.success() {
-        return Err(crate::cmd_err::classify(
-            "claude",
-            &String::from_utf8_lossy(&out.stderr),
-        ));
-    }
-    parse_verdict(&String::from_utf8_lossy(&out.stdout))
+    let raw = crate::claude::run_headless(worktree, &prompt, &stdin_body, model)?;
+    parse_verdict(&raw)
         .ok_or_else(|| anyhow::anyhow!("could not parse CI verdict from claude output"))
 }
 
@@ -318,7 +300,7 @@ fn truncate(s: &str, max: usize) -> String {
 /// Run the full triage funnel for a ticket's PR worktree and return the result. Best-effort: gh
 /// failures degrade gracefully (e.g. unknown required set → gate skipped). The caller decides
 /// whether to spawn a fix based on `CiTriage::actionable`.
-pub fn triage(worktree: &str, base: &str, diff: &str) -> Result<CiTriage> {
+pub fn triage(worktree: &str, base: &str, diff: &str, model: &str) -> Result<CiTriage> {
     let head = crate::github::head_sha(worktree).unwrap_or_default();
     let failing = crate::github::pr_checks_json(worktree)
         .ok()
@@ -352,7 +334,7 @@ pub fn triage(worktree: &str, base: &str, diff: &str) -> Result<CiTriage> {
         None
     } else {
         let logs = collect_failed_logs(worktree, &head);
-        ci_verdict(worktree, diff, &failing, &logs).ok()
+        ci_verdict(worktree, diff, &failing, &logs, model).ok()
     };
 
     let (actionable, reason) = decide(

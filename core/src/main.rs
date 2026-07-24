@@ -384,8 +384,21 @@ async fn pr_flow(
     };
     let body = if summary {
         let tref = jira_ref(&ticket).await;
+        // Cheap headless model (or the account default when the setting is blank).
+        let model = store
+            .get_setting("triage_model")
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| harmony_core::claude::DEFAULT_TRIAGE_MODEL.to_string());
         println!("[pr] summarizing diff via `claude -p` …");
-        harmony_core::github::generated_pr_body(&wt.path, &repo.path, tref.as_deref(), &fallback)
+        harmony_core::github::generated_pr_body(
+            &wt.path,
+            &repo.path,
+            tref.as_deref(),
+            &fallback,
+            &model,
+        )
     } else {
         fallback
     };
