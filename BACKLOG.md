@@ -21,20 +21,39 @@ Items marked *(Symphony)* are inspired by an actual component of the Symphony [S
 
 ## Already shipped (for honesty)
 
-Harmony is well past "scaffolding" — Phases 0–3 are functionally built. Backlog items below are scoped against this surface.
+Harmony is well past "scaffolding" — Phases 0–3 are functionally built, and much of the **v1.5/v2 autonomy & orchestration** roadmap has since landed too (see the second table). Backlog items below are scoped against this surface, and the *Now/Next/Later* statuses have been updated to reflect it.
+
+### Foundation (Phases 0–3)
 
 | Area | Shipped |
 |------|---------|
-| Store | SQLite (`repos`, `tickets`, `worktrees`, `sessions`, `settings`) with migrations & full CRUD — `core/src/store.rs` |
+| Store | SQLite (`repos`, `tickets`, `worktrees`, `sessions`, `settings`, `ticket_actions`) with migrations & full CRUD — `core/src/store.rs` |
 | Worktrees | Per-ticket worktree create/reuse/remove, `harmony/<KEY>-<slug>` branch naming, prune+reuse — `core/src/worktree.rs` |
 | Sessions | Interactive `claude` in PTY, first-prompt = spec, `--resume`, exit detection — `core/src/session.rs` |
 | Hooks | Localhost axum server; `PreToolUse`/`PostToolUse`/`Stop`/`Notification`; cwd→session correlation; drives board state — `core/src/hooks.rs` |
 | Settings inject | Additive hooks into `.claude/settings.local.json` (not tracked) — `core/src/settings.rs` |
-| Jira | `acli` shell-out: assigned-to-me sync, transitions, comments, ADF→text; install/login/logout/status — `core/src/jira.rs` |
-| GitHub | `git push` + `gh pr create --draft`, PR URL capture — `core/src/github.rs` |
+| Jira | `acli` shell-out: assigned-to-me sync, transitions, comments, ADF→text; install/login/logout/status; sync-time auto-assign to a default repo — `core/src/jira.rs` |
+| GitHub | `git push` + `gh pr create` (ready for review), PR URL/number/state capture, checks, comments, conflict + merge ops — `core/src/github.rs` |
 | Draft | One-shot `claude -p` Jira→spec — `core/src/draft.rs` |
 | CLI | `repo` / `ticket` / `start` / `serve` / `sessions` / `worktrees` / `jira` / `draft` / `pr` — `core/src/main.rs` |
-| UI | Drag-drop board, ticket detail + spec editor, sessions & worktrees tables, settings (folder picker), embedded xterm.js terminal, OS notifications, Jira connect panel — `app/src/`, `app/src-tauri/src/lib.rs` |
+| UI | Drag-drop board, ticket detail + spec editor, sessions & worktrees tables, settings (folder picker), embedded xterm.js terminal (search / WebGL / jump-to-latest), diff + PR + proof + review tabs, OS notifications, Jira connect panel — `app/src/`, `app/src-tauri/src/lib.rs` |
+| CI/release | GitHub Actions CI gate (`task ci`: fmt + clippy + Rust tests + tsc + **Vitest**), `task release` semantic versioning, macOS `.dmg`, in-app auto-updater |
+
+### Autonomy & orchestration (post-v1, shipped since)
+
+| Capability | Shipped |
+|------|---------|
+| **Ticket lifecycle state machine** | Pure `flow::decide` + one executor; generated, CI-drift-checked `docs/flow.md` — `core/src/flow.rs`, `core/src/flow_doc.rs` |
+| **Autonomous poll loop** | 60s loop that observes state and injects the events a human would (CI triage, re-review, judge, proof, conflicts, auto-merge, PR reconcile, watchdog, orchestrator) — `app/src-tauri/src/lib.rs` |
+| **Self-correcting review loop** | LLM judge (`pass`/`changes_requested`) → auto-fix session → re-review, capped + escalates — `core/src/review.rs`, `poll_review_loop_once` |
+| **Proof-of-work** | Adaptive evidence capture (video/screenshots/report) after review, surfaced in the Proof tab + PR comment — `core/src/proof.rs` (backlog #18) |
+| **Immutable action log** | `ticket_actions` — the single durable idempotency source of truth (proof/review/judge/ci/conflict/reverify), keyed on HEAD, survives restarts — `store::record_state_action`/`has_action_at` |
+| **Auto-resolve PR conflicts** | Detect a conflicting PR → autonomous rebase/resolve session, capped + escalates — `poll_conflicts_once` |
+| **Gated auto-merge + PR↔ticket sync** | Approved+green → merge → Done; PR merged/closed → Done; reopened → In PR Review; drafts track the column — `poll_auto_merge_once`, `poll_pr_state_once` (backlog #22) |
+| **"↗ PR" button + persisted PR snapshot** | Open the PR in the browser; `pr_number`/`pr_url`/`pr_state`/`pr_is_draft` on the ticket |
+| **Smarter loops** | Re-work returns to the furthest stage reached (not always Human Review); proportional re-verification (hybrid heuristic + LLM triage) skips full re-review/re-proof for trivial deltas; incremental review — `core/src/reverify.rs`, `poll_reverify_once` |
+| **Stuck-session watchdog + restart recovery** | Transcript-based detection of finished-but-stuck sessions; on relaunch, classify each open session (resume mid-work / recover finished / drop) instead of naively resuming — `poll_stuck_sessions_once`, `classify_restart_sessions` |
+| **Orchestrator coordinator + tab** | Restart crashed sessions (capped), answer derivable questions, accept low-risk spec proposals, escalate; live status + persistent decision feed — `core/src/orchestrator.rs`, `poll_orchestrator_once`, `Orchestrator.tsx` (backlog #16/#17, partial) |
 
 ---
 
@@ -64,9 +83,11 @@ Tail `~/.claude/projects/<hash>/<id>.jsonl` for richer in-session progress (last
 No tests today. Cover the load-bearing logic: store CRUD, worktree create/reuse + branch-naming/slugify, and the cwd→worktree→session correlation in the hook server.
 - **AC:** `cargo test -p harmony-core` exercises these paths and passes in CI.
 
-### 6. Error & edge-state handling `[hardening]`
+### 6. Error & edge-state handling `[hardening]` — ⏳ PARTIAL
 Today many failures are best-effort/silent. Surface session crash, `gh`/Jira failure, dirty worktree, and network loss as user-visible states.
 - **AC:** Each failure path shows a toast/state and leaves the DB consistent (no orphaned "working" sessions or half-created worktrees).
+- Done: session-crash badge (`fail_session`) + orchestrator restart; dirty-worktree confirm on destructive ops; stale session/question/drafting cleared on startup; the **immutable action log** keeps idempotency consistent across restarts/crashes; a UI **ErrorBoundary** + global handlers stop a pane crash blanking the app; per-op error toasts throughout.
+- Remaining: systematic coverage of `gh`/Jira/network failures as first-class surfaced states (some still log-and-continue).
 
 ---
 
@@ -114,7 +135,12 @@ Intercept `PreToolUse` over the hook channel and present an in-app approve/deny 
 Unattended runs hang on `.mcp.json` / never-trusted-folder startup prompts. Use `--strict-mcp-config` and bootstrap folder-trust once per worktree.
 - **AC:** An autonomous start in an MCP-containing or untrusted repo proceeds without blocking on an interactive prompt.
 
-### 16. Orchestrator loop + state machine `[orchestration]` *(Symphony)*
+### 16. Orchestrator loop + state machine `[orchestration]` *(Symphony)* — ⏳ PARTIAL
+> **Shipped so far:** the pure **state machine** (`flow::decide` + generated `docs/flow.md`) and a **60s poll-and-reconcile loop** are built (`app/src-tauri/src/lib.rs`). An **orchestrator coordinator** pass (`poll_orchestrator_once`, `core/src/orchestrator.rs`) restarts crashed working sessions (capped), answers derivable worker questions, accepts low-risk spec proposals, and escalates the rest — with a dedicated **Orchestrator tab** (live status + persistent decision feed).
+> **Not yet:** the full autonomous **candidate dispatch** — priority-sort selection, `blocked_by` gating, required-label filters, and pulling `Todo → In Progress` — is deliberately *not* done: starting work is a human-only decision by design (see PR #18), so auto-dispatch remains opt-in/future. Concurrency slots (`dispatch_slots`) and per-column caps are only partially wired.
+
+The remaining Symphony target below is the fully-autonomous dispatch model, kept for reference:
+
 A daemon/loop that watches the board and ensures every active ticket has a running session, (re)spawning crashed or stalled ones — Symphony's core behavior. Today sessions are spawned manually ("Open terminal") or on drag-into-In-Progress. Symphony models this as a **single-authority in-memory state** (each issue is unclaimed → claimed → running → retry-queued → released) plus a periodic **poll-and-dispatch tick**:
 1. **Reconcile** running tickets (see #17), then
 2. **Fetch candidates** in active states (skip the tick if the fetch fails), then
@@ -125,7 +151,12 @@ A ticket is **eligible** when: it's in an active column, carries every required 
 - **Concurrency slots:** `available = max(max_concurrent - running, 0)`, with an optional **per-column** cap (e.g. limit how many In-Progress run at once) falling back to the global cap. This subsumes the soft indicator in #12 (the count it shows becomes the slot accounting).
 - **AC:** With auto-mode on, a tick reconciles board state, sorts candidates by priority/age, and dispatches eligible tickets up to the (global + per-column) slot limit; a `Todo` with an open blocker is skipped; crashed sessions are restarted; no ticket is ever double-dispatched.
 
-### 17. Retry/backoff + reconciliation `[orchestration][hardening]` *(Symphony)*
+### 17. Retry/backoff + reconciliation `[orchestration][hardening]` *(Symphony)* — ⏳ PARTIAL
+> **Shipped so far:** several reconciliation passes each tick — a **stuck-session watchdog** (`poll_stuck_sessions_once`: transcript-idle + finished-turn detection re-fires a missed completion, or escalates a genuinely hung one); **crash restart** with an attempt cap (orchestrator); **restart-recovery classification** on relaunch (resume mid-work / recover finished / drop — `classify_restart_sessions`, PR #30); and **PR-state reconciliation** (`poll_pr_state_once`: merged/closed → Done, reopened → In PR Review). The **action log** makes all of this idempotent across restarts.
+> **Not yet:** a formal **retry queue** with the Symphony continuation-vs-failure split (fixed short delay vs exponential backoff with a cap) and event-inactivity **stall timeouts** as a first-class mechanism (today the watchdog uses transcript idle time, and caps bound loops).
+
+The remaining Symphony target below is kept for reference:
+
 A retry queue for transient session/integration failures, plus active-run reconciliation — the other half of the orchestrator (#16). Symphony distinguishes two retry kinds and reconciles every running issue each tick.
 - **Continuation retries** (after a *clean* exit, more work likely remains): re-dispatch on a short fixed delay (~1s).
 - **Failure retries** (abnormal exit): exponential backoff `min(base · 2^(attempt-1), cap)` with a configurable cap.
@@ -156,15 +187,21 @@ Long unattended runs that outlive the desktop window. Today PTYs are children of
 Give the agent Jira/ticket context and progress-posting tools mid-run (vs. Harmony doing all tracker writes around it).
 - **AC:** The agent can read its own ticket and post progress without the user leaving the session.
 
-### 22. Cascade / auto-merge `[github][orchestration]`
-Opt-in auto-merge once CI is green and review approves. Harmony deliberately never merges in v1.
-- **AC:** With the setting enabled, a PR merges automatically after checks + reviews pass; disabled by default.
+### 22. Cascade / auto-merge `[github][orchestration]` — ✅ DONE
+Opt-in auto-merge once CI is green and review approves.
+- **AC:** With the setting enabled, a PR merges automatically after checks + reviews pass; disabled by default. ✅
+- Shipped: `poll_auto_merge_once` injects `Move(Done)` when a PR is **approved on GitHub** (`reviewDecision == APPROVED`) **and** CI is green → `flow::decide` merges (`gh pr merge --squash --delete-branch`) + cleans up. Default **off** (the one irreversible, outward-facing step); the agent never self-approves. Complemented by **bidirectional PR↔ticket sync** (`poll_pr_state_once`): a PR merged/closed by anyone → ticket Done; reopened → back to In PR Review — so the board tracks GitHub both ways (PR #19, #27).
 
 ### 23. Shared team backend `[orchestration]` *(epic)*
 Coordination, who's-on-what, a shared team board. The largest item; explicitly v2+ and currently out of detailed scope.
 - **AC:** Tracked as an epic; to be broken down when prioritized.
 
-### 24. Observability: token accounting + rate limits + HTTP API `[orchestration][hardening]` *(Symphony)*
+### 24. Observability: token accounting + rate limits + HTTP API `[orchestration][hardening]` *(Symphony)* — ⏳ PARTIAL
+> **Shipped so far:** a persistent **decision feed** and live orchestrator status in the **Orchestrator tab** (backed by the `ticket_actions` log — every autonomous action is state-stamped and auditable), plus the per-ticket **Activity** classifier surfaced as a card pill. This covers the "what did the loop do / what's it doing" half of observability.
+> **Not yet:** **token accounting** (absolute thread totals, dedup deltas) and **rate-limit** tracking, and the optional read-only **`/api/v1/*` HTTP API** + dashboard.
+
+The remaining Symphony target below is kept for reference:
+
 Symphony tracks, per run and in aggregate, the agent's **token usage** and **rate-limit** posture, and optionally exposes a read-only HTTP surface. harmony already runs a localhost hook server (`core/src/hooks.rs`) — this extends it.
 - **Token accounting:** prefer **absolute thread totals** when the agent reports them; **ignore delta payloads** for totals and **dedup against the last reported total** to avoid double-counting; accumulate input/output/total across sessions.
 - **Rate limits:** retain the latest rate-limit payload seen in agent updates and surface it (informs #12 throttling and the auth-quota risk below).
@@ -206,15 +243,15 @@ Per-task isolation (Symphony per-issue workspace ≈ harmony per-ticket git work
 | Agent driver | Codex app-server (JSON-line subprocess) | Claude Code in a PTY (xterm.js) |
 | Tracker | Linear (GraphQL) | Jira (via `acli`) |
 | Form factor | Headless daemon / CLI | Tauri **supervised desktop GUI** |
-| Autonomy | Autonomous poll-and-dispatch loop | **Supervised-first**; manual / drag-to-start |
+| Autonomy | Autonomous poll-and-dispatch loop | **Supervised-first**; manual / drag-to-start, with an **autonomous poll-and-*reconcile* loop** (re-review, judge, proof, CI-fix, conflict-resolve, auto-merge, watchdog) — but **dispatch** into In Progress stays human-only |
 | Policy & config | In-repo `WORKFLOW.md`, hot-reloaded | SQLite settings + Settings UI (see #19) |
 | Tracker writes | Agent does them via its own tools | Harmony does **column-driven writeback** |
 | Enrichment | none | **Jira Draft + structured spec** (Harmony-only) |
 
 ### Genuine gaps Harmony could adopt (mapped to backlog items)
-- **Orchestrator loop + single-authority state machine** — candidate selection (priority sort, `blocked_by` gating, required labels), claim/run/retry/release states, concurrency slots (global + per-column) → **#16**.
-- **Retry/backoff + reconciliation** — continuation (fixed) vs failure (exponential w/ cap) retries; stall detection + tracker-state refresh of running issues → **#17**.
-- **Observability** — token accounting (absolute totals, dedup deltas), rate-limit tracking, optional `/api/v1/*` JSON API + dashboard → **#24**.
+- **Orchestrator loop + single-authority state machine** — ⏳ *partial:* the state machine + reconcile loop + orchestrator coordinator are shipped; the remaining gap is fully-autonomous candidate **dispatch** (priority sort, `blocked_by` gating, required labels, `Todo → In Progress` — intentionally human-only today) and per-column slot caps → **#16**.
+- **Retry/backoff + reconciliation** — ⏳ *partial:* stuck-session watchdog, crash restart (capped), restart-recovery classification, and PR-state reconciliation are shipped; the remaining gap is a formal retry queue (continuation-fixed vs failure-exponential) and event-inactivity stall timeouts → **#17**.
+- **Observability** — ⏳ *partial:* the decision feed + Orchestrator tab (backed by the action log) are shipped; the remaining gap is token accounting (absolute totals, dedup deltas), rate-limit tracking, and the optional `/api/v1/*` JSON API + dashboard → **#24**.
 - **`WORKFLOW.md` policy + workspace lifecycle hooks** — versioned prompt/config with `$VAR` + hot-reload, and `after_create`/`before_run`/`after_run`/`before_remove` shell hooks → **#19**, **#25**.
 - **Remote/SSH workers** — Appendix-A extension; noted but likely out-of-scope for a per-developer desktop tool → **#26**.
 
