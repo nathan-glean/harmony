@@ -3,18 +3,20 @@
 //!
 //! Note: `claude -p` counts against separate Agent-SDK usage credits (Phase 0 finding).
 
-use std::io::Write;
-use std::process::{Command, Stdio};
-
 use anyhow::Result;
 
 /// Max diff bytes piped to `claude` for a PR summary — keep the call fast and within context.
 const MAX_DIFF_BYTES: usize = 60 * 1024;
 
 /// Summarize a branch diff into a PR description. Runs in the worktree under read-only plan mode
-/// so Claude can discover the repo's PR template(s) and conform to the most relevant one; the
-/// diff is piped on stdin. `ticket_ref` (e.g. a Jira issue URL) is woven into the body when given.
-pub fn pr_summary(worktree: &str, diff: &str, ticket_ref: Option<&str>) -> Result<String> {
+/// (on `model`) so Claude can discover the repo's PR template(s) and conform to the most relevant
+/// one; the diff is piped on stdin. `ticket_ref` (e.g. a Jira issue URL) is woven into the body.
+pub fn pr_summary(
+    worktree: &str,
+    diff: &str,
+    ticket_ref: Option<&str>,
+    model: &str,
+) -> Result<String> {
     let reference = match ticket_ref {
         Some(r) if !r.trim().is_empty() => {
             format!(" Include this reference to the originating ticket in the body: {r}.")
@@ -37,33 +39,13 @@ pub fn pr_summary(worktree: &str, diff: &str, ticket_ref: Option<&str>) -> Resul
          first line, or the first heading)."
     );
 
-    let mut child = Command::new("claude")
-        .arg("-p")
-        .arg(&prompt)
-        .arg("--permission-mode")
-        .arg("plan")
-        .current_dir(worktree)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| crate::cmd_err::spawn_error("claude", &e))?;
-    // Pipe the (truncated) diff to stdin, then close it so claude can finish.
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(truncate_diff(diff, MAX_DIFF_BYTES).as_bytes());
-    }
-    let out = child
-        .wait_with_output()
-        .map_err(|e| crate::cmd_err::spawn_error("claude", &e))?;
-    if !out.status.success() {
-        return Err(crate::cmd_err::classify(
-            "claude",
-            &String::from_utf8_lossy(&out.stderr),
-        ));
-    }
-    Ok(sanitize_pr_description(&String::from_utf8_lossy(
-        &out.stdout,
-    )))
+    let raw = crate::claude::run_headless(
+        worktree,
+        &prompt,
+        &truncate_diff(diff, MAX_DIFF_BYTES),
+        model,
+    )?;
+    Ok(sanitize_pr_description(&raw))
 }
 
 /// Sentinel the model returns when the PR description is still accurate (no update needed).
@@ -78,6 +60,7 @@ pub fn maybe_update_pr_description(
     current_body: &str,
     diff: &str,
     ticket_ref: Option<&str>,
+    model: &str,
 ) -> Result<Option<String>> {
     let reference = match ticket_ref {
         Some(r) if !r.trim().is_empty() => {
@@ -102,30 +85,8 @@ pub fn maybe_update_pr_description(
         truncate_diff(diff, MAX_DIFF_BYTES)
     );
 
-    let mut child = Command::new("claude")
-        .arg("-p")
-        .arg(&prompt)
-        .arg("--permission-mode")
-        .arg("plan")
-        .current_dir(worktree)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| crate::cmd_err::spawn_error("claude", &e))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(stdin_body.as_bytes());
-    }
-    let out = child
-        .wait_with_output()
-        .map_err(|e| crate::cmd_err::spawn_error("claude", &e))?;
-    if !out.status.success() {
-        return Err(crate::cmd_err::classify(
-            "claude",
-            &String::from_utf8_lossy(&out.stderr),
-        ));
-    }
-    Ok(interpret_pr_update(&String::from_utf8_lossy(&out.stdout)))
+    let raw = crate::claude::run_headless(worktree, &prompt, &stdin_body, model)?;
+    Ok(interpret_pr_update(&raw))
 }
 
 /// Interpret the model's response to the description-staleness check: `None` when it declined to

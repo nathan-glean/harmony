@@ -33,6 +33,10 @@ export function App() {
   const [sessions, setSessions] = useState<SessionView[]>([]);
   const [worktrees, setWorktrees] = useState<WorktreeView[]>([]);
   const [liveSessionIds, setLiveSessionIds] = useState<Set<number>>(new Set());
+  // Sessions that were live when the app last closed. We do NOT auto-resume them (resuming replays
+  // the whole prior conversation and re-does work — a big token sink); instead we surface a manual
+  // "Resume" affordance so the user opts in.
+  const [resumable, setResumable] = useState<Set<number>>(new Set());
   // Tickets whose PR is being created in the background (show a loading indicator).
   const [openingPr, setOpeningPr] = useState<Set<number>>(new Set());
   // Active tab in the ticket modal.
@@ -114,9 +118,34 @@ export function App() {
     setSelected(ticket);
     setView("board");
     if (liveSessions[ticket.id]) return; // already attached in this run
+    // Opening the terminal is an explicit opt-in to (re)start this session, so clear any paused mark.
+    setResumable((s) => {
+      if (!s.has(ticket.id)) return s;
+      const next = new Set(s);
+      next.delete(ticket.id);
+      return next;
+    });
     const sid = await api.startSession(ticket.id, null);
     setLiveSessions((m) => ({ ...m, [ticket.id]: sid }));
     await refresh();
+  };
+
+  // Manually resume every session paused at last shutdown (opt-in — see `resumable`). Per-ticket
+  // resume happens implicitly via `openTerminal` (opening a paused ticket's terminal starts it).
+  const resumeAllSessions = async () => {
+    const ids = [...resumable];
+    setResumable(new Set());
+    for (const id of ids) {
+      try {
+        if (!liveSessions[id]) {
+          const sid = await api.startSession(id, null);
+          setLiveSessions((m) => ({ ...m, [id]: sid }));
+        }
+      } catch {
+        /* skip ones that can't resume */
+      }
+    }
+    if (ids.length) await refresh();
   };
 
   // Switch the session view. A user click persists the choice globally; the auto-switch escape
@@ -282,20 +311,14 @@ export function App() {
     api.getSessionViewMode().then(setViewMode).catch(() => {});
   }, []);
 
-  // Reattach on launch: resume sessions that were live when the app last closed.
+  // On launch: surface (don't auto-resume) the sessions that were live when the app last closed.
+  // Auto-resuming replays the entire prior conversation and often re-does already-finished work — a
+  // large, silent token spend. Instead we show a "Resume" banner and let the user opt in per ticket.
   useEffect(() => {
     api
       .pendingReattach()
-      .then(async (ids) => {
-        for (const id of ids) {
-          try {
-            const sid = await api.startSession(id, null);
-            setLiveSessions((m) => ({ ...m, [id]: sid }));
-          } catch {
-            /* couldn't reattach this one */
-          }
-        }
-        if (ids.length) refresh();
+      .then((ids) => {
+        if (ids.length) setResumable(new Set(ids));
       })
       .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -574,6 +597,20 @@ export function App() {
           <button onClick={() => setShowConnect((v) => !v)}>Connect Jira</button>
         )}
       </header>
+
+      {resumable.size > 0 && (
+        <div className="resume-banner">
+          <span>
+            {resumable.size} session{resumable.size === 1 ? "" : "s"} paused when the app last closed.
+            They were <strong>not</strong> auto-resumed (to avoid re-spending tokens).
+          </span>
+          <span className="spacer" />
+          <button onClick={resumeAllSessions}>Resume all</button>
+          <button className="ghost" onClick={() => setResumable(new Set())}>
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {showNew && (
         <div className="connect">

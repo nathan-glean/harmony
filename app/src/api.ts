@@ -81,6 +81,8 @@ export const api = {
     invoke<TicketAction[]>("list_actions", { limit: limit ?? null }),
   getMaxConcurrent: () => invoke<number>("get_max_concurrent"),
   setMaxConcurrent: (n: number) => invoke<void>("set_max_concurrent", { n }),
+  getTriageModel: () => invoke<string>("get_triage_model"),
+  setTriageModel: (model: string) => invoke<void>("set_triage_model", { model }),
   getAutoEndIdle: () => invoke<boolean>("get_auto_end_idle"),
   setAutoEndIdle: (enabled: boolean) => invoke<void>("set_auto_end_idle", { enabled }),
   getPrDescAutoupdate: () => invoke<boolean>("get_pr_desc_autoupdate"),

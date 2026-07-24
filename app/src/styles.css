@@ -55,6 +55,15 @@ body {
   .running-badge.active .running-dot { animation: none; }
 }
 
+/* Paused-sessions banner: shown on launch when sessions were live at last shutdown (manual resume). */
+.resume-banner {
+  display: flex; align-items: center; gap: 12px;
+  padding: 8px 16px; font-size: 13px;
+  background: var(--panel2); border-bottom: 1px solid var(--border); color: var(--text);
+}
+.resume-banner .spacer { flex: 1; }
+.resume-banner button.ghost { background: transparent; color: var(--muted); }
+
 .sessions { flex: 1; overflow: auto; padding: 16px; }
 
 /* Orchestrator tab: live status header + decision feed. */

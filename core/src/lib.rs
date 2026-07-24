@@ -8,6 +8,7 @@
 
 pub mod activity;
 pub mod ci;
+pub mod claude;
 pub mod cmd_err;
 pub mod draft;
 pub mod flow;

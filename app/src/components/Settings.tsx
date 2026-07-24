@@ -36,6 +36,7 @@ export function Settings({
   const [autoMerge, setAutoMerge] = useState(false);
   const [orchestrator, setOrchestrator] = useState(false);
   const [maxConcurrent, setMaxConcurrent] = useState(3);
+  const [triageModel, setTriageModel] = useState("");
 
   useEffect(() => {
     api.getPermissionMode().then(setMode).catch(() => {});
@@ -47,6 +48,7 @@ export function Settings({
     api.getAutoMerge().then(setAutoMerge).catch(() => {});
     api.getOrchestrator().then(setOrchestrator).catch(() => {});
     api.getMaxConcurrent().then(setMaxConcurrent).catch(() => {});
+    api.getTriageModel().then(setTriageModel).catch(() => {});
   }, []);
 
   const changeMode = (m: string) => {
@@ -100,6 +102,12 @@ export function Settings({
     const v = Math.max(1, Math.floor(n || 1));
     setMaxConcurrent(v);
     api.setMaxConcurrent(v).catch(() => {});
+  };
+
+  const changeTriageModel = (m: string) => {
+    const v = m.trim();
+    setTriageModel(v);
+    api.setTriageModel(v).catch(() => {});
   };
 
   const commitRename = (r: Repo) => {
@@ -174,6 +182,26 @@ export function Settings({
             style={{ width: 56, marginLeft: 8 }}
           />
         </label>
+        <label className="muted" title="Model for the background one-shot `claude -p` calls (review judge, re-verification triage, CI-failure triage, PR-description drafting, orchestrator judgments). These emit short verdicts, so a cheap model is plenty and saves a lot of tokens. Interactive coding sessions always use your default model. Leave blank to use your account default.">
+          Triage / judge model
+          <input
+            type="text"
+            value={triageModel}
+            placeholder="account default"
+            onChange={(e) => setTriageModel(e.target.value)}
+            onBlur={(e) => changeTriageModel(e.target.value)}
+            list="triage-model-suggestions"
+            style={{ width: 180, marginLeft: 8 }}
+          />
+          <datalist id="triage-model-suggestions">
+            <option value="claude-haiku-4-5" />
+            <option value="claude-sonnet-5" />
+          </datalist>
+        </label>
+        <p className="muted" style={{ margin: "2px 2px 0", fontSize: 12 }}>
+          Background judgments (review verdicts, triage, PR summaries) run on this model —
+          cheap by default (Haiku). Interactive sessions keep your default. Blank = account default.
+        </p>
       </div>
 
       <h3>Repositories</h3>

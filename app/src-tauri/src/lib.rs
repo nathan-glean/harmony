@@ -63,9 +63,12 @@ struct AppState {
     /// Session ids the user deliberately stopped, so their non-zero exit isn't mistaken for a
     /// crash. The wait-task removes the id once it has handled the exit.
     stopping: Arc<Mutex<HashSet<i64>>>,
-    /// Session ids the stuck-session watchdog has already fired a recovery event for, so it doesn't
-    /// re-fire each tick (for events that don't tear the session down). Cleared on session exit.
-    watchdog_fired: Arc<Mutex<HashSet<i64>>>,
+    /// Sessions the stuck-session watchdog has already acted on this idle episode → the transcript
+    /// mtime (epoch secs) at the time it fired. It skips a session until its transcript advances past
+    /// this mark (new output), then re-arms — so a `Working`/errored judge verdict is *not* re-run on
+    /// every 60s tick. `u64::MAX` means "handled permanently" (a recovery that ends the session).
+    /// Cleared on session exit.
+    watchdog_fired: Arc<Mutex<HashMap<i64, u64>>>,
     /// Live orchestrator status for the Orchestrator tab (last tick time + any in-flight decision).
     /// In-memory only (reset on restart); the durable history is the `orchestrator_events` log.
     orchestrator_status: Arc<Mutex<OrchestratorStatus>>,
@@ -966,6 +969,12 @@ async fn open_pr_for(store: &Store, ticket_id: i64) -> Result<String, String> {
         ticket_id,
     );
 
+    let model = store
+        .get_setting("triage_model")
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| harmony_core::claude::DEFAULT_TRIAGE_MODEL.to_string());
     let url = tokio::task::spawn_blocking(move || -> Result<String, String> {
         // Commit any leftover uncommitted work (e.g. edits made directly during human review) so
         // the branch isn't empty, then refuse clearly if there's still nothing to PR.
@@ -981,6 +990,7 @@ async fn open_pr_for(store: &Store, ticket_id: i64) -> Result<String, String> {
             &repo_path,
             ticket_ref.as_deref(),
             &fallback,
+            &model,
         );
         harmony_core::github::push_branch(&path, &branch).map_err(|e| e.to_string())?;
         let url = harmony_core::github::create_pr(&path, &title, &body, &branch)
@@ -1236,11 +1246,12 @@ async fn poll_reverify_once(state: &AppState) {
         };
         // Classify the delta since `last`: heuristic fast-path, else one read-only `claude -p`.
         let path = wt.path.clone();
+        let model = triage_model(state).await;
         let decision = tokio::task::spawn_blocking(move || {
             let names = harmony_core::github::changed_files_since(&path, &last).unwrap_or_default();
             let changed = harmony_core::reverify::changed_paths(&names);
             let diff = harmony_core::github::diff_between(&path, &last).unwrap_or_default();
-            harmony_core::reverify::decide(&path, &changed, &diff)
+            harmony_core::reverify::decide(&path, &changed, &diff, &model)
         })
         .await
         .unwrap_or(harmony_core::reverify::Decision::FULL);
@@ -1382,11 +1393,12 @@ async fn poll_review_loop_once(app: &AppHandle, state: &AppState) {
                 ticket.review_text.clone(),
                 repo_path.clone(),
             );
+            let model = triage_model(state).await;
             tokio::task::spawn_blocking(move || {
                 let base = harmony_core::worktree::default_branch(&repo_path)
                     .unwrap_or_else(|_| "main".into());
                 let diff = harmony_core::github::diff(&path, &base).unwrap_or_default();
-                harmony_core::review::judge(&path, &review_text, &diff)
+                harmony_core::review::judge(&path, &review_text, &diff, &model)
             })
             .await
         };
@@ -1817,6 +1829,33 @@ fn file_idle_secs(path: &str) -> Option<u64> {
     modified.elapsed().ok().map(|d| d.as_secs())
 }
 
+/// A file's last-modified time as epoch seconds, or `None` if it can't be read. Used to detect fresh
+/// transcript output (a monotonic-ish marker for the stuck-session watchdog's re-arm).
+fn file_mtime_secs(path: &str) -> Option<u64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
+}
+
+/// The stuck-session watchdog's per-session gate, given the transcript mtime it last fired at (if
+/// any) and the current mtime. `Skip` = already handled this idle episode (don't re-judge); `Proceed`
+/// = never fired, or the transcript advanced since (re-arm). Pure, for testability. A recorded
+/// `u64::MAX` (a terminal recovery) always skips — no real mtime can exceed it.
+#[derive(Debug, PartialEq, Eq)]
+enum WatchdogArm {
+    Proceed,
+    Skip,
+}
+
+fn watchdog_arm(recorded: Option<u64>, current_mtime: u64) -> WatchdogArm {
+    match recorded {
+        Some(at) if current_mtime <= at => WatchdogArm::Skip,
+        _ => WatchdogArm::Proceed,
+    }
+}
+
 /// Stuck-session watchdog (always-on recovery). Harmony advances the flow off Claude Code hooks
 /// (`Stop` for work, plan-file write for review), but those are sometimes missed — plan-mode sessions
 /// don't reliably fire `Stop`, and a cwd/plan-path mismatch drops the event silently — so a finished
@@ -1832,14 +1871,14 @@ fn file_idle_secs(path: &str) -> Option<u64> {
 async fn poll_stuck_sessions_once(app: &AppHandle, state: &AppState) {
     use harmony_core::session::TurnState;
 
-    // Snapshot the live (session_id, ticket_id) pairs, skipping ones already being stopped or
-    // already recovered, so we don't hold the lock across awaits.
+    // Snapshot the live (session_id, ticket_id) pairs, skipping ones already being stopped, so we
+    // don't hold the lock across awaits. (Already-fired sessions are handled per-session below, where
+    // we can re-arm them once their transcript advances.)
     let live: Vec<(i64, i64)> = {
         let map = state.sessions.lock().unwrap();
         let stopping = state.stopping.lock().unwrap();
-        let fired = state.watchdog_fired.lock().unwrap();
         map.iter()
-            .filter(|(sid, _)| !stopping.contains(sid) && !fired.contains(sid))
+            .filter(|(sid, _)| !stopping.contains(sid))
             .map(|(sid, io)| (*sid, io.ticket_id))
             .collect()
     };
@@ -1857,6 +1896,19 @@ async fn poll_stuck_sessions_once(app: &AppHandle, state: &AppState) {
             Ok(Some(p)) => p,
             _ => continue, // no transcript yet — nothing to judge
         };
+        let mtime = file_mtime_secs(&path).unwrap_or(0);
+        // Re-arm or skip: once we've acted on an idle episode we recorded the transcript mtime. Skip
+        // this session until the transcript advances past that mark (fresh output), then clear the
+        // mark so a later stall is judged exactly once more — never every tick.
+        {
+            let mut fired = state.watchdog_fired.lock().unwrap();
+            match watchdog_arm(fired.get(&session_id).copied(), mtime) {
+                WatchdogArm::Skip => continue,
+                WatchdogArm::Proceed => {
+                    fired.remove(&session_id);
+                }
+            }
+        }
         let idle = match file_idle_secs(&path) {
             Some(s) => s,
             None => continue,
@@ -1892,9 +1944,10 @@ async fn poll_stuck_sessions_once(app: &AppHandle, state: &AppState) {
                 .await
                 .unwrap_or_default();
                 set_deciding(app, state, Some((ticket_id, "judging stuck session")));
+                let model = triage_model(state).await;
                 let verdict = tokio::task::spawn_blocking({
                     let wt = wt.path.clone();
-                    move || harmony_core::orchestrator::judge_stuck(&wt, &tail)
+                    move || harmony_core::orchestrator::judge_stuck(&wt, &tail, &model)
                 })
                 .await;
                 set_deciding(app, state, None);
@@ -1914,10 +1967,22 @@ async fn poll_stuck_sessions_once(app: &AppHandle, state: &AppState) {
                             .await;
                         // Mark handled so we don't re-judge every tick; store_activity fires the
                         // "needs you" notification via the activity pill.
-                        state.watchdog_fired.lock().unwrap().insert(session_id);
+                        state
+                            .watchdog_fired
+                            .lock()
+                            .unwrap()
+                            .insert(session_id, mtime);
                         store_activity(app, state, ticket_id).await;
                     }
-                    _ => {} // Working / judge failed → leave for the next tick or the human
+                    // Working / judge failed → record the mtime so we don't re-judge every tick; it
+                    // re-arms automatically once the session produces new output.
+                    _ => {
+                        state
+                            .watchdog_fired
+                            .lock()
+                            .unwrap()
+                            .insert(session_id, mtime);
+                    }
                 }
             }
             // Clear-cut: the turn finished but the completion event never arrived — re-fire it.
@@ -1950,7 +2015,11 @@ async fn poll_stuck_sessions_once(app: &AppHandle, state: &AppState) {
                                     &state_fingerprint("stuck-review", &ticket_id.to_string()),
                                 )
                                 .await;
-                            state.watchdog_fired.lock().unwrap().insert(session_id);
+                            state
+                                .watchdog_fired
+                                .lock()
+                                .unwrap()
+                                .insert(session_id, mtime);
                             store_activity(app, state, ticket_id).await;
                         }
                         continue;
@@ -1983,7 +2052,12 @@ async fn recover_finished_session(
     // no-op (the `user_question_pending` gate in flow::decide).
     let _ = state.store.clear_ticket_question(ticket_id).await;
 
-    state.watchdog_fired.lock().unwrap().insert(session_id);
+    // Terminal: this fires a finish event that ends the session, so never re-arm.
+    state
+        .watchdog_fired
+        .lock()
+        .unwrap()
+        .insert(session_id, u64::MAX);
     let event = finish_event_for_kind(&kind);
     eprintln!("[watchdog] #{ticket_id} finished-but-stuck ({kind}) → {event:?}");
     if let Err(e) = apply_event(app, state, ticket_id, event, false).await {
@@ -2124,9 +2198,10 @@ async fn orchestrator_answer_question(
     };
     let spec = harmony_core::spec::compose_spec(ticket);
     let (path, q, opts) = (wt.path.clone(), question.clone(), options.clone());
+    let model = triage_model(state).await;
     set_deciding(app, state, Some((ticket.id, "answering question")));
     let decision = tokio::task::spawn_blocking(move || {
-        harmony_core::orchestrator::answer_question(&path, &q, &opts, multi, &spec)
+        harmony_core::orchestrator::answer_question(&path, &q, &opts, multi, &spec, &model)
     })
     .await;
     set_deciding(app, state, None);
@@ -2176,9 +2251,10 @@ async fn orchestrator_judge_spec(app: &AppHandle, state: &AppState, ticket: &Tic
     };
     let current = harmony_core::spec::compose_spec(ticket);
     let (path, proposed) = (wt.path.clone(), ticket.proposed_spec.clone());
+    let model = triage_model(state).await;
     set_deciding(app, state, Some((ticket.id, "judging spec")));
     let decision = tokio::task::spawn_blocking(move || {
-        harmony_core::orchestrator::judge_spec(&path, &current, &proposed)
+        harmony_core::orchestrator::judge_spec(&path, &current, &proposed, &model)
     })
     .await;
     set_deciding(app, state, None);
@@ -2283,11 +2359,12 @@ async fn triage_and_maybe_fix(
     // Full triage (gh + LLM attribution) off-thread.
     let triage = {
         let (path, repo_path) = (path.clone(), repo_path.clone());
+        let model = triage_model(state).await;
         tokio::task::spawn_blocking(move || {
             let base = harmony_core::worktree::default_branch(&repo_path)
                 .unwrap_or_else(|_| "main".into());
             let diff = harmony_core::github::diff(&path, &base).unwrap_or_default();
-            harmony_core::ci::triage(&path, &base, &diff)
+            harmony_core::ci::triage(&path, &base, &diff, &model)
         })
         .await
         .map_err(|e| e.to_string())?
@@ -2378,6 +2455,27 @@ async fn update_pr_description(app: &AppHandle, state: &AppState, ticket_id: i64
         Some(r) => r,
         None => return,
     };
+    // Gate the `claude -p` to once per HEAD: a fix/address/CI-fix session can push several commits,
+    // and re-drafting on every push is pure waste. The `pr_desc` action fingerprints the HEAD we've
+    // already considered; a manual `force` bypasses it. (No PR-desc regen ⇒ no wasted call.)
+    let head = {
+        let p = wt.path.clone();
+        tokio::task::spawn_blocking(move || harmony_core::github::head_sha(&p).unwrap_or_default())
+            .await
+            .unwrap_or_default()
+    };
+    if head.is_empty() {
+        return;
+    }
+    if !force
+        && state
+            .store
+            .has_action_at(ticket_id, "pr_desc", &head)
+            .await
+            .unwrap_or(false)
+    {
+        return;
+    }
     // Jira browse URL woven into the body (kept across updates), as in `open_pr_for`.
     let ticket_ref: Option<String> = match ticket.jira_key.as_deref() {
         Some(key) => Some(match harmony_core::jira::connected_site().await {
@@ -2387,6 +2485,7 @@ async fn update_pr_description(app: &AppHandle, state: &AppState, ticket_id: i64
         None => None,
     };
     let (path, repo_path) = (wt.path.clone(), repo.path.clone());
+    let model = triage_model(state).await;
     let updated = tokio::task::spawn_blocking(move || {
         let body = harmony_core::github::pr_body(&path)?;
         let base =
@@ -2397,6 +2496,7 @@ async fn update_pr_description(app: &AppHandle, state: &AppState, ticket_id: i64
             &body,
             &diff,
             ticket_ref.as_deref(),
+            &model,
         ) {
             Ok(Some(new_body)) => {
                 let _ = harmony_core::github::update_pr_body(&path, &new_body);
@@ -2409,6 +2509,12 @@ async fn update_pr_description(app: &AppHandle, state: &AppState, ticket_id: i64
     .ok()
     .flatten()
     .unwrap_or(false);
+    // Record that this HEAD has been considered (updated or not) so the next push at the same commit
+    // doesn't re-run the call.
+    let _ = state
+        .store
+        .record_state_action(ticket_id, "pr_desc", &head, "")
+        .await;
     if updated {
         let _ = app.emit("ticket-updated", ticket_id);
     }
@@ -2695,6 +2801,34 @@ async fn set_max_concurrent(state: State<'_, AppState>, n: u32) -> Result<(), St
     state
         .store
         .set_setting("max_concurrent", &n.to_string())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// The model for every headless `claude -p` triage/judgment call (review judge, reverify triage, CI
+/// triage, orchestrator judges, PR-description drafting). Cheap by default (`DEFAULT_TRIAGE_MODEL`);
+/// an explicit empty string means "use the account default model". Interactive coding sessions are
+/// unaffected — they always run on the user's default.
+async fn triage_model(state: &AppState) -> String {
+    state
+        .store
+        .get_setting("triage_model")
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| harmony_core::claude::DEFAULT_TRIAGE_MODEL.to_string())
+}
+
+#[tauri::command]
+async fn get_triage_model(state: State<'_, AppState>) -> Result<String, String> {
+    Ok(triage_model(&state).await)
+}
+
+#[tauri::command]
+async fn set_triage_model(state: State<'_, AppState>, model: String) -> Result<(), String> {
+    state
+        .store
+        .set_setting("triage_model", model.trim())
         .await
         .map_err(|e| e.to_string())
 }
@@ -3496,15 +3630,33 @@ async fn apply_event(
         .await
         .map_err(|e| e.to_string())?
         .ok_or("no such ticket")?;
-    // A fresh autonomous work cycle just finished → reset the review loop's bookkeeping so the
-    // upcoming review episode (and its attempt cap) starts clean, and clear the orchestrator's
-    // crash-restart counter (work progressed legitimately).
+    // A work session finished → clear the orchestrator's crash-restart counter (work progressed).
+    // The review/proof attempt caps are only reset for a *genuinely new* change-set: the branch must
+    // have advanced past the last-reviewed commit. This stops a watchdog/restart re-fire of an
+    // already-reviewed WorkFinished from reopening a burned-out review/proof loop and re-spending
+    // tokens on work that was already verified.
     if event == Event::WorkFinished {
-        let _ = state.store.reset_review_loop(ticket_id).await;
         let _ = state.store.reset_restart_attempts(ticket_id).await;
-        // Fresh work cycle → the prior proof no longer describes the change; regenerate it after the
-        // upcoming review settles.
-        let _ = state.store.reset_proof(ticket_id).await;
+        let head = match state.store.primary_worktree_for_ticket(ticket_id).await {
+            Ok(Some(wt)) => tokio::task::spawn_blocking(move || {
+                harmony_core::github::head_sha(&wt.path).unwrap_or_default()
+            })
+            .await
+            .unwrap_or_default(),
+            _ => String::new(),
+        };
+        let already_reviewed = !head.is_empty()
+            && state
+                .store
+                .has_action_at(ticket_id, "review", &head)
+                .await
+                .unwrap_or(false);
+        if !already_reviewed {
+            // Fresh change-set → the upcoming review episode (and its cap) starts clean, and the
+            // prior proof no longer describes the change, so regenerate it after review settles.
+            let _ = state.store.reset_review_loop(ticket_id).await;
+            let _ = state.store.reset_proof(ticket_id).await;
+        }
     }
     // Review completion is normally captured from the plan-file/ExitPlanMode PreToolUse hook, but a
     // plan-mode `/review` presents its verdict via ExitPlanMode and that hook is sometimes missed —
@@ -3950,7 +4102,7 @@ pub fn run() {
                     sessions: Arc::new(Mutex::new(HashMap::new())),
                     reattach: Mutex::new(reattach),
                     stopping: Arc::new(Mutex::new(HashSet::new())),
-                    watchdog_fired: Arc::new(Mutex::new(HashSet::new())),
+                    watchdog_fired: Arc::new(Mutex::new(HashMap::new())),
                     orchestrator_status: Arc::new(Mutex::new(OrchestratorStatus::default())),
                 });
                 // Recover sessions that had already finished before the restart: re-fire the
@@ -4111,6 +4263,8 @@ pub fn run() {
             list_actions,
             get_max_concurrent,
             set_max_concurrent,
+            get_triage_model,
+            set_triage_model,
             get_pr_desc_autoupdate,
             set_pr_desc_autoupdate,
             update_pr_description_now,
@@ -4165,6 +4319,19 @@ mod tests {
             restart_action("proof", TurnState::Working, false),
             RestartAction::Drop
         );
+    }
+
+    #[test]
+    fn watchdog_arm_skips_until_transcript_advances() {
+        // Never fired → proceed (judge it).
+        assert_eq!(watchdog_arm(None, 100), WatchdogArm::Proceed);
+        // Already fired at this mtime, no new output → skip (no re-judge every tick).
+        assert_eq!(watchdog_arm(Some(100), 100), WatchdogArm::Skip);
+        assert_eq!(watchdog_arm(Some(100), 90), WatchdogArm::Skip);
+        // Transcript advanced past the fire mark → re-arm (judge once more).
+        assert_eq!(watchdog_arm(Some(100), 101), WatchdogArm::Proceed);
+        // A terminal recovery (u64::MAX) always skips — the session is being torn down.
+        assert_eq!(watchdog_arm(Some(u64::MAX), u64::MAX), WatchdogArm::Skip);
     }
 
     #[test]

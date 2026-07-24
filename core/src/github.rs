@@ -54,13 +54,14 @@ pub fn generated_pr_body(
     repo_path: &str,
     ticket_ref: Option<&str>,
     fallback: &str,
+    model: &str,
 ) -> String {
     let base = crate::worktree::default_branch(repo_path).unwrap_or_else(|_| "main".into());
     let diff = match diff(worktree, &base) {
         Ok(d) if !d.trim().is_empty() => d,
         _ => return fallback.to_string(),
     };
-    match crate::draft::pr_summary(worktree, &diff, ticket_ref) {
+    match crate::draft::pr_summary(worktree, &diff, ticket_ref, model) {
         Ok(s) if !s.trim().is_empty() => s,
         _ => fallback.to_string(),
     }

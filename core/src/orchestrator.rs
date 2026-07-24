@@ -9,9 +9,6 @@
 //! human, so every parser fails safe to `Escalate`, and the prompts make escalation the default for
 //! genuine judgment calls (ambiguous direction, product/UX/risk/scope trade-offs).
 
-use std::io::Write;
-use std::process::{Command, Stdio};
-
 use anyhow::Result;
 
 /// The conductor's decision on a worker's outstanding `AskUserQuestion`.
@@ -33,43 +30,16 @@ pub enum SpecDecision {
     Escalate { reason: String },
 }
 
-/// Run a one-shot read-only `claude -p` in the worktree with `stdin_body` piped in; return stdout.
-fn run_claude_p(worktree: &str, prompt: &str, stdin_body: &str) -> Result<String> {
-    let mut child = Command::new("claude")
-        .arg("-p")
-        .arg(prompt)
-        .arg("--permission-mode")
-        .arg("plan")
-        .current_dir(worktree)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| crate::cmd_err::spawn_error("claude", &e))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(stdin_body.as_bytes());
-    }
-    let out = child
-        .wait_with_output()
-        .map_err(|e| crate::cmd_err::spawn_error("claude", &e))?;
-    if !out.status.success() {
-        return Err(crate::cmd_err::classify(
-            "claude",
-            &String::from_utf8_lossy(&out.stderr),
-        ));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
-}
-
 /// Decide how to answer a worker's `AskUserQuestion`, or escalate to the human. `options` are the
-/// choice labels (0-based); `spec` is the ticket's agreed spec. Runs read-only in the worktree so
-/// the conductor can consult the repo.
+/// choice labels (0-based); `spec` is the ticket's agreed spec. Runs read-only in the worktree (on
+/// `model`) so the conductor can consult the repo.
 pub fn answer_question(
     worktree: &str,
     question: &str,
     options: &[String],
     multi_select: bool,
     spec: &str,
+    model: &str,
 ) -> Result<QDecision> {
     let opts = options
         .iter()
@@ -100,7 +70,7 @@ pub fn answer_question(
         question.trim(),
         opts
     );
-    let raw = run_claude_p(worktree, &prompt, &stdin_body)?;
+    let raw = crate::claude::run_headless(worktree, &prompt, &stdin_body, model)?;
     Ok(parse_q(&raw))
 }
 
@@ -143,7 +113,12 @@ fn parse_q(raw: &str) -> QDecision {
 }
 
 /// Decide whether to accept a proposed spec revision, or escalate. Read-only in the worktree.
-pub fn judge_spec(worktree: &str, current_spec: &str, proposed_spec: &str) -> Result<SpecDecision> {
+pub fn judge_spec(
+    worktree: &str,
+    current_spec: &str,
+    proposed_spec: &str,
+    model: &str,
+) -> Result<SpecDecision> {
     let prompt =
         "You are the orchestrator of an autonomous coding loop. A worker proposed a revision to the \
          ticket's agreed spec (CURRENT and PROPOSED on stdin, separated by `=== PROPOSED ===`). \
@@ -157,7 +132,7 @@ pub fn judge_spec(worktree: &str, current_spec: &str, proposed_spec: &str) -> Re
         current_spec.trim(),
         proposed_spec.trim()
     );
-    let raw = run_claude_p(worktree, &prompt, &stdin_body)?;
+    let raw = crate::claude::run_headless(worktree, &prompt, &stdin_body, model)?;
     Ok(parse_spec(&raw))
 }
 
@@ -197,7 +172,7 @@ pub enum StuckVerdict {
 /// (idle a long time but the last record isn't a clean finished turn — e.g. a possibly-hung tool).
 /// The tail of the transcript is piped on stdin. Read-only. Fail-safe: anything unrecognised →
 /// `Working` (never advance on doubt).
-pub fn judge_stuck(worktree: &str, transcript_tail: &str) -> Result<StuckVerdict> {
+pub fn judge_stuck(worktree: &str, transcript_tail: &str, model: &str) -> Result<StuckVerdict> {
     let prompt =
         "You monitor an autonomous coding loop. A worker session has produced no new transcript \
          output for a while; the tail of its transcript is on stdin. Decide its state and respond \
@@ -208,7 +183,7 @@ pub fn judge_stuck(worktree: &str, transcript_tail: &str) -> Result<StuckVerdict
          - `ESCALATE <reason>` — it is stuck, errored, or looping and a human should look.\n\
          When unsure, answer WORKING."
             .to_string();
-    let raw = run_claude_p(worktree, &prompt, transcript_tail)?;
+    let raw = crate::claude::run_headless(worktree, &prompt, transcript_tail, model)?;
     Ok(parse_stuck(&raw))
 }
 
