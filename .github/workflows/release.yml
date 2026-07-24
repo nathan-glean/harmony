@@ -1,9 +1,10 @@
 name: Release
 
 # Cut a GitHub Release with an installable macOS .dmg whenever a v* tag is pushed.
-# Flow: bump the version (tauri.conf.json + the two Cargo.toml + package.json), commit
-# "Release vX.Y.Z", then `git tag vX.Y.Z && git push --tags`. tauri-action builds the
-# bundle and uploads it. `workflow_dispatch` builds without publishing (a dry run).
+# Flow: `task release -- <bump>` bumps every version file in lockstep on a release branch,
+# opens+merges a PR into main, then tags the merged commit vX.Y.Z and pushes the tag — which
+# fires this workflow. tauri-action builds the bundle and uploads it. `workflow_dispatch`
+# builds without publishing (a dry run).
 on:
   push:
     tags:
