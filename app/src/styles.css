@@ -32,6 +32,29 @@ body {
 .nav { display: flex; gap: 4px; }
 .nav button.active { border-color: var(--accent); color: var(--accent); }
 
+/* Soft "N running" concurrency indicator (no hard cap) — lives in the topbar. */
+.running-badge {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: 12px; color: var(--muted);
+}
+.running-badge .running-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--muted); flex: none;
+}
+.running-badge.active { color: var(--text); border-color: var(--accent); }
+.running-badge.active .running-dot {
+  background: #9ece6a; box-shadow: 0 0 0 0 rgba(158, 206, 106, 0.6);
+  animation: running-pulse 1.8s ease-out infinite;
+}
+@keyframes running-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(158, 206, 106, 0.55); }
+  70% { box-shadow: 0 0 0 6px rgba(158, 206, 106, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(158, 206, 106, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .running-badge.active .running-dot { animation: none; }
+}
+
 .sessions { flex: 1; overflow: auto; padding: 16px; }
 
 /* Orchestrator tab: live status header + decision feed. */
