@@ -1,0 +1,27 @@
+#!/bin/sh
+# Catch the common formatting/typecheck slips locally before they burn a CI run.
+# Check-and-fail only — this hook never modifies or re-stages files. Clippy and the
+# test suites stay in CI. No-op when nothing relevant is staged.
+
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+
+# Rust: fail on formatting drift (fix with `task fmt`, then re-stage).
+if printf '%s\n' "$staged" | grep -q '\.rs$'; then
+	export PATH="$HOME/.cargo/bin:$PATH"
+	echo "pre-commit: checking Rust formatting (cargo fmt --all --check)…"
+	cargo fmt --all --check || {
+		echo "pre-commit: formatting drift — run \`task fmt\` and re-stage." >&2
+		exit 1
+	}
+fi
+
+# TypeScript: type-check the whole app project (tsc reads app/tsconfig.json).
+if printf '%s\n' "$staged" | grep -Eq '\.tsx?$'; then
+	echo "pre-commit: type-checking frontend (tsc --noEmit)…"
+	(cd app && npx tsc --noEmit) || {
+		echo "pre-commit: type errors — fix them and re-commit." >&2
+		exit 1
+	}
+fi
+
+exit 0

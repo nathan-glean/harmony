@@ -1,18 +1,81 @@
 name: CI
 
-# Runs the same quality gate as `task ci` (fmt → clippy -D warnings → cargo test
-# --workspace [incl. the docs/flow.md drift guard] → tsc → vitest frontend tests) on
-# every push to main and every PR. Runs on macOS (the app's target OS) so no Linux
-# WebKit deps are needed.
+# Runs the same quality gate as `task ci` split into four independent, parallel jobs so
+# each signal (fmt, clippy, cargo test [incl. the docs/flow.md drift guard], and the
+# frontend tsc + vitest) reports on its own instead of waiting behind the others. Runs on
+# macOS (the app's target OS) so no Linux WebKit deps are needed. Each job is slimmed to
+# only the toolchain it needs.
 on:
   push:
     branches: [main]
   pull_request:
     types: [opened, synchronize, reopened]
 
+# Cancel superseded runs on the same ref so rapid pushes don't pile up 10x-billed macOS
+# minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  ci:
-    name: task ci (macOS)
+  rustfmt:
+    name: rustfmt
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check formatting
+        run: task fmt:check
+
+  clippy:
+    name: clippy
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Lint (clippy -D warnings)
+        run: task lint
+
+  rust-test:
+    name: rust-test
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run Rust tests (incl. flow_doc drift guard)
+        run: task test
+
+  frontend:
+    name: frontend
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -23,21 +86,17 @@ jobs:
           cache: npm
           cache-dependency-path: app/package-lock.json
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - uses: Swatinem/rust-cache@v2
-
       - uses: arduino/setup-task@v2
         with:
           version: 3.x
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # `task ci` runs `npx tsc --noEmit`, which needs node_modules.
       - name: Install frontend deps
         working-directory: app
         run: npm ci
 
-      - name: Run CI gate
-        run: task ci
+      - name: Type-check (tsc)
+        run: task app:typecheck
+
+      - name: Unit tests (vitest)
+        run: task app:test
