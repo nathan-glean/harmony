@@ -1778,7 +1778,9 @@ mod tests {
         assert_eq!(
             msgs[1].blocks,
             vec![
-                TranscriptBlock::Text { text: "On it.".into() },
+                TranscriptBlock::Text {
+                    text: "On it.".into()
+                },
                 TranscriptBlock::ToolUse {
                     id: "tu_1".into(),
                     name: "Edit".into(),

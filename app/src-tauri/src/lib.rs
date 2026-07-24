@@ -307,12 +307,12 @@ async fn session_messages(
         .await
         .map_err(|e| e.to_string())?
     {
-        Some(path) => tokio::task::spawn_blocking(move || {
-            harmony_core::session::structured_transcript(&path)
-        })
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string()),
+        Some(path) => {
+            tokio::task::spawn_blocking(move || harmony_core::session::structured_transcript(&path))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())
+        }
         None => Ok(vec![]),
     }
 }
