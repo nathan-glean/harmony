@@ -259,10 +259,18 @@ npm run tauri dev                # launches the desktop window (vite + Tauri)
 Uses the same `~/.harmony/harmony.db` and hook server (:8787) as the CLI.
 
 ## Phase 4 — Polish / hardening
-- [ ] Soft "N running" concurrency indicator (no hard cap).
-- [ ] Worktree GC (offer cleanup on PR merged/closed; manual "remove").
-- [ ] Secret handling review (tokens in keychain, never logged).
-- [ ] Error/edge states: session crash, `gh`/Jira failures, dirty worktree, network loss.
+- [x] Soft "N running" concurrency indicator (no hard cap) — a topbar badge derived from the
+      live-session set (pulses while any session runs, click to jump to Sessions).
+- [x] Worktree GC — a merged/closed PR advances the ticket to **Done** and cleans up its worktree
+      (`poll_pr_state_once`, `Move(Done)` → `DeleteWorktree`); manual delete in the Worktrees view.
+- [x] Secret handling review — harmony holds **no first-party secrets**: Jira/GitHub/Claude auth is
+      owned by `acli`/`gh`/`claude` (their own keychains); no token is stored in the DB, settings, env,
+      or command args. External-command stderr is scrubbed via `cmd_err::redact_secrets` (URL userinfo +
+      known token shapes) before it is logged or toasted, so a credential-embedded git remote can't leak.
+- [~] Error/edge states: session crash (badge + auto-restart), dirty worktree (confirm), stale
+      session/question/drafting cleared on startup, a UI **ErrorBoundary**, redacted `gh`/git/Jira
+      failure messages, and the **action log** keeping idempotency consistent across restarts.
+      `gh`/Jira/network failures otherwise remain log-and-continue (see `BACKLOG.md` #6).
 
 ---
 

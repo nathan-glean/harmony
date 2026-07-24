@@ -534,6 +534,18 @@ export function App() {
         </div>
         <button onClick={() => setShowNew((v) => !v)}>+ New ticket</button>
         <div className="spacer" />
+        <button
+          className={`running-badge${liveSessionIds.size > 0 ? " active" : ""}`}
+          title={
+            liveSessionIds.size > 0
+              ? `${liveSessionIds.size} Claude session(s) running — click to view`
+              : "No sessions running"
+          }
+          onClick={() => setView("sessions")}
+        >
+          <span className="running-dot" />
+          {liveSessionIds.size > 0 ? `${liveSessionIds.size} running` : "idle"}
+        </button>
         {jiraSite ? (
           <>
             <span className="jira-site" title={jiraSite}>

@@ -106,7 +106,7 @@ pub fn install_via_brew() -> Result<String> {
             return Err(anyhow!(
                 "brew {:?} failed: {}",
                 args,
-                String::from_utf8_lossy(&out.stderr).trim()
+                crate::cmd_err::redact_secrets(String::from_utf8_lossy(&out.stderr).trim())
             ));
         }
         Ok(())
