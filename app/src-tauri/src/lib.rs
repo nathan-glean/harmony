@@ -1178,6 +1178,98 @@ async fn auto_review_enabled(state: &AppState) -> bool {
         .unwrap_or(true)
 }
 
+/// One poll pass: proportional re-verification triage. Runs *before* the review/proof pollers. When
+/// a reviewed ticket's HEAD has moved, decide (hybrid: LLM-free heuristic, else one cheap `claude -p`)
+/// whether the delta since the last verified commit actually warrants a fresh review and/or proof.
+/// Whatever ISN'T needed is carried forward — we record the review/judge/proof action at the new HEAD
+/// so those (HEAD-gated) pollers skip it. Meaningful changes are left untouched for them to re-run.
+/// Triaged at most once per HEAD (a `reverify` action fingerprint), and never mid-session.
+async fn poll_reverify_once(state: &AppState) {
+    // Nothing to gate if both auto re-review and proof are off.
+    if !auto_review_enabled(state).await && !proof_enabled(state).await {
+        return;
+    }
+    let tickets = match state.store.list_tickets().await {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    for ticket in tickets {
+        let in_review_stage = matches!(
+            ticket.status.as_str(),
+            harmony_core::status::WAITING | harmony_core::status::IN_REVIEW
+        );
+        if !in_review_stage || ticket.reviewed != 1 || has_live_session(state, ticket.id) {
+            continue;
+        }
+        let wt = match state.store.primary_worktree_for_ticket(ticket.id).await {
+            Ok(Some(wt)) => wt,
+            _ => continue,
+        };
+        let path = wt.path.clone();
+        let head = tokio::task::spawn_blocking(move || {
+            harmony_core::github::head_sha(&path).unwrap_or_default()
+        })
+        .await
+        .unwrap_or_default();
+        if head.is_empty() {
+            continue;
+        }
+        // Review already current at this HEAD, or we've already triaged this HEAD → nothing to do.
+        if state
+            .store
+            .has_action_at(ticket.id, "review", &head)
+            .await
+            .unwrap_or(false)
+            || state
+                .store
+                .has_action_at(ticket.id, "reverify", &head)
+                .await
+                .unwrap_or(false)
+        {
+            continue;
+        }
+        // Need a prior verified commit to diff the incremental change from; if none, the first
+        // review is owned by the column-entry flow, not triage.
+        let last = match state.store.latest_action_head(ticket.id, "review").await {
+            Ok(Some(s)) => s,
+            _ => continue,
+        };
+        // Classify the delta since `last`: heuristic fast-path, else one read-only `claude -p`.
+        let path = wt.path.clone();
+        let decision = tokio::task::spawn_blocking(move || {
+            let names = harmony_core::github::changed_files_since(&path, &last).unwrap_or_default();
+            let changed = harmony_core::reverify::changed_paths(&names);
+            let diff = harmony_core::github::diff_between(&path, &last).unwrap_or_default();
+            harmony_core::reverify::decide(&path, &changed, &diff)
+        })
+        .await
+        .unwrap_or(harmony_core::reverify::Decision::FULL);
+
+        // Fingerprint the triage (idempotency + audit feed), then carry forward what isn't needed.
+        let _ = state
+            .store
+            .record_state_action(ticket.id, "reverify", &head, "")
+            .await;
+        if !decision.needs_review {
+            let _ = state
+                .store
+                .record_state_action(ticket.id, "review", &head, "")
+                .await;
+            let _ = state
+                .store
+                .record_state_action(ticket.id, "judge", &head, "")
+                .await;
+        }
+        if !decision.needs_proof {
+            let _ = state
+                .store
+                .record_state_action(ticket.id, "proof", &head, "")
+                .await;
+        }
+        // Anything still needed is left for poll_reviews_once / poll_proof_loop_once this same tick.
+    }
+}
+
 /// One poll pass: auto-redo `/review` for any review-stage ticket whose reviewed change-set has
 /// moved on since the last review. Mirrors `poll_ci_once`: cheap HEAD-SHA fingerprint for
 /// idempotency, skips live sessions (which also debounces mid-edit churn). `/review` runs in plan
@@ -3831,6 +3923,9 @@ pub fn run() {
                         // re-review pass considers the same ticket. Then re-review stale changes,
                         // then judge+auto-fix current reviews, then auto-merge approved PRs.
                         poll_ci_once(&poll_handle, &state).await;
+                        // Proportional re-verification: carry review/proof forward for trivial
+                        // deltas so the pollers below skip them. Must run before them.
+                        poll_reverify_once(&state).await;
                         poll_reviews_once(&poll_handle, &state).await;
                         poll_review_loop_once(&poll_handle, &state).await;
                         // After the review loop settles, evidence passed changes (proof of work).

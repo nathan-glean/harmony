@@ -228,6 +228,20 @@ pub fn decide(event: Event, ctx: &Ctx) -> Decision {
             blocked: None,
         }
     };
+    // Returning to In PR Review after a loop back through work/feedback: commit + push (updates the
+    // PR), and re-ready it if it was drafted on the way out. Re-review runs in place (the review
+    // poller runs in the PR column); re-verification is decided by the triage poller, not here.
+    let return_to_pr = || -> Decision {
+        let mut actions = vec![CommitChanges, PushBranch];
+        if ctx.pr_is_draft {
+            actions.push(MarkPrReady);
+        }
+        Decision {
+            target: Pr,
+            actions,
+            blocked: None,
+        }
+    };
 
     match event {
         Event::Move(to) => {
@@ -382,6 +396,16 @@ pub fn decide(event: Event, ctx: &Ctx) -> Decision {
                     blocked: None,
                 };
             }
+            // A ticket that already reached In PR Review (has a PR) loops straight back there after
+            // re-work — no redundant trip through For Your Review. Re-review/-proof are gated by the
+            // triage poller. Otherwise take the normal pre-PR path: commit, then human review.
+            if ctx.pr_exists {
+                let mut d = return_to_pr();
+                if ctx.session_live {
+                    d.actions.insert(1, StopSession); // after CommitChanges, before PushBranch
+                }
+                return d;
+            }
             // Commit first so the review and the reviewed-SHA fingerprint see committed state.
             let mut actions = vec![CommitChanges, StopSession];
             if ctx.has_changes && !ctx.review_current {
@@ -449,19 +473,16 @@ pub fn decide(event: Event, ctx: &Ctx) -> Decision {
 
         // A feedback-addressing session finished: commit, and push only when a PR already exists
         // (so we don't create a remote branch pre-PR). Land back in the review column — PR if a PR
-        // exists, otherwise Human review.
+        // exists (re-readying a drafted PR), otherwise Human review.
         Event::AddressFinished => {
-            let mut actions = vec![CommitChanges];
-            let target = if ctx.pr_exists {
-                actions.push(PushBranch);
-                Pr
+            if ctx.pr_exists {
+                return_to_pr()
             } else {
-                HumanReview
-            };
-            Decision {
-                target,
-                actions,
-                blocked: None,
+                Decision {
+                    target: HumanReview,
+                    actions: vec![CommitChanges],
+                    blocked: None,
+                }
             }
         }
 

@@ -18,6 +18,7 @@ pub mod jira;
 pub mod models;
 pub mod orchestrator;
 pub mod proof;
+pub mod reverify;
 pub mod review;
 pub mod session;
 pub mod settings;

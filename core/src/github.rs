@@ -32,6 +32,19 @@ pub fn diff(worktree: &str, base: &str) -> Result<String> {
     run("git", &["diff", "--merge-base", base], worktree)
 }
 
+/// Incremental diff of everything since `from_sha` up to the current worktree state (committed +
+/// uncommitted) — `git diff <from_sha>`. Used to re-verify only the delta since the last verified
+/// commit. Empty string when nothing changed since `from_sha`.
+pub fn diff_between(worktree: &str, from_sha: &str) -> Result<String> {
+    run("git", &["diff", from_sha], worktree)
+}
+
+/// Names of files changed since `from_sha` (`git diff --name-only <from_sha>`), one per line — the
+/// cheap input to the re-verification heuristic.
+pub fn changed_files_since(worktree: &str, from_sha: &str) -> Result<String> {
+    run("git", &["diff", "--name-only", from_sha], worktree)
+}
+
 /// Build a PR body: a Claude-generated summary of the branch diff (conforming to the repo's PR
 /// template when one exists, and referencing `ticket_ref`), falling back to `fallback` (the
 /// composed spec) whenever a summary can't be produced — no diff, or `claude`/`git` unavailable.

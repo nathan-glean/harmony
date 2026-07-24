@@ -450,6 +450,67 @@ async fn action_log_idempotency_and_persistence() {
 }
 
 #[tokio::test]
+async fn reverify_carry_forward_and_latest_action_head() {
+    let dir = TempDir::new("reverify");
+    let store = open_store(&dir).await;
+    let id = store
+        .add_ticket(None, "local", "T", "", None)
+        .await
+        .unwrap();
+
+    // No review yet → nothing to diff from.
+    assert_eq!(store.latest_action_head(id, "review").await.unwrap(), None);
+
+    // First review at HEAD "aaa".
+    store.mark_reviewed(id, "aaa").await.unwrap();
+    assert_eq!(
+        store
+            .latest_action_head(id, "review")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("aaa")
+    );
+
+    // A commit moves HEAD to "bbb": triage deems it trivial → carry review+judge+proof forward.
+    assert!(!store.has_action_at(id, "review", "bbb").await.unwrap());
+    store
+        .record_state_action(id, "reverify", "bbb", "")
+        .await
+        .unwrap();
+    store
+        .record_state_action(id, "review", "bbb", "")
+        .await
+        .unwrap();
+    store
+        .record_state_action(id, "judge", "bbb", "")
+        .await
+        .unwrap();
+    store
+        .record_state_action(id, "proof", "bbb", "")
+        .await
+        .unwrap();
+    // All gates now closed at the new HEAD → the pollers skip re-review/-judge/-proof.
+    assert!(store.has_action_at(id, "review", "bbb").await.unwrap());
+    assert!(store.has_action_at(id, "judge", "bbb").await.unwrap());
+    assert!(store.has_action_at(id, "proof", "bbb").await.unwrap());
+    // latest_action_head follows the newest review record.
+    assert_eq!(
+        store
+            .latest_action_head(id, "review")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("bbb")
+    );
+    // Empty head is ignored by latest_action_head's filter.
+    assert_eq!(
+        store.latest_action_head(id, "ci_triage").await.unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
 async fn ticket_pr_snapshot_round_trips_and_persists() {
     let dir = TempDir::new("prsnap");
     let id = {

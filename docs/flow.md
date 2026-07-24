@@ -24,7 +24,7 @@ stateDiagram-v2
     InProgress --> Todo : Move
     InProgress --> InProgress : GrillFinished, ReviewRequested, ReviewFinished, ProofFinished, SessionIdle
     InProgress --> HumanReview : Move, WorkFinished, AddressFinished
-    InProgress --> Pr : Move, FixFinished, ConflictFinished, AddressFinished
+    InProgress --> Pr : Move, WorkFinished, FixFinished, ConflictFinished, AddressFinished
     InProgress --> Done : Move
     HumanReview --> Todo : Move
     HumanReview --> InProgress : Move
@@ -95,7 +95,8 @@ Every distinct outcome of `decide`, grouped by the column the ticket is in. *Gua
 | FixFinished | (any) | In PR Review | CommitChanges, PushBranch |  |
 | ConflictFinished | (any) | In PR Review | CommitChanges, PushBranch |  |
 | AddressFinished | !pr_exists | For Your Review | CommitChanges |  |
-| AddressFinished | pr_exists | In PR Review | CommitChanges, PushBranch |  |
+| AddressFinished | pr_exists & !pr_is_draft | In PR Review | CommitChanges, PushBranch |  |
+| AddressFinished | pr_exists & pr_is_draft | In PR Review | CommitChanges, PushBranch, MarkPrReady |  |
 | SessionIdle | !auto_end_idle OR user_question_pending | Todo | — |  |
 | SessionIdle | !user_question_pending & auto_end_idle | Todo | StopSession |  |
 
@@ -133,8 +134,12 @@ Every distinct outcome of `decide`, grouped by the column the ticket is in. *Gua
 | Move → Done | session_live & has_worktree & pr_open & pr_approved & !pr_merged | Done | StopSession, MergePr, DeleteWorktree |  |
 | GrillRequested | (any) | In Progress | — | grill is only available in Todo |
 | GrillFinished | (any) | In Progress | StopSession, EnsureWorktree, StartImplement |  |
-| WorkFinished | !has_changes & !user_question_pending OR review_current & !user_question_pending | For Your Review | CommitChanges, StopSession |  |
-| WorkFinished | has_changes & !review_current & !user_question_pending | For Your Review | CommitChanges, StopSession, RunReview |  |
+| WorkFinished | !has_changes & !pr_exists & !user_question_pending OR review_current & !pr_exists & !user_question_pending | For Your Review | CommitChanges, StopSession |  |
+| WorkFinished | has_changes & !review_current & !pr_exists & !user_question_pending | For Your Review | CommitChanges, StopSession, RunReview |  |
+| WorkFinished | !session_live & pr_exists & !pr_is_draft & !user_question_pending | In PR Review | CommitChanges, PushBranch |  |
+| WorkFinished | session_live & pr_exists & !pr_is_draft & !user_question_pending | In PR Review | CommitChanges, StopSession, PushBranch |  |
+| WorkFinished | !session_live & pr_exists & pr_is_draft & !user_question_pending | In PR Review | CommitChanges, PushBranch, MarkPrReady |  |
+| WorkFinished | session_live & pr_exists & pr_is_draft & !user_question_pending | In PR Review | CommitChanges, StopSession, PushBranch, MarkPrReady |  |
 | WorkFinished | user_question_pending | In Progress | — |  |
 | ReviewRequested | !has_repo | In Progress | — | assign a repo first |
 | ReviewRequested | has_repo & !has_changes | In Progress | — | no changes to review |
@@ -145,7 +150,8 @@ Every distinct outcome of `decide`, grouped by the column the ticket is in. *Gua
 | FixFinished | (any) | In PR Review | CommitChanges, PushBranch |  |
 | ConflictFinished | (any) | In PR Review | CommitChanges, PushBranch |  |
 | AddressFinished | !pr_exists | For Your Review | CommitChanges |  |
-| AddressFinished | pr_exists | In PR Review | CommitChanges, PushBranch |  |
+| AddressFinished | pr_exists & !pr_is_draft | In PR Review | CommitChanges, PushBranch |  |
+| AddressFinished | pr_exists & pr_is_draft | In PR Review | CommitChanges, PushBranch, MarkPrReady |  |
 | SessionIdle | !auto_end_idle OR user_question_pending | In Progress | — |  |
 | SessionIdle | !user_question_pending & auto_end_idle | In Progress | StopSession |  |
 
@@ -193,7 +199,8 @@ Every distinct outcome of `decide`, grouped by the column the ticket is in. *Gua
 | FixFinished | (any) | In PR Review | CommitChanges, PushBranch |  |
 | ConflictFinished | (any) | In PR Review | CommitChanges, PushBranch |  |
 | AddressFinished | !pr_exists | For Your Review | CommitChanges |  |
-| AddressFinished | pr_exists | In PR Review | CommitChanges, PushBranch |  |
+| AddressFinished | pr_exists & !pr_is_draft | In PR Review | CommitChanges, PushBranch |  |
+| AddressFinished | pr_exists & pr_is_draft | In PR Review | CommitChanges, PushBranch, MarkPrReady |  |
 | SessionIdle | !auto_end_idle OR user_question_pending | For Your Review | — |  |
 | SessionIdle | !user_question_pending & auto_end_idle | For Your Review | StopSession |  |
 
@@ -243,7 +250,8 @@ Every distinct outcome of `decide`, grouped by the column the ticket is in. *Gua
 | FixFinished | (any) | In PR Review | CommitChanges, PushBranch |  |
 | ConflictFinished | (any) | In PR Review | CommitChanges, PushBranch |  |
 | AddressFinished | !pr_exists | For Your Review | CommitChanges |  |
-| AddressFinished | pr_exists | In PR Review | CommitChanges, PushBranch |  |
+| AddressFinished | pr_exists & !pr_is_draft | In PR Review | CommitChanges, PushBranch |  |
+| AddressFinished | pr_exists & pr_is_draft | In PR Review | CommitChanges, PushBranch, MarkPrReady |  |
 | SessionIdle | !auto_end_idle OR user_question_pending | In PR Review | — |  |
 | SessionIdle | !user_question_pending & auto_end_idle | In PR Review | StopSession |  |
 
@@ -268,7 +276,8 @@ Every distinct outcome of `decide`, grouped by the column the ticket is in. *Gua
 | FixFinished | (any) | In PR Review | CommitChanges, PushBranch |  |
 | ConflictFinished | (any) | In PR Review | CommitChanges, PushBranch |  |
 | AddressFinished | !pr_exists | For Your Review | CommitChanges |  |
-| AddressFinished | pr_exists | In PR Review | CommitChanges, PushBranch |  |
+| AddressFinished | pr_exists & !pr_is_draft | In PR Review | CommitChanges, PushBranch |  |
+| AddressFinished | pr_exists & pr_is_draft | In PR Review | CommitChanges, PushBranch, MarkPrReady |  |
 | SessionIdle | !auto_end_idle OR user_question_pending | Done | — |  |
 | SessionIdle | !user_question_pending & auto_end_idle | Done | StopSession |  |
 
