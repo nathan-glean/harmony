@@ -17,6 +17,13 @@ tasks:
       - task --list
     silent: true
 
+  setup:
+    desc: First-time setup — installs the git hooks (husky) and frontend deps
+    cmds:
+      # Root install activates husky via its `prepare` script (sets core.hooksPath).
+      - npm install
+      - cd {{.APP_DIR}} && npm ci
+
   # ---- Rust workspace (core CLI + Tauri backend) ----
 
   build:
