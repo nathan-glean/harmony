@@ -407,6 +407,102 @@ button:disabled { opacity: 0.5; cursor: default; }
 }
 .term-search-btn:hover { color: var(--text); background: var(--border); }
 
+/* ── Friendly session view ─────────────────────────────────────────────────────── */
+.session-live { display: flex; flex-direction: column; gap: 10px; }
+
+/* Two-way Friendly ↔ Terminal segmented toggle. */
+.session-view-toggle {
+  display: inline-flex; align-self: flex-start; gap: 0;
+  border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+}
+.session-view-toggle button {
+  background: transparent; border: none; border-radius: 0; color: var(--muted);
+  font-size: 12px; padding: 5px 14px; cursor: pointer;
+}
+.session-view-toggle button + button { border-left: 1px solid var(--border); }
+.session-view-toggle button:hover:not(.active) { color: var(--text); }
+.session-view-toggle button.active { background: var(--accent); color: #0b0e14; font-weight: 600; }
+
+.friendly-session { display: flex; flex-direction: column; gap: 10px; }
+.friendly-messages {
+  display: flex; flex-direction: column; gap: 12px;
+  height: 380px; overflow-y: auto;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px;
+  scrollbar-width: thin; scrollbar-color: var(--border) transparent;
+}
+.friendly-msg { display: flex; flex-direction: column; gap: 8px; }
+
+/* Assistant prose — reuse the markdown renderer's read-only styling. */
+.friendly-assistant .mdxeditor { background: transparent; }
+.friendly-assistant .md-content {
+  padding: 0; font-size: 13px; line-height: 1.6; max-height: none; overflow: visible;
+}
+
+/* User turn — a right-aligned bubble, distinct from Claude's full-width prose. */
+.friendly-user { align-self: flex-end; max-width: 85%; }
+.friendly-user-text {
+  margin: 0; white-space: pre-wrap; word-break: break-word;
+  background: var(--panel2); border: 1px solid var(--border); border-radius: 10px;
+  padding: 8px 10px; font-size: 13px; line-height: 1.5; color: var(--text);
+}
+.friendly-more {
+  margin-top: 2px; background: transparent; border: none; color: var(--muted);
+  font-size: 11px; padding: 2px 0; cursor: pointer;
+}
+.friendly-more:hover { color: var(--text); }
+
+/* Compact one-line tool card + hidden-by-default output. */
+.tool-card {
+  border: 1px solid var(--border); border-radius: 8px; background: var(--panel2); overflow: hidden;
+}
+.tool-card.tool-error { border-color: var(--red, #f7768e); }
+.tool-card-head {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  background: transparent; border: none; border-radius: 0; text-align: left;
+  padding: 6px 10px; font-size: 12px; color: var(--text);
+}
+.tool-icon { flex: none; width: 18px; }
+.tool-name { font-weight: 600; flex: none; }
+.tool-summary {
+  color: var(--muted); font-family: Menlo, monospace; font-size: 11px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tool-caret { margin-left: auto; color: var(--muted); flex: none; }
+.tool-card-result {
+  margin: 0; border-top: 1px solid var(--border); padding: 8px 10px;
+  max-height: 260px; overflow: auto; background: var(--bg);
+  font: 11px/1.5 Menlo, monospace; white-space: pre-wrap; word-break: break-word; color: var(--text);
+}
+
+/* "Claude is working…" indicator. */
+.friendly-working {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12px; color: var(--muted);
+}
+.friendly-spinner {
+  width: 10px; height: 10px; border-radius: 50%; flex: none;
+  border: 2px solid var(--border); border-top-color: var(--accent);
+  animation: friendly-spin 0.8s linear infinite;
+}
+@keyframes friendly-spin { to { transform: rotate(360deg); } }
+
+/* Steer box + interrupt/stop controls. */
+.friendly-composer { display: flex; flex-direction: column; gap: 8px; }
+.friendly-input {
+  width: 100%; box-sizing: border-box; resize: vertical; min-height: 56px;
+  background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 10px; font-size: 13px; line-height: 1.5; outline: none;
+  font-family: inherit;
+}
+.friendly-input:focus { border-color: var(--accent); }
+.friendly-input:disabled { opacity: 0.55; cursor: not-allowed; }
+.friendly-actions { display: flex; gap: 8px; }
+.friendly-cue { font-size: 11px; }
+.friendly-cue strong { color: var(--text); font-weight: 600; }
+.friendly-send { background: var(--accent); color: #0b0e14; border-color: var(--accent); font-weight: 600; }
+.friendly-send:disabled { opacity: 0.5; }
+.friendly-stop { margin-left: auto; color: var(--red, #f7768e); border-color: var(--red, #f7768e); }
+
 .muted { color: var(--muted); }
 .tasks { display: flex; flex-direction: column; gap: 6px; }
 .tasks-head { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); }

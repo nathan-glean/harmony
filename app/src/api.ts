@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Ticket, Repo, SessionView, WorktreeView, SessionProgress, SpecFields, DiffComment, PrComment, CommentTarget, TicketAction, OrchestratorStatus } from "./types";
+import type { Ticket, Repo, SessionView, WorktreeView, SessionProgress, SpecFields, DiffComment, PrComment, CommentTarget, TicketAction, OrchestratorStatus, TranscriptMessage, SessionViewState, SessionViewMode } from "./types";
 
 // Tauri converts camelCase JS arg keys to snake_case Rust params.
 export const api = {
@@ -20,6 +20,16 @@ export const api = {
   pendingReattach: () => invoke<number[]>("pending_reattach"),
   sessionTranscript: (ticketId: number) =>
     invoke<string>("session_transcript", { ticketId }),
+  // Structured conversation for the friendly session view (typed text/tool_use/tool_result blocks).
+  sessionMessages: (ticketId: number) =>
+    invoke<TranscriptMessage[]>("session_messages", { ticketId }),
+  // Turn-state read that drives the "working" indicator + auto-switch-to-terminal escape hatch.
+  sessionViewState: (ticketId: number) =>
+    invoke<SessionViewState>("session_view_state", { ticketId }),
+  // Global, persisted Friendly/Terminal view preference.
+  getSessionViewMode: () => invoke<SessionViewMode>("get_session_view_mode"),
+  setSessionViewMode: (mode: SessionViewMode) =>
+    invoke<void>("set_session_view_mode", { mode }),
   readTextArtifact: (ticketId: number, path: string) =>
     invoke<string>("read_text_artifact", { ticketId, path }),
   clearEndedSessions: () => invoke<number>("clear_ended_sessions"),

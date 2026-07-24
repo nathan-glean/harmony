@@ -873,6 +873,190 @@ pub fn render_transcript(path: &str) -> Result<String> {
     Ok(out.trim_end().to_string())
 }
 
+/// One typed block inside a structured transcript message. This is the friendly-view shape: the
+/// GUI renders `text` as markdown, `tool_use` as a compact card, and `tool_result` (hidden by
+/// default) as the expandable output of the matching `tool_use` (associated by `tool_use_id`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TranscriptBlock {
+    /// Assistant/user prose.
+    Text { text: String },
+    /// A tool invocation: the tool name plus a one-line target/summary of its input.
+    ToolUse {
+        id: String,
+        name: String,
+        summary: String,
+    },
+    /// A tool's output, keyed back to its `tool_use` by `tool_use_id`. Capped in size.
+    ToolResult {
+        tool_use_id: String,
+        output: String,
+        is_error: bool,
+    },
+}
+
+/// One structured message in a session's conversation — a role plus its ordered typed blocks.
+/// Generalises the flat-string `render_transcript` so the friendly GUI can render each piece
+/// natively (markdown text, tool cards, collapsed results) instead of as one plain blob.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TranscriptMessage {
+    /// `assistant` or `user`.
+    pub role: String,
+    pub blocks: Vec<TranscriptBlock>,
+}
+
+/// Derive a one-line target/summary from a tool's input JSON (e.g. the file path for Edit/Write,
+/// the command for Bash, the pattern for Grep). Best-effort: picks the first recognised field,
+/// collapsed to a single tidy line. Empty when nothing informative is present.
+fn summarize_tool_input(input: Option<&Value>) -> String {
+    const MAX: usize = 160;
+    let obj = match input.and_then(|v| v.as_object()) {
+        Some(o) => o,
+        None => return String::new(),
+    };
+    // Ordered by how identifying the field is for the common tools.
+    for key in [
+        "file_path",
+        "filePath",
+        "path",
+        "command",
+        "pattern",
+        "url",
+        "query",
+        "prompt",
+        "description",
+        "notebook_path",
+    ] {
+        if let Some(s) = obj.get(key).and_then(|v| v.as_str()) {
+            let s = s.trim();
+            if !s.is_empty() {
+                return collapse(s, MAX);
+            }
+        }
+    }
+    String::new()
+}
+
+/// Extract a tool_result's textual output. The content may be a bare string, or an array of
+/// `{type:"text", text}` blocks (Claude Code's usual shape). Capped so a huge result can't bloat
+/// the payload — the GUI hides it behind an expander anyway.
+fn extract_tool_result(content: Option<&Value>) -> String {
+    const CAP: usize = 10_000;
+    let raw = match content {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(arr)) => {
+            let mut s = String::new();
+            for b in arr {
+                if let Some(t) = b.get("text").and_then(|x| x.as_str()) {
+                    s.push_str(t);
+                    s.push('\n');
+                } else if let Some(t) = b.as_str() {
+                    s.push_str(t);
+                    s.push('\n');
+                }
+            }
+            s.trim_end().to_string()
+        }
+        Some(other) => other.to_string(),
+        None => String::new(),
+    };
+    if raw.chars().count() > CAP {
+        let truncated: String = raw.chars().take(CAP).collect();
+        format!("{truncated}\n… (truncated)")
+    } else {
+        raw
+    }
+}
+
+/// Parse a session's full JSONL transcript into ordered, structured messages for the friendly
+/// GUI view. Unlike `render_transcript` (a flat plain-text blob) and the tail-only turn-state
+/// helpers, this reads the whole file so the entire conversation renders. Non-message records
+/// (summaries, system lines) and empty messages are skipped.
+pub fn structured_transcript(path: &str) -> Result<Vec<TranscriptMessage>> {
+    let content = std::fs::read_to_string(path)?;
+    let mut out = Vec::new();
+    for line in content.lines() {
+        let v: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let typ = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
+        let msg = v.get("message");
+        let role = msg
+            .and_then(|m| m.get("role"))
+            .and_then(|x| x.as_str())
+            .unwrap_or(typ);
+        if role != "assistant" && role != "user" {
+            continue;
+        }
+        let content_node = msg
+            .and_then(|m| m.get("content"))
+            .or_else(|| v.get("content"));
+        let mut blocks: Vec<TranscriptBlock> = Vec::new();
+        match content_node {
+            Some(Value::String(s)) => {
+                if !s.trim().is_empty() {
+                    blocks.push(TranscriptBlock::Text { text: s.clone() });
+                }
+            }
+            Some(Value::Array(arr)) => {
+                for b in arr {
+                    match b.get("type").and_then(|x| x.as_str()).unwrap_or("") {
+                        "text" => {
+                            if let Some(t) = b.get("text").and_then(|x| x.as_str()) {
+                                if !t.trim().is_empty() {
+                                    blocks.push(TranscriptBlock::Text {
+                                        text: t.to_string(),
+                                    });
+                                }
+                            }
+                        }
+                        "tool_use" => {
+                            blocks.push(TranscriptBlock::ToolUse {
+                                id: b
+                                    .get("id")
+                                    .and_then(|x| x.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                name: b
+                                    .get("name")
+                                    .and_then(|x| x.as_str())
+                                    .unwrap_or("tool")
+                                    .to_string(),
+                                summary: summarize_tool_input(b.get("input")),
+                            });
+                        }
+                        "tool_result" => {
+                            blocks.push(TranscriptBlock::ToolResult {
+                                tool_use_id: b
+                                    .get("tool_use_id")
+                                    .and_then(|x| x.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                output: extract_tool_result(b.get("content")),
+                                is_error: b
+                                    .get("is_error")
+                                    .and_then(|x| x.as_bool())
+                                    .unwrap_or(false),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+        if blocks.is_empty() {
+            continue;
+        }
+        out.push(TranscriptMessage {
+            role: role.to_string(),
+            blocks,
+        });
+    }
+    Ok(out)
+}
+
 /// A snapshot of in-session progress tailed from the live transcript: the latest assistant
 /// text and the most recently invoked tool. Richer than the hook-derived working/waiting flag.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -1059,6 +1243,78 @@ pub fn transcript_turn_state(path: &str) -> TurnState {
         // A plain-string assistant message is finished text.
         Some(Value::String(s)) if !s.trim().is_empty() => TurnState::Finished,
         _ => TurnState::Working,
+    }
+}
+
+/// The friendly GUI view's read of where a session's turn has come to rest — a superset of
+/// `TurnState` that keeps `ExitPlan` distinct from a plain `Finished`. The friendly view can model
+/// `Working` (show a spinner), `Finished` (offer the steer box), and `WaitingOnQuestion` (show the
+/// `QuestionCard`); `ExitPlan` (a plan-approval / permission-style prompt it cannot render) is the
+/// escape-hatch signal that makes the UI auto-switch to the raw terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewState {
+    Working,
+    Finished,
+    WaitingOnQuestion,
+    ExitPlan,
+}
+
+/// Classify a session's turn state for the friendly view. Same last-record analysis as
+/// `transcript_turn_state`, but reports `ExitPlan` separately (where the watchdog-oriented
+/// `transcript_turn_state` folds it into `Finished`) so the GUI can auto-switch to the terminal
+/// for a plan-approval prompt. Fail-safe to `Working`.
+pub fn transcript_view_state(path: &str) -> ViewState {
+    let records = tail_records(path);
+    let last = match records.last() {
+        Some(v) => v,
+        None => return ViewState::Working,
+    };
+    let msg = last.get("message");
+    let role = msg
+        .and_then(|m| m.get("role"))
+        .and_then(|x| x.as_str())
+        .or_else(|| last.get("type").and_then(|x| x.as_str()))
+        .unwrap_or("");
+    if role != "assistant" {
+        return ViewState::Working;
+    }
+    match msg.and_then(|m| m.get("content")) {
+        Some(Value::Array(arr)) => {
+            let (mut has_text, mut has_tool, mut asks_question, mut exits_plan) =
+                (false, false, false, false);
+            for b in arr {
+                match b.get("type").and_then(|x| x.as_str()).unwrap_or("") {
+                    "tool_use" => match b.get("name").and_then(|x| x.as_str()) {
+                        Some("AskUserQuestion") => asks_question = true,
+                        Some("ExitPlanMode") => exits_plan = true,
+                        _ => has_tool = true,
+                    },
+                    "text"
+                        if b.get("text")
+                            .and_then(|x| x.as_str())
+                            .map(|t| !t.trim().is_empty())
+                            .unwrap_or(false) =>
+                    {
+                        has_text = true;
+                    }
+                    _ => {}
+                }
+            }
+            if asks_question {
+                ViewState::WaitingOnQuestion
+            } else if exits_plan {
+                ViewState::ExitPlan
+            } else if has_tool {
+                ViewState::Working
+            } else if has_text {
+                ViewState::Finished
+            } else {
+                ViewState::Working
+            }
+        }
+        Some(Value::String(s)) if !s.trim().is_empty() => ViewState::Finished,
+        _ => ViewState::Working,
     }
 }
 
@@ -1494,6 +1750,102 @@ mod tests {
             TurnState::Working
         );
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn structured_transcript_parses_typed_blocks() {
+        // A full conversation: user prompt → assistant text + tool_use → tool_result → final text.
+        let p = write_transcript(&[
+            r#"{"message":{"role":"user","content":[{"type":"text","text":"add a flag"}]}}"#,
+            r#"{"message":{"role":"assistant","content":[{"type":"text","text":"On it."},{"type":"tool_use","id":"tu_1","name":"Edit","input":{"file_path":"src/session.rs"}}]}}"#,
+            r#"{"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":[{"type":"text","text":"applied"}],"is_error":false}]}}"#,
+            r#"{"message":{"role":"assistant","content":[{"type":"text","text":"Done."}]}}"#,
+        ]);
+        let msgs = structured_transcript(p.to_str().unwrap()).unwrap();
+        assert_eq!(msgs.len(), 4);
+
+        // 1) user prose
+        assert_eq!(msgs[0].role, "user");
+        assert_eq!(
+            msgs[0].blocks,
+            vec![TranscriptBlock::Text {
+                text: "add a flag".into()
+            }]
+        );
+
+        // 2) assistant text + tool_use, with the file path summarised from the input.
+        assert_eq!(msgs[1].role, "assistant");
+        assert_eq!(
+            msgs[1].blocks,
+            vec![
+                TranscriptBlock::Text {
+                    text: "On it.".into()
+                },
+                TranscriptBlock::ToolUse {
+                    id: "tu_1".into(),
+                    name: "Edit".into(),
+                    summary: "src/session.rs".into(),
+                },
+            ]
+        );
+
+        // 3) tool_result keyed back to the tool_use, text extracted from the array form.
+        assert_eq!(msgs[2].role, "user");
+        assert_eq!(
+            msgs[2].blocks,
+            vec![TranscriptBlock::ToolResult {
+                tool_use_id: "tu_1".into(),
+                output: "applied".into(),
+                is_error: false,
+            }]
+        );
+
+        // 4) final assistant text
+        assert_eq!(
+            msgs[3].blocks,
+            vec![TranscriptBlock::Text {
+                text: "Done.".into()
+            }]
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn view_state_distinguishes_exit_plan_from_finished() {
+        // ExitPlanMode is its own bucket for the friendly view (auto-switch to terminal)…
+        let plan = write_transcript(&[
+            r#"{"message":{"role":"assistant","content":[{"type":"text","text":"Here's the plan."},{"type":"tool_use","name":"ExitPlanMode","input":{"plan":"do x"}}]}}"#,
+        ]);
+        assert_eq!(
+            transcript_view_state(plan.to_str().unwrap()),
+            ViewState::ExitPlan
+        );
+        // …while a plain trailing text block is an ordinary finish (a friendly steer point).
+        let done = write_transcript(&[
+            r#"{"message":{"role":"assistant","content":[{"type":"text","text":"All done."}]}}"#,
+        ]);
+        assert_eq!(
+            transcript_view_state(done.to_str().unwrap()),
+            ViewState::Finished
+        );
+        // …a pending tool call is still Working, and an AskUserQuestion is WaitingOnQuestion.
+        let working = write_transcript(&[
+            r#"{"message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash"}]}}"#,
+        ]);
+        assert_eq!(
+            transcript_view_state(working.to_str().unwrap()),
+            ViewState::Working
+        );
+        let asking = write_transcript(&[
+            r#"{"message":{"role":"assistant","content":[{"type":"tool_use","name":"AskUserQuestion"}]}}"#,
+        ]);
+        assert_eq!(
+            transcript_view_state(asking.to_str().unwrap()),
+            ViewState::WaitingOnQuestion
+        );
+        for p in [plan, done, working, asking] {
+            let _ = std::fs::remove_file(&p);
+        }
     }
 
     #[test]

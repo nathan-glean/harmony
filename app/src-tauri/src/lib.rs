@@ -293,6 +293,74 @@ async fn session_transcript(state: State<'_, AppState>, ticket_id: i64) -> Resul
     }
 }
 
+/// Structured conversation for the friendly session view: an ordered list of typed messages
+/// (text / tool_use / tool_result) parsed from the full JSONL transcript. Generalises
+/// `session_transcript` (a flat plain-text blob) so the GUI can render each piece natively.
+#[tauri::command]
+async fn session_messages(
+    state: State<'_, AppState>,
+    ticket_id: i64,
+) -> Result<Vec<harmony_core::session::TranscriptMessage>, String> {
+    match state
+        .store
+        .latest_transcript_path_for_ticket(ticket_id)
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        Some(path) => {
+            tokio::task::spawn_blocking(move || harmony_core::session::structured_transcript(&path))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())
+        }
+        None => Ok(vec![]),
+    }
+}
+
+/// The friendly view's turn-state read for a ticket's latest session, used to drive the "working"
+/// indicator and the auto-switch-to-terminal escape hatch (`exit_plan`). Best-effort from the
+/// transcript tail; `working` when there's no transcript yet.
+#[tauri::command]
+async fn session_view_state(
+    state: State<'_, AppState>,
+    ticket_id: i64,
+) -> Result<harmony_core::session::ViewState, String> {
+    match state
+        .store
+        .latest_transcript_path_for_ticket(ticket_id)
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        Some(path) => Ok(tokio::task::spawn_blocking(move || {
+            harmony_core::session::transcript_view_state(&path)
+        })
+        .await
+        .map_err(|e| e.to_string())?),
+        None => Ok(harmony_core::session::ViewState::Working),
+    }
+}
+
+/// Persisted, global preference for how a live session renders: `friendly` (default) or
+/// `terminal`. Stored via the same settings store as the permission mode.
+#[tauri::command]
+async fn get_session_view_mode(state: State<'_, AppState>) -> Result<String, String> {
+    Ok(state
+        .store
+        .get_setting("session_view_mode")
+        .await
+        .map_err(|e| e.to_string())?
+        .unwrap_or_else(|| "friendly".to_string()))
+}
+
+#[tauri::command]
+async fn set_session_view_mode(state: State<'_, AppState>, mode: String) -> Result<(), String> {
+    state
+        .store
+        .set_setting("session_view_mode", &mode)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Read a proof artifact's text content for inline display in the Proof tab. Scoped to the ticket's
 /// proof artifact dir (`~/.harmony/proof/<ticket_id>`) to defeat path traversal; capped in size.
 /// The webview can't `fetch()` the `asset://` scheme (CORS), so text artifacts are read through here.
@@ -3800,6 +3868,10 @@ pub fn run() {
             live_progress,
             pending_reattach,
             session_transcript,
+            session_messages,
+            session_view_state,
+            get_session_view_mode,
+            set_session_view_mode,
             read_text_artifact,
             clear_ended_sessions,
             delete_session,

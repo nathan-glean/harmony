@@ -15,13 +15,14 @@ import { QuestionCard } from "./components/QuestionCard";
 import { TranscriptPane } from "./components/TranscriptPane";
 import { ProgressLine } from "./components/ProgressLine";
 import { TerminalView } from "./components/Terminal";
+import { FriendlySession } from "./components/FriendlySession";
 import { SpecEditor } from "./components/SpecEditor";
 import { ProofPane } from "./components/ProofPane";
 import { PrComments } from "./components/PrComments";
 import { ReviewFeedback } from "./components/ReviewFeedback";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { api } from "./api";
-import type { Ticket, Repo, SessionView, WorktreeView, PendingQuestion, SessionProgress, SessionExit, PrDone } from "./types";
+import type { Ticket, Repo, SessionView, WorktreeView, PendingQuestion, SessionProgress, SessionExit, PrDone, SessionViewMode } from "./types";
 import { parseActivity } from "./types";
 
 export function App() {
@@ -36,6 +37,9 @@ export function App() {
   const [openingPr, setOpeningPr] = useState<Set<number>>(new Set());
   // Active tab in the ticket modal.
   const [tab, setTab] = useState<"description" | "spec" | "proof" | "review" | "session">("spec");
+  // How a live session renders: the friendly chat-style GUI or the raw terminal. Global +
+  // persisted (default Friendly); the last user choice is restored on next launch.
+  const [viewMode, setViewMode] = useState<SessionViewMode>("friendly");
   // Sub-tab within the Review tab (Diff + PR comments are nested under Review).
   const [reviewSub, setReviewSub] = useState<"review" | "diff" | "pr">("review");
   // Bumped whenever review feedback is added/sent, so the feedback list reloads across components.
@@ -114,6 +118,13 @@ export function App() {
     setLiveSessions((m) => ({ ...m, [ticket.id]: sid }));
     await refresh();
   };
+
+  // Switch the session view. A user click persists the choice globally; the auto-switch escape
+  // hatch (persist=false) flips the view for this run without overwriting the saved preference.
+  const changeViewMode = useCallback((mode: SessionViewMode, persist = true) => {
+    setViewMode(mode);
+    if (persist) api.setSessionViewMode(mode).catch(() => {});
+  }, []);
 
   const clearEndedSessions = async () => {
     try {
@@ -265,6 +276,11 @@ export function App() {
     tick();
     return () => clearInterval(id);
   }, [jiraSite, refresh]);
+
+  // Restore the persisted Friendly/Terminal preference on launch (default Friendly on first use).
+  useEffect(() => {
+    api.getSessionViewMode().then(setViewMode).catch(() => {});
+  }, []);
 
   // Reattach on launch: resume sessions that were live when the app last closed.
   useEffect(() => {
@@ -1047,41 +1063,89 @@ export function App() {
               </div>
 
               <div className={"tabpanel" + (tab === "session" ? " active" : "")}>
-                {progress[selected.id] && (
-                  <ProgressLine p={progress[selected.id]} className="detail-progress" />
-                )}
-                {pendingQuestion && (
-                  <QuestionCard
-                    pq={pendingQuestion}
-                    onAnswered={() =>
-                      setTickets((ts) =>
-                        ts.map((t) => (t.id === selected.id ? { ...t, pending_question: "" } : t))
-                      )
-                    }
-                  />
-                )}
-                {liveTicket?.todos && <Tasks todosJson={liveTicket.todos} />}
-                <TranscriptPane ticketId={selected.id} />
                 {liveSessions[selected.id] ? (
-                  <>
-                    <div className="term-head">Live terminal — type to steer Claude</div>
-                    <TerminalView sessionId={liveSessions[selected.id]} />
-                  </>
-                ) : (
-                  <div className="session-start">
-                    <button
-                      disabled={busy !== null}
-                      title="Start a live Claude session in this ticket's worktree"
-                      onClick={() =>
-                        run("start", async () => {
-                          await openTerminal(selected);
-                          setTab("session");
-                        })
-                      }
-                    >
-                      {busy === "start" ? "Starting…" : "Start Claude"}
-                    </button>
+                  <div className="session-live">
+                    {/* Friendly ↔ Terminal toggle — both drive the SAME live PTY; switching never
+                        respawns Claude. Offered for every session kind (rendering only). */}
+                    <div className="session-view-toggle">
+                      <button
+                        className={viewMode === "friendly" ? "active" : ""}
+                        onClick={() => changeViewMode("friendly")}
+                        title="Chat-style view of the session"
+                      >
+                        Friendly
+                      </button>
+                      <button
+                        className={viewMode === "terminal" ? "active" : ""}
+                        onClick={() => changeViewMode("terminal")}
+                        title="Raw Claude terminal"
+                      >
+                        Terminal
+                      </button>
+                    </div>
+                    {viewMode === "friendly" ? (
+                      <FriendlySession
+                        key={liveSessions[selected.id]}
+                        sessionId={liveSessions[selected.id]}
+                        ticketId={selected.id}
+                        pendingQuestion={pendingQuestion}
+                        progress={progress[selected.id]}
+                        todosJson={liveTicket?.todos ?? ""}
+                        onAnswered={() =>
+                          setTickets((ts) =>
+                            ts.map((t) =>
+                              t.id === selected.id ? { ...t, pending_question: "" } : t
+                            )
+                          )
+                        }
+                        onNeedTerminal={() => changeViewMode("terminal", false)}
+                      />
+                    ) : (
+                      <>
+                        {progress[selected.id] && (
+                          <ProgressLine p={progress[selected.id]} className="detail-progress" />
+                        )}
+                        {pendingQuestion && (
+                          <QuestionCard
+                            pq={pendingQuestion}
+                            onAnswered={() =>
+                              setTickets((ts) =>
+                                ts.map((t) =>
+                                  t.id === selected.id ? { ...t, pending_question: "" } : t
+                                )
+                              )
+                            }
+                          />
+                        )}
+                        {liveTicket?.todos && <Tasks todosJson={liveTicket.todos} />}
+                        <TranscriptPane ticketId={selected.id} />
+                        <div className="term-head">Live terminal — type to steer Claude</div>
+                        <TerminalView sessionId={liveSessions[selected.id]} />
+                      </>
+                    )}
                   </div>
+                ) : (
+                  <>
+                    {progress[selected.id] && (
+                      <ProgressLine p={progress[selected.id]} className="detail-progress" />
+                    )}
+                    {liveTicket?.todos && <Tasks todosJson={liveTicket.todos} />}
+                    <TranscriptPane ticketId={selected.id} />
+                    <div className="session-start">
+                      <button
+                        disabled={busy !== null}
+                        title="Start a live Claude session in this ticket's worktree"
+                        onClick={() =>
+                          run("start", async () => {
+                            await openTerminal(selected);
+                            setTab("session");
+                          })
+                        }
+                      >
+                        {busy === "start" ? "Starting…" : "Start Claude"}
+                      </button>
+                    </div>
+                  </>
                 )}
               </div>
               </ErrorBoundary>
