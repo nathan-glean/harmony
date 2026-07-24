@@ -1085,6 +1085,20 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// The most recent non-empty `head_sha` recorded for a ticket + kind (newest first), or None.
+    /// Used by re-verification to find the last verified commit to diff the incremental change from.
+    pub async fn latest_action_head(&self, id: i64, kind: &str) -> Result<Option<String>> {
+        let head: Option<String> = sqlx::query_scalar(
+            "SELECT head_sha FROM ticket_actions \
+             WHERE ticket_id = ? AND kind = ? AND head_sha != '' ORDER BY id DESC LIMIT 1",
+        )
+        .bind(id)
+        .bind(kind)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(head)
+    }
+
     /// Whether a `conflict` action has been recorded for this ticket at this exact base+head state —
     /// so a conflict resolve isn't re-attempted on an unchanged base:head. Empty shas never match.
     pub async fn has_conflict_action(

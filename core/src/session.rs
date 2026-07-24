@@ -241,7 +241,10 @@ impl SessionManager {
             .await?;
         crate::settings::inject_hooks(&wt.path, self.hook_port)?;
 
-        let prompt = render_review_prompt(&ticket);
+        // Incremental review: if the branch was already reviewed at an earlier commit, focus the
+        // re-review on the delta since then (cheaper + sharper); the first review stays full-scope.
+        let since = self.store.latest_action_head(ticket_id, "review").await?;
+        let prompt = render_review_prompt(&ticket, since.as_deref());
         // Plan mode keeps it read-only; the hook auto-approves the review's bash so it never stalls
         // on an approval prompt, and completion is the definitive ExitPlanMode plan capture.
         let (master, child) = spawn_claude(&wt.path, &prompt, None, "plan")?;
@@ -567,12 +570,23 @@ impl SessionManager {
 /// hook, so it never stalls on a prompt). The verdict is captured when the review presents it via
 /// `ExitPlanMode` — the single definitive completion signal — so the review must do all its
 /// investigation first, then call `ExitPlanMode` ONCE with the complete review.
-fn render_review_prompt(t: &Ticket) -> String {
+fn render_review_prompt(t: &Ticket, since: Option<&str>) -> String {
+    // On a re-review, focus on the delta since the last-reviewed commit (the earlier changes were
+    // already reviewed) — keeps the loop's re-reviews cheap and sharp. First review is full-scope.
+    let scope = match since {
+        Some(sha) if !sha.is_empty() => format!(
+            "The changes up to commit `{sha}` were already reviewed. Focus your review on the NEW \
+             changes since then (`git diff {sha}..HEAD`); you may consult earlier code for context, \
+             but don't re-litigate already-reviewed lines.\n\n"
+        ),
+        _ => String::new(),
+    };
     format!(
         "Run the `/review` skill on the changes this branch makes versus its base. Review against \
          the ticket's intent below, and produce a concise, prioritised list of concerns \
          (correctness, edge cases, missing tests, scope creep) and any concrete fixes you'd \
          suggest — this is a pre-PR sanity check for the human.\n\n\
+         {scope}\
          You are in plan mode (read-only): read files and run non-mutating commands (e.g. the test \
          suite, a type-check) to verify your claims — these run without asking, so investigate \
          thoroughly. Do not attempt to edit the repo. Work autonomously — no human is watching, so \

@@ -1273,6 +1273,72 @@ fn address_finished_without_pr_commits_only_and_returns_to_human_review() {
     assert_eq!(d.actions, vec![CommitChanges], "no push without a PR");
 }
 
+#[test]
+fn address_finished_with_draft_pr_re_readies() {
+    // Leaving the PR column drafts the PR; returning via addressing must re-ready it.
+    let d = decide(
+        Event::AddressFinished,
+        &Ctx {
+            from: InProgress,
+            reviewed: true,
+            has_changes: true,
+            has_worktree: true,
+            pr_exists: true,
+            pr_is_draft: true,
+            ..base()
+        },
+    );
+    assert_eq!(d.target, Pr);
+    assert_eq!(d.actions, vec![CommitChanges, PushBranch, MarkPrReady]);
+}
+
+#[test]
+fn work_finished_with_pr_returns_to_pr_not_human_review() {
+    // A ticket that already reached In PR Review loops straight back there after re-work — no
+    // redundant trip through For Your Review, and no forced re-review here (the triage poller decides).
+    let d = decide(
+        Event::WorkFinished,
+        &Ctx {
+            from: InProgress,
+            reviewed: true,
+            has_changes: true,
+            has_worktree: true,
+            session_live: true,
+            pr_exists: true,
+            pr_is_draft: true,
+            ..base()
+        },
+    );
+    assert_eq!(d.target, Pr, "has a PR => return to In PR Review");
+    assert_eq!(
+        d.actions,
+        vec![CommitChanges, StopSession, PushBranch, MarkPrReady]
+    );
+    assert!(
+        !has(&d.actions, RunReview),
+        "no forced re-review on the loop back"
+    );
+}
+
+#[test]
+fn work_finished_without_pr_still_goes_to_human_review() {
+    // Unchanged pre-PR path: no PR yet => For Your Review + review.
+    let d = decide(
+        Event::WorkFinished,
+        &Ctx {
+            from: InProgress,
+            reviewed: true,
+            has_changes: true,
+            has_worktree: true,
+            session_live: true,
+            pr_exists: false,
+            ..base()
+        },
+    );
+    assert_eq!(d.target, HumanReview);
+    assert!(has(&d.actions, RunReview));
+}
+
 // ===================================================================
 // Idle session teardown (auto_end_idle)
 // ===================================================================
