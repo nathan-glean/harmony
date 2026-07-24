@@ -564,12 +564,18 @@ impl SessionManager {
     }
 }
 
-/// Opening prompt for a `/review` session (pre-PR human-review sanity check): run the project's
-/// review skill over this branch's changes and surface concrete suggestions for the user to read
-/// before they open a PR. Runs in plan mode (read-only; the review's bash is auto-approved by the
-/// hook, so it never stalls on a prompt). The verdict is captured when the review presents it via
-/// `ExitPlanMode` — the single definitive completion signal — so the review must do all its
-/// investigation first, then call `ExitPlanMode` ONCE with the complete review.
+/// Opening prompt for a review session. The review approach is matched to whether a PR exists yet:
+/// - **Pre-PR** (For Your Review): there is no pull request for a PR-review skill to fetch, so review
+///   the working/branch diff directly (preferring a working-diff skill like `/code-review` when one
+///   is available). Naming `/review` here misdirects the agent toward fetching a non-existent PR.
+/// - **Post-PR** (In PR Review): the `/review` PR skill can use the pull request's context.
+///
+/// Skills are only ever *preferred*, never required — harmony spawns in arbitrary repos where a given
+/// skill may be absent or not model-invocable, so the prompt always describes the review directly too.
+/// Runs in plan mode (read-only; the review's bash is auto-approved by the hook, so it never stalls).
+/// The verdict is captured when the review presents it via `ExitPlanMode` — the single definitive
+/// completion signal — so the review must do all its investigation first, then call `ExitPlanMode`
+/// ONCE with the complete review.
 fn render_review_prompt(t: &Ticket, since: Option<&str>) -> String {
     // On a re-review, focus on the delta since the last-reviewed commit (the earlier changes were
     // already reviewed) — keeps the loop's re-reviews cheap and sharp. First review is full-scope.
@@ -581,11 +587,29 @@ fn render_review_prompt(t: &Ticket, since: Option<&str>) -> String {
         ),
         _ => String::new(),
     };
+    // Pick the review approach + purpose from whether a PR exists yet.
+    let (lead, purpose) = if t.pr_url.trim().is_empty() {
+        (
+            "Review the changes this branch makes versus its base. If a working-diff review skill \
+             such as `/code-review` is available, use it; otherwise review the branch diff directly. \
+             Do NOT use the `/review` skill — there is no pull request for this branch yet."
+                .to_string(),
+            " This is a pre-PR sanity check for the human before they open a PR.".to_string(),
+        )
+    } else {
+        (
+            format!(
+                "Run the `/review` skill on this branch's open pull request ({}). If that skill is \
+                 unavailable, review the branch diff versus its base directly.",
+                t.pr_url.trim()
+            ),
+            " This re-review checks the latest changes on the open PR.".to_string(),
+        )
+    };
     format!(
-        "Run the `/review` skill on the changes this branch makes versus its base. Review against \
-         the ticket's intent below, and produce a concise, prioritised list of concerns \
-         (correctness, edge cases, missing tests, scope creep) and any concrete fixes you'd \
-         suggest — this is a pre-PR sanity check for the human.\n\n\
+        "{lead} Review against the ticket's intent below, and produce a concise, prioritised list \
+         of concerns (correctness, edge cases, missing tests, scope creep) and any concrete fixes \
+         you'd suggest.{purpose}\n\n\
          {scope}\
          You are in plan mode (read-only): read files and run non-mutating commands (e.g. the test \
          suite, a type-check) to verify your claims — these run without asking, so investigate \
@@ -1610,6 +1634,54 @@ mod tests {
             Some(&"sess-123".to_string())
         );
         assert_eq!(r.last().unwrap(), "go");
+    }
+
+    #[test]
+    fn review_prompt_pre_pr_avoids_pr_skill() {
+        // No PR yet → review the branch diff, prefer a working-diff skill, and never invoke `/review`.
+        let t = ticket("must pass CI");
+        assert!(t.pr_url.is_empty());
+        let out = render_review_prompt(&t, None);
+        assert!(
+            out.contains("/code-review"),
+            "should prefer the working-diff skill: {out}"
+        );
+        assert!(
+            out.contains("Do NOT use the `/review` skill"),
+            "should steer away from the PR skill pre-PR: {out}"
+        );
+        assert!(!out.contains("Run the `/review` skill"));
+        assert!(out.contains("pre-PR sanity check"));
+        // Shared scaffolding still present.
+        assert!(out.contains("ExitPlanMode"));
+        assert!(out.contains("must pass CI"));
+    }
+
+    #[test]
+    fn review_prompt_post_pr_uses_pr_skill_with_url() {
+        // A PR exists → run `/review` on it, and thread the PR URL through for context.
+        let mut t = ticket("must pass CI");
+        t.pr_url = "https://github.com/o/r/pull/42".into();
+        let out = render_review_prompt(&t, None);
+        assert!(
+            out.contains("Run the `/review` skill on this branch's open pull request"),
+            "should invoke the PR skill post-PR: {out}"
+        );
+        assert!(out.contains("https://github.com/o/r/pull/42"));
+        assert!(!out.contains("Do NOT use the `/review` skill"));
+        assert!(out.contains("re-review checks the latest changes"));
+        assert!(out.contains("ExitPlanMode"));
+    }
+
+    #[test]
+    fn review_prompt_incremental_scope_carries_across_both_variants() {
+        // The "only the delta since <sha>" focus applies whether or not a PR exists.
+        let pre = render_review_prompt(&ticket(""), Some("abc123"));
+        assert!(pre.contains("git diff abc123..HEAD"));
+        let mut t = ticket("");
+        t.pr_url = "https://github.com/o/r/pull/7".into();
+        let post = render_review_prompt(&t, Some("abc123"));
+        assert!(post.contains("git diff abc123..HEAD"));
     }
 
     #[test]
