@@ -144,8 +144,10 @@ target/debug/harmony start <ticket_id>   # creates worktree, injects hooks, spaw
       GUI apps that omit `/opt/homebrew/bin`) + `install_via_brew()`. CLI: `harmony jira
       install`. App: Connect panel detects "not installed" → shows brew commands + an
       "Install with Homebrew" button + manual-install link.
-- [x] **PR/gh** (`core/src/github.rs`): `push_branch` + `gh pr create --draft`
-      (body from spec), capture PR URL → ticket → In Review + Jira writeback.
+- [x] **PR/gh** (`core/src/github.rs`): `push_branch` + `gh pr create` (ready for review — reaching
+      "In PR Review" is the hand-off to the team; body from spec + optional Claude summary), capture
+      PR URL/number/state → ticket → In Review + Jira writeback. Also draft↔ready toggling, conflict
+      resolve, and gated squash-merge.
 - [x] **Draft from Jira** (`core/src/draft.rs`): one-shot `claude -p` over the Jira
       summary+description → editable spec; saved to `ticket.spec` (promotes → ready).
 - [x] **CLI**: `jira config`, `jira sync`, `draft <id>`, `pr <id>`.
@@ -258,21 +260,49 @@ npm run tauri dev                # launches the desktop window (vite + Tauri)
 ```
 Uses the same `~/.harmony/harmony.db` and hook server (:8787) as the CLI.
 
-## Phase 4 — Polish / hardening
+## Phase 4 — Polish / hardening — ⏳ PARTIAL
 - [ ] Soft "N running" concurrency indicator (no hard cap).
-- [ ] Worktree GC (offer cleanup on PR merged/closed; manual "remove").
-- [ ] Secret handling review (tokens in keychain, never logged).
-- [ ] Error/edge states: session crash, `gh`/Jira failures, dirty worktree, network loss.
+- [x] Worktree GC — a merged/closed PR advances the ticket to **Done** and cleans up its worktree
+      (`poll_pr_state_once`, `Move(Done)` → `DeleteWorktree`); manual delete in the Worktrees view.
+- [ ] Secret handling review (tokens in keychain, never logged). _(Jira auth is owned by `acli`; no
+      secrets stored in harmony — but a formal log audit is still pending.)_
+- [~] Error/edge states: session crash (badge + auto-restart), dirty worktree (confirm), stale
+      session/question/drafting cleared on startup, a UI **ErrorBoundary**, and the **action log**
+      keeping idempotency consistent across restarts. `gh`/Jira/network failures are still partly
+      log-and-continue (see `BACKLOG.md` #6).
+
+---
+
+## Phase 5 — Autonomy & orchestration — ⏳ SHIPPING (much of the former "v2")
+The long-running **autonomous loop** and its supporting machinery landed after the v1 UI. All of it
+is driven off the pure state machine (`core/src/flow.rs`, generated `docs/flow.md`) via a 60s poll
+loop that *observes* state and *injects* the events a human would.
+- [x] **State machine + generated docs** — `flow::decide`, `flow_doc`, CI drift-check (`docs/flow.md`).
+- [x] **Self-correcting review loop** — LLM judge → auto-fix → re-review, capped + escalates
+      (`core/src/review.rs`, `poll_review_loop_once`).
+- [x] **Proof-of-work** — evidence capture after review, Proof tab + PR comment (`core/src/proof.rs`).
+- [x] **Immutable action log** — `ticket_actions`, the durable idempotency source of truth
+      (proof/review/judge/ci/conflict/reverify), survives restarts.
+- [x] **Auto-resolve PR conflicts** — `poll_conflicts_once`, capped + escalates.
+- [x] **Gated auto-merge + bidirectional PR↔ticket sync** — `poll_auto_merge_once`,
+      `poll_pr_state_once`; "↗ PR" button + persisted PR snapshot.
+- [x] **Smarter loops** — return-to-furthest-stage + proportional re-verification (hybrid heuristic +
+      LLM triage) + incremental review (`core/src/reverify.rs`, `poll_reverify_once`).
+- [x] **Stuck-session watchdog + restart recovery** — `poll_stuck_sessions_once`,
+      `classify_restart_sessions` (resume mid-work / recover finished / drop).
+- [x] **Orchestrator coordinator + tab** — restart crashed sessions, answer derivable questions,
+      accept low-risk spec proposals, escalate; live status + persistent decision feed.
 
 ---
 
 ## Deferred to v2 (tracked, not built)
 Native permission **triage UI** · tmux/daemon persistence for unattended runs · shared
-**team backend** · JQL/board scope + pull-by-key · live **MCP tools** for the running
-agent · cascade/auto-merge. Plus the Symphony-inspired orchestration items: **orchestrator
-loop + state machine**, **retry/backoff + reconciliation**, **observability (token
-accounting + HTTP API)**, and **`WORKFLOW.md` + workspace lifecycle hooks**. `BACKLOG.md`
-(Later tier + § "Symphony delta") is the source of truth for all of these.
+**team backend** · JQL/board scope + pull-by-key · live **MCP tools** for the running agent.
+From the Symphony-inspired set, the remaining gaps are: fully-autonomous **candidate dispatch**
+(priority sort, `blocked_by`, labels, `Todo → In Progress` — kept human-only by design), a formal
+**retry queue** (continuation-vs-failure backoff), **observability** (token accounting + `/api/v1`
+HTTP API), and **`WORKFLOW.md` + workspace lifecycle hooks**. `BACKLOG.md` (Later tier + § "Symphony
+delta") is the source of truth, with per-item ✅/⏳ status.
 
 ## Risk register
 See `DESIGN.md` → "Sharp edges / risks". The dominant one (interactive hooks) is retired
@@ -282,5 +312,7 @@ fidelity, draft-from-Jira cost) are addressed in their respective phases.
 ---
 
 ## Immediate next action
-**Run Task 0.1.** Nothing else should be built until the hook side-channel is proven on
-this machine with the installed Claude Code version.
+Phases 0–3 are done and the autonomy loop (Phase 5) is largely shipped. The live edges are the
+remaining **Phase 4 hardening** (surface `gh`/Jira/network failures as first-class states; secret/log
+audit; soft concurrency indicator) and the tracked **v2** items above. `BACKLOG.md` holds the
+prioritized, per-item status.

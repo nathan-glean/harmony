@@ -55,12 +55,19 @@ Tauri desktop app (single process)
 ```
 
 ### Ticket lifecycle state machine
-The board's behaviour — which column a ticket lands in and what side effects run — is a single pure
-decision function, `flow::decide` (`core/src/flow.rs`), driven by one shared executor
-(`core/src/executor.rs`) from both the Tauri app and the headless CLI. Its contract is pinned by
+The board's behaviour — which column a ticket lands in and what side effects (`Action`s) run — is a
+single pure decision function, `flow::decide` (`core/src/flow.rs`), driven by one executor
+(`apply_event`/`run_action` in `app/src-tauri/src/lib.rs`) that every event source funnels through
+(board drags, session/hook completion events, and the poll loop). Its contract is pinned by
 `core/tests/flow.rs`, and a **generated diagram + transition table** lives at
 [`docs/flow.md`](docs/flow.md) — rendered from `decide` itself (`task flow:doc`) and drift-checked in
 CI, so it always matches the code.
+
+**Idempotency — the action log.** An append-only `ticket_actions` table (`store::record_state_action`
+/ `has_action_at`) is the single durable source of truth for "have we already done this at this commit?"
+— each autonomous step (proof / review / judge / ci-triage / conflict / reverify) is stamped with the
+branch HEAD it acted on. Because it persists, nothing autonomous is redone after an app restart at an
+unchanged HEAD, and the same log powers the Orchestrator tab's audit feed.
 
 ### Autonomous drivers (the long-running loop)
 The state machine is event-driven and pure; the **autonomy** lives in a 60s background poll loop
@@ -74,12 +81,32 @@ a human would, so the board drives itself with `flow::decide` still authoritativ
   fix session seeded with the findings → the fix commits → HEAD moves → re-review → re-judge, until
   clean or `MAX_REVIEW_FIX_ATTEMPTS` (then a desktop **escalation** notification). Pre-PR only; a
   clean verdict rests in "For Your Review" for the human to open the PR. [`review_loop`, default off]
+- `poll_reverify_once` — **proportional re-verification**: before the review/proof passes, decide once
+  per new HEAD whether the delta since the last verified commit actually needs a fresh review and/or
+  proof (hybrid: an LLM-free heuristic for docs/format-only, else a cheap `claude -p` triage that
+  flags behaviour-changing edits). Trivial deltas carry the prior verification forward (via the action
+  log) so a one-line fix doesn't re-trigger a full review + proof. [`core/src/reverify.rs`]
+- `poll_proof_loop_once` — after review passes, capture **proof-of-work** (walkthrough/screenshots/
+  grounded report) once per reviewed HEAD, surfaced in the Proof tab + posted as a PR comment.
+  [`proof`, default on; `core/src/proof.rs`]
+- `poll_conflicts_once` — when a PR is conflicting, spawn an autonomous rebase/resolve session (capped,
+  then escalates).
 - `poll_auto_merge_once` — when a PR is approved on GitHub (`reviewDecision == APPROVED`) **and** CI
   is green, inject `Move(Done)` so `decide` merges + cleans up. The agent never self-approves.
   [`auto_merge`, default off — the one irreversible, outward-facing step]
+- `poll_pr_state_once` — **bidirectional PR↔ticket sync**: a PR merged/closed on GitHub → ticket Done;
+  reopened → back to In PR Review; keeps the persisted PR snapshot fresh.
+- `poll_stuck_sessions_once` — **watchdog**: a finished-but-stuck session (missed completion hook)
+  detected from its idle transcript re-fires the completion event; a genuinely hung one escalates.
+- `poll_orchestrator_once` — the **coordinator**: restart crashed working sessions (capped), answer
+  derivable worker questions, accept low-risk spec proposals, escalate the rest. [`orchestrator`, off]
 
-The judge is fingerprinted by HEAD (`judged_sha`) so it runs once per reviewed change, not per poll.
-The generated [`docs/flow.md`](docs/flow.md) covers the underlying transitions these drivers trigger.
+The judge and the other autonomous steps are fingerprinted by HEAD in the **action log** so each runs
+once per reviewed change, not per poll — and not again after a restart. Smarter loops also mean a
+re-worked ticket returns to the **furthest stage** it had reached (e.g. straight back to In PR Review),
+not always through Human Review. On **relaunch**, still-open sessions are classified from their
+transcript (resume genuinely mid-work / recover a finished one without resuming / drop the rest) rather
+than naively resumed. The generated [`docs/flow.md`](docs/flow.md) covers the underlying transitions.
 
 **Activity status.** A pure classifier (`core/src/activity.rs`, a sibling of `flow::decide`/`warnings`)
 turns the same facts + settings into a single per-ticket `Activity { category, label }` — *Working*
@@ -110,13 +137,22 @@ the UI renders it as the per-card pill + modal detail.
 - **Frontend: React + TypeScript** (Vite) with `xterm.js` for embedded terminals. _(confirmed)_
 - Concurrency: soft "N running" indicator, no hard cap (self-limiting under supervision).
 
+## Shipped since v1 (was "deferred")
+The autonomous loop and its supporting machinery have landed — see "Autonomous drivers" above and
+`BACKLOG.md` for per-item status: the **state machine + generated docs**, **self-correcting review
+loop**, **proof-of-work**, the **immutable action log** (idempotency across restarts), **auto-resolve
+PR conflicts**, **gated auto-merge + bidirectional PR↔ticket sync** ("↗ PR" button + persisted PR
+snapshot), **smarter loops** (return-to-furthest-stage + proportional re-verification + incremental
+review), the **stuck-session watchdog + restart recovery**, and the **orchestrator coordinator + tab**.
+
 ## Deferred to v2
 - Native approve/deny **permission triage UI** (intercept via PermissionRequest/PreToolUse HTTP hooks).
 - **tmux / daemon** persistence for long unattended autonomous runs that outlive the window.
 - Shared **team backend** (coordination, who's-on-what, team board).
 - JQL / board-based Jira scope beyond assigned-to-me; pull arbitrary issue by key.
 - Giving the running agent **live MCP tools** for Jira/ticket context or progress posting.
-- Cascade/auto-merge.
+- Fully-autonomous **candidate dispatch** (priority sort, `blocked_by`, `Todo → In Progress`) — kept
+  human-only by design today — plus a formal retry queue and token/rate-limit **observability**.
 
 ## Sharp edges / risks
 1. **Auth quota**: concurrent interactive sessions share one subscription login's quota.
@@ -147,4 +183,3 @@ the UI renders it as the per-card pill + modal detail.
 5. **Jira transitions**: status names/IDs vary per project workflow — writeback must
    discover valid transitions per issue via the API, not hardcode names.
 6. **"Draft from Jira"** repo scan adds latency/cost; keep it optional and bounded.
-```

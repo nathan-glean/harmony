@@ -4,6 +4,23 @@ A desktop board that runs Claude Code sessions to implement tickets, with an aut
 state-machine loop (grill → implement → review → PR → merge). Tauri v2 app: Rust core +
 React/Vite frontend.
 
+## What it does
+
+- **Board → session per ticket.** Todo → In Progress → For Your Review → In PR Review → Done. Each
+  ticket runs an isolated, supervised Claude Code session in its own git worktree; drag to move.
+- **Jira & GitHub, both ways.** Syncs assigned Jira issues (via `acli`), drafts a spec from the issue,
+  and writes status back on column moves. Opens a PR ready for review (via `gh`), and keeps the ticket
+  and PR in step both directions — PR merged/closed → Done, reopened → In PR Review — with an "↗ PR"
+  button and inline diff/checks.
+- **Autonomous loop.** A background loop drives the board off a pure state machine: re-review on new
+  commits, a self-correcting review judge → auto-fix, proof-of-work capture, CI-failure auto-fix,
+  merge-conflict resolution, and gated auto-merge — all idempotent via a durable action log so nothing
+  is redone after a restart.
+- **Smart about loops & restarts.** Re-work returns to the furthest stage it reached; trivial changes
+  skip a full re-review/re-proof; and on relaunch finished sessions are recovered (not naively resumed).
+- **Supervised-first.** Every autonomous step is opt-in and capped; you watch and steer in an embedded
+  terminal, with proof, diff, review and PR tabs per ticket.
+
 ## Install (macOS, Apple Silicon)
 
 1. Download the latest **`harmony_*_aarch64.dmg`** from the
