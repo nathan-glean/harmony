@@ -1713,6 +1713,90 @@ fn parse_pending_question(json: &str) -> Option<(String, Vec<String>, bool)> {
     Some((question, options, multi))
 }
 
+/// Decide, on startup, what to do with each ticket that had an open session when the app last closed —
+/// instead of naively resuming them all with "continue" (which re-runs work that was actually done,
+/// e.g. a finished review just waiting for the human). Reads each session's last transcript state:
+///
+/// - **Interactive work session, genuinely mid-turn** (`kind == "work"`, transcript `Working` or not
+///   started) → **resume**: the user can keep steering where they left off.
+/// - **Any session whose turn `Finished`** (for a review, only if it actually presented its verdict) →
+///   **recover**: re-fire its completion event (advances the flow / backfills the review) WITHOUT
+///   resuming Claude, so the finished work isn't redone.
+/// - **Everything else** (waiting on a question, a partial review, or an interrupted autonomous
+///   review/proof/fix session) → **drop**: don't resume; the always-on pollers re-drive autonomous
+///   work idempotently, and a stale question was already cleared.
+///
+/// Returns `(resume_ticket_ids, recover)` where `recover` is `(ticket_id, session_kind)`.
+async fn classify_restart_sessions(store: &Store) -> (Vec<i64>, Vec<(i64, String)>) {
+    let mut resume: Vec<i64> = Vec::new();
+    let mut recover: Vec<(i64, String)> = Vec::new();
+    for tid in store.tickets_with_open_session().await.unwrap_or_default() {
+        let kind = store
+            .active_session_kind_for_ticket(tid)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "work".to_string());
+        let transcript = store
+            .latest_transcript_path_for_ticket(tid)
+            .await
+            .ok()
+            .flatten();
+        // Classify the last turn from the transcript (blocking file reads — fine at startup).
+        let turn = match transcript.as_deref() {
+            Some(p) => harmony_core::session::transcript_turn_state(p),
+            None => harmony_core::session::TurnState::Working, // nothing recorded yet
+        };
+        let presented = matches!(turn, harmony_core::session::TurnState::Finished)
+            && kind == "review"
+            && transcript
+                .as_deref()
+                .map(harmony_core::session::transcript_presented_plan)
+                .unwrap_or(false);
+        match restart_action(&kind, turn, presented) {
+            RestartAction::Resume => resume.push(tid),
+            RestartAction::Recover => recover.push((tid, kind)),
+            RestartAction::Drop => {}
+        }
+    }
+    (resume, recover)
+}
+
+/// What to do with a still-open session on restart, given its kind + last transcript turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestartAction {
+    /// Reattach and let the user keep steering (interactive work, genuinely mid-turn).
+    Resume,
+    /// Re-fire the completion event (finished work) — no Claude resume.
+    Recover,
+    /// Neither — the pollers re-drive autonomous work, and a stale question was cleared.
+    Drop,
+}
+
+/// Pure restart decision (the testable core of [`classify_restart_sessions`]). `presented` is only
+/// meaningful for a finished `review` (whether it actually presented its verdict).
+fn restart_action(
+    kind: &str,
+    turn: harmony_core::session::TurnState,
+    presented: bool,
+) -> RestartAction {
+    use harmony_core::session::TurnState;
+    match turn {
+        // Finished → recover, except a review that never presented its verdict (partial → leave it).
+        TurnState::Finished => {
+            if kind == "review" && !presented {
+                RestartAction::Drop
+            } else {
+                RestartAction::Recover
+            }
+        }
+        // Only the interactive work session is resumed; a work session waiting on a question isn't
+        // auto-continued, and interrupted autonomous sessions are left to the pollers.
+        TurnState::Working if kind == "work" => RestartAction::Resume,
+        _ => RestartAction::Drop,
+    }
+}
+
 /// The domain event a finished session of `kind` should fire — the same mapping the `Stop` hook uses
 /// (`core/src/hooks.rs`). Returned so the watchdog can re-fire a missed completion.
 fn finish_event_for_kind(kind: &str) -> Event {
@@ -3841,9 +3925,10 @@ pub fn run() {
                 let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
                 let db = format!("{home}/.harmony/harmony.db");
                 let store = Store::open(&db).await.expect("open store");
-                // Capture which tickets were live before the (dead) sessions are reconciled
-                // — the UI reattaches these on launch.
-                let reattach = store.tickets_with_open_session().await.unwrap_or_default();
+                // Work out what each still-open session was actually doing before the restart, from
+                // its transcript: resume only genuinely mid-work interactive sessions; the rest are
+                // recovered (finished → re-fire completion) or dropped — never naively "continue"d.
+                let (reattach, recover) = classify_restart_sessions(&store).await;
                 // Sessions don't survive a process restart (PTYs are our children), so
                 // any still-open session in the DB is a zombie — mark it ended.
                 let _ = store.end_all_open_sessions().await;
@@ -3868,6 +3953,21 @@ pub fn run() {
                     watchdog_fired: Arc::new(Mutex::new(HashSet::new())),
                     orchestrator_status: Arc::new(Mutex::new(OrchestratorStatus::default())),
                 });
+                // Recover sessions that had already finished before the restart: re-fire the
+                // completion event the missed Stop would have (advances the flow / backfills a
+                // review's text) WITHOUT resuming Claude. Done inline before the pollers start so a
+                // recovered review is marked current before `poll_reviews_once` could re-review it.
+                {
+                    let state = handle.state::<AppState>();
+                    for (tid, kind) in recover {
+                        let event = finish_event_for_kind(&kind);
+                        eprintln!("[restart] #{tid} finished before restart ({kind}) → {event:?} (no resume)");
+                        if let Err(e) = apply_event(&handle, &state, tid, event, false).await {
+                            eprintln!("[restart] recover {event:?} for #{tid} failed: {e}");
+                        }
+                    }
+                }
+
                 // Consume system events and drive the flow executor (auto-advance).
                 let ev_handle = handle.clone();
                 tauri::async_runtime::spawn(async move {
@@ -4042,6 +4142,53 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use harmony_core::session::TurnState;
+
+    #[test]
+    fn restart_resumes_only_midwork_work_sessions() {
+        // Interactive work, genuinely mid-turn → resume.
+        assert_eq!(
+            restart_action("work", TurnState::Working, false),
+            RestartAction::Resume
+        );
+        // A work session waiting on a question is NOT auto-continued.
+        assert_eq!(
+            restart_action("work", TurnState::WaitingOnQuestion, false),
+            RestartAction::Drop
+        );
+        // Interrupted autonomous sessions aren't resumed (the pollers re-drive them).
+        assert_eq!(
+            restart_action("review", TurnState::Working, false),
+            RestartAction::Drop
+        );
+        assert_eq!(
+            restart_action("proof", TurnState::Working, false),
+            RestartAction::Drop
+        );
+    }
+
+    #[test]
+    fn restart_recovers_finished_sessions_without_resuming() {
+        // A finished review that presented its verdict → recover (re-fire ReviewFinished), not resume.
+        assert_eq!(
+            restart_action("review", TurnState::Finished, true),
+            RestartAction::Recover
+        );
+        // A finished review that never presented a verdict (partial) → leave it for the human.
+        assert_eq!(
+            restart_action("review", TurnState::Finished, false),
+            RestartAction::Drop
+        );
+        // Other finished kinds recover regardless of `presented`.
+        assert_eq!(
+            restart_action("work", TurnState::Finished, false),
+            RestartAction::Recover
+        );
+        assert_eq!(
+            restart_action("proof", TurnState::Finished, false),
+            RestartAction::Recover
+        );
+    }
 
     #[test]
     fn passes_through_plain_ascii() {
